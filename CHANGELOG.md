@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.3] - 2026-08-17
+
+### Improved
+
+- Redesign ASMR video and audio expanded playback views with visible media context and loading states.
+- Preload the ASMR HLS engine and first author media resolver without adding work to the Guangya startup path.
+- Add left-swipe exit for expanded ASMR video playback while preserving native controls and right-swipe behavior.
+
 ## [1.1.2] - 2026-08-17
 
 ### Fixed

@@ -5,7 +5,6 @@ import {
   Library,
   LoaderCircle,
   Maximize2,
-  Minimize2,
   Pause,
   Play,
   Search,
@@ -43,6 +42,19 @@ type AsmrLibraryProps = {
 };
 
 type KindFilter = "all" | "video" | "audio";
+
+type HlsConstructor = typeof import("hls.js").default;
+
+let hlsEnginePromise: Promise<HlsConstructor> | null = null;
+
+function preloadHlsEngine(): Promise<HlsConstructor> {
+  hlsEnginePromise ??= import("hls.js").then(({ default: Hls }) => Hls);
+  return hlsEnginePromise;
+}
+
+function primeAsmrItem(item: AsmrItem): void {
+  if (item.format.toLowerCase() === "m3u8") void preloadHlsEngine();
+}
 
 export default function AsmrLibrary({
   positions,
@@ -107,6 +119,13 @@ export default function AsmrLibrary({
     }).finally(() => setLoading(false));
     return () => controller.abort();
   }, [itemsRequestKey, onUnauthorized, selectedAuthor]);
+
+  useEffect(() => {
+    const firstHlsItem = items.find((item) => item.format.toLowerCase() === "m3u8");
+    if (!firstHlsItem) return;
+    const timer = window.setTimeout(() => primeAsmrItem(firstHlsItem), 280);
+    return () => window.clearTimeout(timer);
+  }, [items]);
 
   const recordProgress = useCallback((videoId: number, rawTime: number, duration: number) => {
     const time = duration - rawTime <= 3 || rawTime / duration >= 0.97
@@ -210,7 +229,7 @@ export default function AsmrLibrary({
                 ["video", "视频"],
                 ["audio", "音频"],
               ] as const).map(([value, label]) => (
-                <button
+                  <button
                   key={value}
                   type="button"
                   role="tab"
@@ -227,10 +246,11 @@ export default function AsmrLibrary({
                 const saved = localPositions[String(item.id)];
                 const shownDuration = item.duration ?? saved?.duration;
                 return (
-                  <button
+                <button
                     key={item.id}
                     className={current?.id === item.id ? "is-playing" : ""}
                     type="button"
+                    onPointerDown={() => primeAsmrItem(item)}
                     onClick={() => playItem(item)}
                   >
                     <span className="media-kind" aria-hidden="true"><Icon size={19} /></span>
@@ -327,6 +347,13 @@ type AsmrPlayerProps = {
   onProgress: (videoId: number, time: number, duration: number) => void;
 };
 
+type PlayerSwipe = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  axis: "pending" | "left" | "right" | "cancelled";
+};
+
 function AsmrPlayer({
   item,
   expanded,
@@ -336,6 +363,7 @@ function AsmrPlayer({
   onProgress,
 }: AsmrPlayerProps) {
   const mediaRef = useRef<HTMLMediaElement | null>(null);
+  const swipeRef = useRef<PlayerSwipe | null>(null);
   const currentTimeRef = useRef(initialTime);
   const durationRef = useRef(item.duration ?? 0);
   const restoredRef = useRef(false);
@@ -347,6 +375,9 @@ function AsmrPlayer({
   const [currentTime, setCurrentTime] = useState(initialTime);
   const [duration, setDuration] = useState(item.duration ?? 0);
   const [detectedKind, setDetectedKind] = useState(item.kind);
+  const [metadataReady, setMetadataReady] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [swipeOffset, setSwipeOffset] = useState(0);
 
   const saveProgress = useCallback(() => {
     if (durationRef.current > 0) {
@@ -365,41 +396,53 @@ function AsmrPlayer({
     let cancelled = false;
     setBuffering(true);
     setFailed(false);
+    setPaused(true);
+    setMetadataReady(false);
+    setStarted(false);
+    setSwipeOffset(0);
     restoredRef.current = false;
 
     const attachSource = async () => {
-      if (item.format.toLowerCase() === "m3u8") {
-        const { default: Hls } = await import("hls.js");
-        if (cancelled) return;
-        if (Hls.isSupported()) {
-          hls = new Hls({
-            enableWorker: true,
-            maxBufferLength: 24,
-            backBufferLength: 30,
-            startFragPrefetch: true,
-          });
-          hls.loadSource(source);
-          hls.attachMedia(media);
-          hls.on(Hls.Events.ERROR, (_, data) => {
-            if (!data.fatal) return;
-            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-              hls?.recoverMediaError();
-            } else if (attempt < 2) {
-              setAttempt((value) => value + 1);
-            } else {
-              setBuffering(false);
-              setFailed(true);
-            }
-          });
+      try {
+        media.preload = "auto";
+        if (item.format.toLowerCase() === "m3u8") {
+          const Hls = await preloadHlsEngine();
+          if (cancelled) return;
+          if (Hls.isSupported()) {
+            hls = new Hls({
+              enableWorker: true,
+              maxBufferLength: 18,
+              backBufferLength: 24,
+              startFragPrefetch: true,
+            });
+            hls.on(Hls.Events.ERROR, (_, data) => {
+              if (!data.fatal) return;
+              if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                hls?.recoverMediaError();
+              } else if (attempt < 2) {
+                setAttempt((value) => value + 1);
+              } else {
+                setBuffering(false);
+                setFailed(true);
+              }
+            });
+            hls.loadSource(source);
+            hls.attachMedia(media);
+          } else {
+            media.src = source;
+            media.load();
+          }
         } else {
           media.src = source;
           media.load();
         }
-      } else {
-        media.src = source;
-        media.load();
+        if (!cancelled) void media.play().catch(() => setPaused(true));
+      } catch {
+        if (!cancelled) {
+          setBuffering(false);
+          setFailed(true);
+        }
       }
-      void media.play().catch(() => setPaused(true));
     };
     void attachSource();
     return () => {
@@ -440,6 +483,62 @@ function AsmrPlayer({
     else media.pause();
   };
 
+  const handleSwipeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!expanded || detectedKind !== "video") return;
+    if ((event.target as HTMLElement).closest("button, input")) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    // Native video controls occupy the lower edge on Android; leave that area to the browser.
+    if (event.clientY >= bounds.bottom - 92) return;
+    swipeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      axis: "pending",
+    };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort in embedded Android webviews.
+    }
+  };
+
+  const handleSwipeMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const swipe = swipeRef.current;
+    if (!swipe || swipe.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - swipe.startX;
+    const deltaY = event.clientY - swipe.startY;
+    const absoluteX = Math.abs(deltaX);
+    const absoluteY = Math.abs(deltaY);
+    if (swipe.axis === "pending") {
+      if (Math.max(absoluteX, absoluteY) < 12) return;
+      if (absoluteX <= absoluteY * 1.15) {
+        swipe.axis = "cancelled";
+        return;
+      }
+      swipe.axis = deltaX < 0 ? "left" : "right";
+    }
+    if (swipe.axis !== "left") return;
+    event.preventDefault();
+    setSwipeOffset(Math.max(-132, Math.min(0, deltaX)));
+  };
+
+  const handleSwipeEnd = (event: React.PointerEvent<HTMLDivElement>, cancelled: boolean) => {
+    const swipe = swipeRef.current;
+    if (!swipe || swipe.pointerId !== event.pointerId) return;
+    swipeRef.current = null;
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // The browser may release capture before pointerup is delivered.
+    }
+    const distance = swipe.startX - event.clientX;
+    const shouldClose = !cancelled && swipe.axis === "left" && distance >= 72;
+    setSwipeOffset(0);
+    if (shouldClose) onExpandedChange(false);
+  };
+
   const loadedMetadata = () => {
     const media = mediaRef.current;
     if (!media) return;
@@ -449,6 +548,7 @@ function AsmrPlayer({
     durationRef.current = nextDuration;
     setDuration(nextDuration);
     setDetectedKind(nextKind);
+    setMetadataReady(true);
     if (!restoredRef.current && initialTime > 1 && initialTime < nextDuration - 3) {
       restoredRef.current = true;
       media.currentTime = initialTime;
@@ -479,23 +579,46 @@ function AsmrPlayer({
   };
 
   const MediaElement = item.kind === "audio" ? "audio" : "video";
+  const KindIcon = detectedKind === "audio" ? Headphones : Video;
+  const kindLabel = detectedKind === "audio" ? "音频" : "视频";
   return (
     <aside
       className={`asmr-player${expanded ? " is-expanded" : ""}${detectedKind === "audio" ? " is-audio" : ""}`}
       role={expanded ? "dialog" : "complementary"}
       aria-modal={expanded || undefined}
       aria-label={`${item.title} 播放器`}
+      style={{ "--swipe-offset": `${swipeOffset}px` } as React.CSSProperties}
     >
-      <div className="asmr-player-media">
+      {expanded && (
+        <div className="player-header">
+          <div className="player-heading">
+            <span className="player-kicker"><KindIcon size={14} aria-hidden="true" />{kindLabel} · {item.format.toUpperCase()}</span>
+            <strong>{item.title}</strong>
+            <span>{item.author}</span>
+          </div>
+          <button className="icon-button player-close" type="button" aria-label="关闭播放器" onClick={() => onExpandedChange(false)}>
+            <X size={20} aria-hidden="true" />
+          </button>
+        </div>
+      )}
+
+      <div
+        className="asmr-player-media"
+        onPointerDown={handleSwipeStart}
+        onPointerMove={handleSwipeMove}
+        onPointerUp={(event) => handleSwipeEnd(event, false)}
+        onPointerCancel={(event) => handleSwipeEnd(event, true)}
+      >
         <MediaElement
           ref={(node) => { mediaRef.current = node; }}
           playsInline
+          preload="auto"
           poster={item.posterUrl ?? undefined}
           controls={expanded && detectedKind === "video"}
           onLoadedMetadata={loadedMetadata}
           onDurationChange={loadedMetadata}
           onTimeUpdate={timeUpdated}
-          onPlaying={() => { setPaused(false); setBuffering(false); }}
+          onPlaying={() => { setPaused(false); setStarted(true); setBuffering(false); }}
           onPause={() => { setPaused(true); saveProgress(); }}
           onWaiting={() => setBuffering(true)}
           onCanPlay={() => setBuffering(false)}
@@ -507,39 +630,63 @@ function AsmrPlayer({
         />
         {detectedKind === "audio" && (
           <div className="audio-stage" aria-hidden="true">
-            <Headphones size={38} />
+            <div className="audio-stage-content">
+              <span className="audio-stage-icon"><Headphones size={34} /></span>
+              <strong>{item.title}</strong>
+              <span>{item.author} · {item.format.toUpperCase()}</span>
+            </div>
+          </div>
+        )}
+        {detectedKind === "video" && !started && !failed && (
+          <div className="media-placeholder" aria-hidden="true">
+            <Video size={42} />
+          </div>
+        )}
+        {!failed && (buffering || !metadataReady) && (
+          <div className="player-loading" role="status">
+            <LoaderCircle className="spinner" size={24} aria-hidden="true" />
+            <span>{metadataReady ? "正在准备播放" : "正在连接媒体"}</span>
           </div>
         )}
       </div>
 
-      <button
-        className="mini-player-copy"
-        type="button"
-        aria-label={`展开 ${item.title}`}
-        onClick={() => onExpandedChange(true)}
-      >
-        <strong>{item.title}</strong>
-        <span>{item.author} · {formatTime(currentTime)} / {formatTime(duration)}</span>
-      </button>
+      {!expanded && (
+        <>
+          <button
+            className="mini-player-copy"
+            type="button"
+            aria-label={`展开 ${item.title}`}
+            onClick={() => onExpandedChange(true)}
+          >
+            <strong>{item.title}</strong>
+            <span>{item.author} · {formatTime(currentTime)} / {formatTime(duration)}</span>
+          </button>
 
-      <div className="mini-player-actions">
-        <button className="icon-button" type="button" aria-label={paused ? "播放" : "暂停"} onClick={togglePlayback}>
-          {buffering && !failed
-            ? <LoaderCircle className="spinner" size={20} aria-hidden="true" />
-            : paused ? <Play size={20} aria-hidden="true" /> : <Pause size={20} aria-hidden="true" />}
-        </button>
-        <button
-          className="icon-button player-expand"
-          type="button"
-          aria-label={expanded ? "收起播放器" : "展开播放器"}
-          onClick={() => onExpandedChange(!expanded)}
-        >
-          {expanded ? <Minimize2 size={20} aria-hidden="true" /> : <Maximize2 size={20} aria-hidden="true" />}
-        </button>
-        <button className="icon-button player-close" type="button" aria-label="关闭播放器" onClick={onClose}>
-          <X size={20} aria-hidden="true" />
-        </button>
-      </div>
+          <div className="mini-player-actions">
+            <button className="icon-button" type="button" aria-label={paused ? "播放" : "暂停"} onClick={togglePlayback}>
+              {buffering && !failed
+                ? <LoaderCircle className="spinner" size={20} aria-hidden="true" />
+                : paused ? <Play size={20} aria-hidden="true" /> : <Pause size={20} aria-hidden="true" />}
+            </button>
+            <button className="icon-button player-expand" type="button" aria-label="展开播放器" onClick={() => onExpandedChange(true)}>
+              <Maximize2 size={20} aria-hidden="true" />
+            </button>
+            <button className="icon-button player-close" type="button" aria-label="关闭播放器" onClick={onClose}>
+              <X size={20} aria-hidden="true" />
+            </button>
+          </div>
+        </>
+      )}
+
+      {expanded && (
+        <div className="expanded-player-info">
+          <div className="expanded-player-copy">
+            <strong>{item.title}</strong>
+            <span>{item.author}</span>
+          </div>
+          <span className="expanded-player-time">{formatTime(currentTime)} / {formatTime(duration)}</span>
+        </div>
+      )}
 
       {expanded && detectedKind === "audio" && (
         <div className="audio-controls">

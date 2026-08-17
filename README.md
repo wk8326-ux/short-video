@@ -26,7 +26,7 @@ Fast Start checks are manual and read at most the first 256 KiB of each MP4-fami
 
 Guangya duration classification runs in the background using small MP4 range reads. Each scan checks at most 30 pending files, largest first; browser metadata is also reported after successful playback. Existing files without known duration temporarily remain in the short-video feed so an upgrade never leaves the default screen empty.
 
-The ASMR scanner indexes only the root author folders and their direct media files. It deliberately does not recurse into HLS segment directories. `hls.js` is loaded only after an HLS item is opened, so the default short-video startup bundle does not include the HLS engine. The ASMR playlist and segment origin must allow browser CORS access.
+The ASMR scanner indexes only the root author folders and their direct media files. It deliberately does not recurse into HLS segment directories. `hls.js` stays out of the default short-video startup bundle and is warmed only after the ASMR library is active. The first author media resolver is also prewarmed without proxying media bytes. The ASMR playlist and segment origin must allow browser CORS access.
 
 ASMR directory API requests are paced at four requests per second by default and retry temporary HTTP 429 responses. This keeps the public source scan polite and predictable.
 

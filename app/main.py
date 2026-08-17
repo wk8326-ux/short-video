@@ -550,6 +550,11 @@ async def asmr_author_items(
     )
     if not rows and not await asyncio.to_thread(database.asmr_authors, search=author):
         raise HTTPException(status_code=404, detail="Author not found")
+    if rows:
+        spawn_background(
+            prewarm_play_url(rows[0]),
+            name=f"prewarm-asmr-play-{rows[0]['id']}",
+        )
     return {
         "items": [
             {

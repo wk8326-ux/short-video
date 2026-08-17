@@ -19,6 +19,13 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
         await stop.wait()
 
     monkeypatch.setattr(main, "scan_loop", idle_scan)
+    spawned_names: list[str] = []
+
+    def record_background(coroutine, *, name: str) -> None:
+        spawned_names.append(name)
+        coroutine.close()
+
+    monkeypatch.setattr(main, "spawn_background", record_background)
     cookie = f"short_session={main.session_manager.issue()}"
     headers = {"Cookie": cookie}
 
@@ -68,3 +75,4 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     assert [item["title"] for item in long.json()["items"]] == ["long"]
     assert authors.json()["items"][0]["name"] == "Author"
     assert items.json()["items"][0]["format"] == "m3u8"
+    assert any(name.startswith("prewarm-asmr-play-") for name in spawned_names)
