@@ -54,6 +54,11 @@ function preloadHlsEngine(): Promise<HlsConstructor> {
 
 function primeAsmrItem(item: AsmrItem): void {
   if (item.format.toLowerCase() === "m3u8") void preloadHlsEngine();
+  void fetch(item.playUrl, {
+    method: "HEAD",
+    cache: "no-store",
+    redirect: "manual",
+  }).catch(() => undefined);
 }
 
 export default function AsmrLibrary({

@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.4] - 2026-08-17
+
+### Improved
+
+- Prewarm the 302 resolver on media pointer intent so non-first ASMR audio and video items start resolving before selection completes.
+
 ## [1.1.3] - 2026-08-17
 
 ### Improved
