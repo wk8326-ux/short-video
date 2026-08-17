@@ -31,6 +31,7 @@ class AListClient:
         media_path: str | None = None,
         extensions: frozenset[str] | None = None,
         anonymous: bool = False,
+        request_interval_seconds: float = 0.0,
     ):
         self.settings = settings
         self.base_url = (base_url or settings.alist_base_url).rstrip("/")
@@ -46,6 +47,9 @@ class AListClient:
         self._username = "" if anonymous else settings.alist_username
         self._password = "" if anonymous else settings.alist_password
         self._auth_lock = asyncio.Lock()
+        self._request_lock = asyncio.Lock()
+        self._request_interval_seconds = max(0.0, request_interval_seconds)
+        self._last_request_at = 0.0
 
     async def close(self) -> None:
         if self._owns_client:
@@ -69,23 +73,59 @@ class AListClient:
                 raise AListError("AList login did not return a token")
             self._token = token
 
-    async def _post(self, endpoint: str, body: dict[str, Any], retry: bool = True) -> dict[str, Any]:
+    async def _post(
+        self,
+        endpoint: str,
+        body: dict[str, Any],
+        retry: bool = True,
+        rate_limit_retries: int = 3,
+    ) -> dict[str, Any]:
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         if self._token:
             headers["Authorization"] = self._token
         try:
-            response = await self._client.post(endpoint, json=body, headers=headers)
+            if self._request_interval_seconds:
+                async with self._request_lock:
+                    loop = asyncio.get_running_loop()
+                    remaining = (
+                        self._request_interval_seconds
+                        - (loop.time() - self._last_request_at)
+                    )
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                    response = await self._client.post(endpoint, json=body, headers=headers)
+                    self._last_request_at = loop.time()
+            else:
+                response = await self._client.post(endpoint, json=body, headers=headers)
         except httpx.HTTPError as exc:
             raise AListError(f"AList request failed: {exc}") from exc
 
+        if response.status_code == 429 and rate_limit_retries > 0:
+            await asyncio.sleep(self._retry_after(response, rate_limit_retries))
+            return await self._post(endpoint, body, retry, rate_limit_retries - 1)
         payload = self._payload(response)
         code = int(payload.get("code", response.status_code))
         if code == 401 and retry and self._username:
             await self._login()
-            return await self._post(endpoint, body, retry=False)
+            return await self._post(
+                endpoint,
+                body,
+                retry=False,
+                rate_limit_retries=rate_limit_retries,
+            )
+        if code == 429 and rate_limit_retries > 0:
+            await asyncio.sleep(self._retry_after(response, rate_limit_retries))
+            return await self._post(endpoint, body, retry, rate_limit_retries - 1)
         if code not in (0, 200):
             raise AListError(str(payload.get("message") or f"AList error {code}"))
         return payload
+
+    @staticmethod
+    def _retry_after(response: httpx.Response, remaining_retries: int) -> float:
+        try:
+            return min(5.0, max(0.0, float(response.headers.get("Retry-After", ""))))
+        except ValueError:
+            return 0.5 * (4 - remaining_retries)
 
     @staticmethod
     def _payload(response: httpx.Response) -> dict[str, Any]:

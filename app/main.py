@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -35,6 +35,7 @@ asmr_alist = AListClient(
     media_path=settings.asmr_media_path,
     extensions=settings.asmr_extensions,
     anonymous=True,
+    request_interval_seconds=settings.asmr_request_interval_seconds,
 )
 direct_urls = DirectUrlCache(alist.resolve, settings.direct_url_cache_seconds)
 asmr_direct_urls = DirectUrlCache(asmr_alist.resolve, settings.direct_url_cache_seconds)

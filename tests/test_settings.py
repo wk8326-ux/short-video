@@ -24,3 +24,4 @@ def test_asmr_and_duration_defaults(monkeypatch):
     assert settings.asmr_media_path == "/asmr6"
     assert settings.duration_boundary_seconds == 180
     assert settings.metadata_probe_batch_size == 30
+    assert settings.asmr_request_interval_seconds == 0.25

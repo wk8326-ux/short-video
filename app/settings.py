@@ -12,6 +12,14 @@ def _positive_int(name: str, default: int, minimum: int) -> int:
         return default
 
 
+def _positive_float(name: str, default: float, minimum: float) -> float:
+    raw = os.getenv(name, str(default))
+    try:
+        return max(minimum, float(raw))
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     alist_base_url: str
@@ -36,6 +44,7 @@ class Settings:
     )
     duration_boundary_seconds: int = 180
     metadata_probe_batch_size: int = 30
+    asmr_request_interval_seconds: float = 0.25
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -71,6 +80,9 @@ class Settings:
             asmr_extensions=frozenset(asmr_extensions),
             duration_boundary_seconds=_positive_int("DURATION_BOUNDARY_SECONDS", 180, 1),
             metadata_probe_batch_size=_positive_int("METADATA_PROBE_BATCH_SIZE", 30, 1),
+            asmr_request_interval_seconds=_positive_float(
+                "ASMR_REQUEST_INTERVAL_SECONDS", 0.25, 0.0
+            ),
         )
 
     def validate(self) -> None:

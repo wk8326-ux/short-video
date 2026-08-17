@@ -134,3 +134,27 @@ async def test_author_scan_only_indexes_direct_media_files():
         ("show.m3u8", "video"),
         ("voice.mp3", "audio"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_api_request_is_retried():
+    calls = 0
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, json={"code": 429})
+        return httpx.Response(
+            200,
+            json={"code": 200, "data": {"content": [], "total": 0}},
+        )
+
+    http_client = httpx.AsyncClient(
+        base_url="https://asmr.example", transport=httpx.MockTransport(handler)
+    )
+    client = AListClient(_settings(), http_client)
+
+    assert await client.list_directory("/asmr6") == []
+    assert calls == 2
+    await http_client.aclose()

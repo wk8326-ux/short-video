@@ -28,6 +28,8 @@ Guangya duration classification runs in the background using small MP4 range rea
 
 The ASMR scanner indexes only the root author folders and their direct media files. It deliberately does not recurse into HLS segment directories. `hls.js` is loaded only after an HLS item is opened, so the default short-video startup bundle does not include the HLS engine. The ASMR playlist and segment origin must allow browser CORS access.
 
+ASMR directory API requests are paced at four requests per second by default and retry temporary HTTP 429 responses. This keeps the public source scan polite and predictable.
+
 ## Local development
 
 ```bash
@@ -63,6 +65,7 @@ Key source settings:
 
 - `ALIST_BASE_URL` / `ALIST_MEDIA_PATH`: private Guangya AList source.
 - `ASMR_BASE_URL` / `ASMR_MEDIA_PATH`: public ASMR AList source.
+- `ASMR_REQUEST_INTERVAL_SECONDS`: minimum delay between ASMR AList API calls, default `0.25`.
 - `DURATION_BOUNDARY_SECONDS`: Guangya short/long boundary, default `180`.
 - `METADATA_PROBE_BATCH_SIZE`: maximum MP4 duration probes per scan, default `30`.
 - `ASMR_EXTENSIONS`: direct files indexed inside each author directory.

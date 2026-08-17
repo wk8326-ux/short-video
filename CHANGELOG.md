@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.2] - 2026-08-17
+
+### Fixed
+
+- Pace ASMR directory requests and retry temporary HTTP 429 responses.
+
 ## [1.1.1] - 2026-08-17
 
 ### Fixed
