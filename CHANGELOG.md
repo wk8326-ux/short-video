@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.2.1] - 2026-08-17
+
+### Fixed
+
+- Declare the Android `WAKE_LOCK` permission required by Media3 network wake mode, preventing a `SecurityException` when playback starts.
+- Add a manifest regression test that keeps the wake-mode permission contract explicit.
+
 ## [1.2.0] - 2026-08-17
 
 ### Added
