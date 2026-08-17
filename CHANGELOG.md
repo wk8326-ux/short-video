@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.6] - 2026-08-17
+
+### Fixed
+
+- Keep ASMR media sources mounted when progress is saved so pause and seek no longer reload or restart playback.
+- Replace overlapping native and custom ASMR video controls with one consistent control layer, and preserve the last video frame while buffering.
+- Support bidirectional ASMR video seek gestures without treating a left swipe as player exit.
+
+### Improved
+
+- Cache the installed PWA shell, authenticated startup hint, and recent short/long feed metadata for a faster repeat launch.
+- Allow private 302 play redirects to be reused briefly without caching large media files on the application server.
+- Keep portrait feed controls visible at the edges with one-tap playback, while landscape controls hide after five seconds and reserve playback for the center button.
+- Retain landscape seek and previous/next gestures while removing the duplicate side playback control.
+
 ## [1.1.5] - 2026-08-17
 
 ### Fixed

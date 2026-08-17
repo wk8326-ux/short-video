@@ -57,6 +57,12 @@ type FeedResponse = {
   scan: { running: boolean; lastError: string | null };
 };
 
+type CachedFeedEntry = {
+  items: VideoItem[];
+  total: number;
+  savedAt: number;
+};
+
 type FastStartSummary = {
   total: number;
   checked: number;
@@ -98,8 +104,72 @@ const MODES: Array<{ value: FeedMode; label: string; icon: typeof Shuffle }> = [
   { value: "oldest", label: "最早优先", icon: Clock3 },
 ];
 
-const CHROME_VISIBLE_MS = 1500;
+const LANDSCAPE_CHROME_VISIBLE_MS = 5000;
 const GESTURE_AXIS_THRESHOLD_PX = 14;
+const AUTH_HINT_KEY = "short-video-authenticated";
+const FEED_CACHE_KEY = "short-video-feed-cache-v1";
+const FEED_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function hasAuthenticationHint(): boolean {
+  try {
+    return localStorage.getItem(AUTH_HINT_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function setAuthenticationHint(authenticated: boolean): void {
+  try {
+    if (authenticated) localStorage.setItem(AUTH_HINT_KEY, "1");
+    else localStorage.removeItem(AUTH_HINT_KEY);
+  } catch {
+    // Authentication still works when persistent browser storage is unavailable.
+  }
+}
+
+function feedCacheId(surface: Exclude<MediaSurface, "asmr">, mode: FeedMode): string {
+  return `${surface}:${mode}`;
+}
+
+function readFeedCache(
+  surface: Exclude<MediaSurface, "asmr">,
+  mode: FeedMode,
+): CachedFeedEntry | null {
+  try {
+    const raw = localStorage.getItem(FEED_CACHE_KEY);
+    if (!raw) return null;
+    const cache = JSON.parse(raw) as { version?: number; entries?: Record<string, CachedFeedEntry> };
+    const entry = cache.version === 1 ? cache.entries?.[feedCacheId(surface, mode)] : undefined;
+    if (!entry || !Array.isArray(entry.items) || !Number.isFinite(entry.savedAt)) return null;
+    if (Date.now() - entry.savedAt > FEED_CACHE_MAX_AGE_MS) return null;
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+function writeFeedCache(
+  surface: Exclude<MediaSurface, "asmr">,
+  mode: FeedMode,
+  items: VideoItem[],
+  total: number,
+): void {
+  try {
+    const raw = localStorage.getItem(FEED_CACHE_KEY);
+    const parsed = raw
+      ? JSON.parse(raw) as { version?: number; entries?: Record<string, CachedFeedEntry> }
+      : null;
+    const entries = parsed?.version === 1 && parsed.entries ? parsed.entries : {};
+    entries[feedCacheId(surface, mode)] = {
+      items: items.slice(0, 12),
+      total,
+      savedAt: Date.now(),
+    };
+    localStorage.setItem(FEED_CACHE_KEY, JSON.stringify({ version: 1, entries }));
+  } catch {
+    // A missing warm cache only affects startup speed, never playback correctness.
+  }
+}
 
 type LandscapeGesture = {
   pointerId: number;
@@ -123,7 +193,9 @@ function getLandscapeGestureDelta(gesture: LandscapeGesture, clientX: number, cl
 }
 
 function App() {
-  const [authState, setAuthState] = useState<"checking" | "signed-in" | "signed-out">("checking");
+  const [authState, setAuthState] = useState<"checking" | "signed-in" | "signed-out">(
+    () => hasAuthenticationHint() ? "signed-in" : "checking",
+  );
   const [statusError, setStatusError] = useState("");
 
   useEffect(() => {
@@ -132,21 +204,35 @@ function App() {
       .then(async (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = (await response.json()) as { authenticated: boolean };
+        setAuthenticationHint(data.authenticated);
         setAuthState(data.authenticated ? "signed-in" : "signed-out");
       })
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        setStatusError("暂时无法连接服务器");
-        setAuthState("signed-out");
+        if (!hasAuthenticationHint()) {
+          setStatusError("暂时无法连接服务器");
+          setAuthState("signed-out");
+        }
       });
     return () => controller.abort();
   }, []);
 
-  const requireLogin = useCallback(() => setAuthState("signed-out"), []);
+  const requireLogin = useCallback(() => {
+    setAuthenticationHint(false);
+    setAuthState("signed-out");
+  }, []);
 
   if (authState === "checking") return <AuthLoading />;
   if (authState === "signed-out") {
-    return <LoginScreen initialError={statusError} onAuthenticated={() => setAuthState("signed-in")} />;
+    return (
+      <LoginScreen
+        initialError={statusError}
+        onAuthenticated={() => {
+          setAuthenticationHint(true);
+          setAuthState("signed-in");
+        }}
+      />
+    );
   }
   return <PlayerApp onUnauthorized={requireLogin} />;
 }
@@ -364,8 +450,14 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = (await response.json()) as FeedResponse;
       if (generation !== generationRef.current) return;
+      if (reset && (data.items.length > 0 || !data.scan.running)) {
+        writeFeedCache(requestedSurface, requestedMode, data.items, data.total);
+      }
       setItems((current) => {
-        if (reset) return data.items;
+        if (reset) {
+          if (data.items.length === 0 && data.scan.running && current.length > 0) return current;
+          return data.items;
+        }
         const loaded = new Set(current.map((item) => item.id));
         return [...current, ...data.items.filter((item) => !loaded.has(item.id))];
       });
@@ -399,7 +491,9 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
     sessionExcludeRef.current = mode === "shuffle" ? [...recentRef.current] : [];
     sessionStartRef.current = preferences.lastVideoIds[surface] ?? null;
     initialFeedRef.current = false;
-    setItems([]);
+    const cached = readFeedCache(surface, mode);
+    setItems(cached?.items ?? []);
+    setTotal(cached?.total ?? 0);
     activeIndexRef.current = 0;
     setActiveIndex(0);
     feedRef.current?.scrollTo({ top: 0 });
@@ -908,7 +1002,6 @@ function VideoSlide({
   const videoRef = useRef<HTMLVideoElement>(null);
   const gestureRef = useRef<LandscapeGesture | null>(null);
   const suppressClickRef = useRef(false);
-  const wakeOnlyClickRef = useRef(false);
   const retryTimerRef = useRef<number | null>(null);
   const chromeTimerRef = useRef<number | null>(null);
   const chromeVisibleRef = useRef(true);
@@ -936,18 +1029,30 @@ function VideoSlide({
     }
   }, [item.id, onProgress]);
 
+  const clearChromeTimer = useCallback(() => {
+    if (chromeTimerRef.current === null) return;
+    window.clearTimeout(chromeTimerRef.current);
+    chromeTimerRef.current = null;
+  }, []);
+
+  const hideChrome = useCallback(() => {
+    clearChromeTimer();
+    chromeVisibleRef.current = false;
+    setChromeVisible(false);
+  }, [clearChromeTimer]);
+
   const revealChrome = useCallback(() => {
     if (!engaged) return;
-    if (chromeTimerRef.current !== null) window.clearTimeout(chromeTimerRef.current);
+    clearChromeTimer();
     chromeVisibleRef.current = true;
     setChromeVisible(true);
-    if (seeking) return;
+    if (!landscape || seeking) return;
     chromeTimerRef.current = window.setTimeout(() => {
       chromeVisibleRef.current = false;
       setChromeVisible(false);
       chromeTimerRef.current = null;
-    }, CHROME_VISIBLE_MS);
-  }, [engaged, seeking]);
+    }, LANDSCAPE_CHROME_VISIBLE_MS);
+  }, [clearChromeTimer, engaged, landscape, seeking]);
 
   useEffect(() => {
     restoredRef.current = false;
@@ -957,35 +1062,20 @@ function VideoSlide({
   useEffect(() => {
     return () => {
       if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current);
-      if (chromeTimerRef.current !== null) window.clearTimeout(chromeTimerRef.current);
+      clearChromeTimer();
     };
-  }, []);
+  }, [clearChromeTimer]);
 
   useEffect(() => {
-    if (chromeTimerRef.current !== null) {
-      window.clearTimeout(chromeTimerRef.current);
-      chromeTimerRef.current = null;
-    }
+    clearChromeTimer();
     if (!engaged) {
       chromeVisibleRef.current = false;
       setChromeVisible(false);
       return;
     }
-    chromeVisibleRef.current = true;
-    setChromeVisible(true);
-    if (seeking) return;
-    chromeTimerRef.current = window.setTimeout(() => {
-      chromeVisibleRef.current = false;
-      setChromeVisible(false);
-      chromeTimerRef.current = null;
-    }, CHROME_VISIBLE_MS);
-    return () => {
-      if (chromeTimerRef.current !== null) {
-        window.clearTimeout(chromeTimerRef.current);
-        chromeTimerRef.current = null;
-      }
-    };
-  }, [engaged, landscape, seeking]);
+    revealChrome();
+    return clearChromeTimer;
+  }, [clearChromeTimer, engaged, landscape, revealChrome, seeking]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1044,9 +1134,13 @@ function VideoSlide({
 
   const handleSurfaceClick = (event: React.MouseEvent<HTMLElement>) => {
     if ((event.target as HTMLElement).closest("button, input")) return;
-    if (suppressClickRef.current || wakeOnlyClickRef.current) {
+    if (suppressClickRef.current) {
       suppressClickRef.current = false;
-      wakeOnlyClickRef.current = false;
+      return;
+    }
+    if (landscape) {
+      if (chromeVisibleRef.current) hideChrome();
+      else revealChrome();
       return;
     }
     togglePlayback();
@@ -1054,6 +1148,7 @@ function VideoSlide({
 
   const handlePlaybackControl = (event: React.MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
+    revealChrome();
     togglePlayback();
   };
 
@@ -1102,8 +1197,6 @@ function VideoSlide({
 
   const handleGestureStart = (event: React.PointerEvent<HTMLElement>) => {
     const interactiveTarget = (event.target as HTMLElement).closest("button, input");
-    if (!interactiveTarget && !chromeVisibleRef.current) wakeOnlyClickRef.current = true;
-    revealChrome();
     if (!landscape || event.button !== 0) return;
     if (interactiveTarget) return;
     const startTime = currentTimeRef.current;
@@ -1160,7 +1253,6 @@ function VideoSlide({
     if (!gesture || gesture.pointerId !== event.pointerId) {
       if (!commit) {
         suppressClickRef.current = false;
-        wakeOnlyClickRef.current = false;
       }
       return;
     }
@@ -1186,7 +1278,6 @@ function VideoSlide({
 
     setSeeking(false);
     setGestureSeek(null);
-    if (!commit) wakeOnlyClickRef.current = false;
     if (gesture.moved) {
       window.setTimeout(() => {
         suppressClickRef.current = false;
@@ -1272,9 +1363,16 @@ function VideoSlide({
         </div>
       )}
 
-      {engaged && paused && !buffering && !failed && (
-        <button className="center-play" type="button" aria-label="播放" onClick={handlePlaybackControl}>
-          <Play size={30} fill="currentColor" aria-hidden="true" />
+      {engaged && !buffering && !failed && (
+        <button
+          className={`center-play${paused ? " is-paused" : " is-playing"}`}
+          type="button"
+          aria-label={paused ? "播放" : "暂停"}
+          onClick={handlePlaybackControl}
+        >
+          {paused
+            ? <Play size={30} fill="currentColor" aria-hidden="true" />
+            : <Pause size={30} fill="currentColor" aria-hidden="true" />}
         </button>
       )}
 
@@ -1307,10 +1405,7 @@ function VideoSlide({
 
       {engaged && (
         <div className="side-controls">
-          <button className="icon-button media-button" type="button" aria-label={paused ? "播放" : "暂停"} onClick={handlePlaybackControl}>
-            {paused ? <Play size={23} fill="currentColor" aria-hidden="true" /> : <Pause size={23} fill="currentColor" aria-hidden="true" />}
-          </button>
-          <button className="icon-button media-button" type="button" aria-label={muted ? "打开声音" : "静音"} onClick={(event) => { event.stopPropagation(); onMutedChange(!muted); }}>
+          <button className="icon-button media-button" type="button" aria-label={muted ? "打开声音" : "静音"} onClick={(event) => { event.stopPropagation(); revealChrome(); onMutedChange(!muted); }}>
             {muted ? <VolumeX size={23} aria-hidden="true" /> : <Volume2 size={23} aria-hidden="true" />}
           </button>
           <button className="icon-button media-button" type="button" aria-label={landscape ? "退出横屏" : "横屏播放"} onClick={(event) => { event.stopPropagation(); void toggleLandscape(); }}>

@@ -26,6 +26,11 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
         coroutine.close()
 
     monkeypatch.setattr(main, "spawn_background", record_background)
+
+    async def resolved_direct_url(video_id, path, *, refresh=False):
+        return "https://media.example/video.mp4", False
+
+    monkeypatch.setattr(main.direct_urls, "get", resolved_direct_url)
     cookie = f"short_session={main.session_manager.issue()}"
     headers = {"Cookie": cookie}
 
@@ -72,6 +77,11 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
         authors = client.get("/api/asmr/authors", headers=headers)
         items = client.get("/api/asmr/authors/Author/items", headers=headers)
         audio_items = client.get("/api/asmr/authors/Author/items?kind=audio", headers=headers)
+        play = client.get(
+            f"/api/videos/{short.json()['items'][0]['id']}/play",
+            headers=headers,
+            follow_redirects=False,
+        )
 
     assert [item["title"] for item in short.json()["items"]] == ["short"]
     assert [item["title"] for item in long.json()["items"]] == ["long"]
@@ -81,4 +91,8 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     assert items.json()["items"][0]["format"] == "m3u8"
     assert items.json()["items"][0]["kind"] == "video"
     assert audio_items.json()["items"] == []
+    assert play.status_code == 302
+    assert play.headers["location"] == "https://media.example/video.mp4"
+    assert play.headers["cache-control"] == "private, max-age=300"
+    assert play.headers["vary"] == "Cookie"
     assert any(name.startswith("prewarm-asmr-play-") for name in spawned_names)

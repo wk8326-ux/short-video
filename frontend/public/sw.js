@@ -1,8 +1,19 @@
-const CACHE_NAME = "short-video-shell-v3";
+const CACHE_NAME = "short-video-shell-v4";
 const SHELL = ["/", "/manifest.webmanifest", "/icon.svg"];
 
+async function cacheShell() {
+  const cache = await caches.open(CACHE_NAME);
+  const home = await fetch("/", { cache: "no-store" });
+  if (!home.ok) throw new Error(`Shell request failed: ${home.status}`);
+  await cache.put("/", home.clone());
+  const html = await home.text();
+  const assets = [...html.matchAll(/(?:src|href)="(\/assets\/[^"?]+)"/g)]
+    .map((match) => match[1]);
+  await cache.addAll([...SHELL.slice(1), ...new Set(assets)]);
+}
+
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)));
+  event.waitUntil(cacheShell());
   self.skipWaiting();
 });
 
@@ -23,7 +34,19 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (request.mode === "navigate") {
-    event.respondWith(fetch(request).catch(() => caches.match("/")));
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_NAME);
+      const cached = await cache.match("/");
+      const update = fetch(request).then(async (response) => {
+        if (response.ok) await cache.put("/", response.clone());
+        return response;
+      });
+      if (cached) {
+        event.waitUntil(update.catch(() => undefined));
+        return cached;
+      }
+      return update;
+    })());
     return;
   }
 

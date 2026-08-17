@@ -296,7 +296,7 @@ async def security_headers(request: Request, call_next):
         "img-src 'self' data: https:; media-src 'self' blob: https:; "
         "connect-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     )
-    if request.url.path.startswith("/api/"):
+    if request.url.path.startswith("/api/") and "cache-control" not in response.headers:
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -492,7 +492,11 @@ async def play(video_id: int, refresh: bool = False):
     return RedirectResponse(
         raw_url,
         status_code=302,
-        headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
+        headers={
+            "Cache-Control": "private, max-age=300",
+            "Vary": "Cookie",
+            "X-Robots-Tag": "noindex",
+        },
     )
 
 

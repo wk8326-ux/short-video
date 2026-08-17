@@ -1,12 +1,14 @@
 import {
   ArrowLeft,
   ChevronRight,
+  FastForward,
   Headphones,
   Library,
   LoaderCircle,
   Maximize2,
   Pause,
   Play,
+  Rewind,
   Search,
   Video,
   X,
@@ -43,6 +45,8 @@ type AsmrLibraryProps = {
 
 type KindFilter = "all" | "video" | "audio";
 const ASMR_PLAYER_HISTORY_KEY = "__shortVideoAsmrPlayer";
+const ASMR_CHROME_VISIBLE_MS = 1500;
+const ASMR_GESTURE_AXIS_THRESHOLD_PX = 12;
 
 type HlsConstructor = typeof import("hls.js").default;
 
@@ -138,9 +142,7 @@ export default function AsmrLibrary({
   }, [itemsRequestKey, onUnauthorized, selectedAuthor]);
 
   useEffect(() => {
-    const firstHlsItem = items.find((item) => item.format.toLowerCase() === "m3u8");
-    if (!firstHlsItem) return;
-    primeAsmrItem(firstHlsItem);
+    if (items[0]) primeAsmrItem(items[0]);
   }, [items]);
 
   useEffect(() => {
@@ -407,7 +409,17 @@ type PlayerSwipe = {
   pointerId: number;
   startX: number;
   startY: number;
-  axis: "pending" | "left" | "right" | "cancelled";
+  lastX: number;
+  lastY: number;
+  startTime: number;
+  targetTime: number;
+  axis: "pending" | "horizontal" | "cancelled";
+  moved: boolean;
+};
+
+type GestureSeek = {
+  targetTime: number;
+  delta: number;
 };
 
 function AsmrPlayer({
@@ -420,10 +432,16 @@ function AsmrPlayer({
 }: AsmrPlayerProps) {
   const mediaRef = useRef<HTMLMediaElement | null>(null);
   const swipeRef = useRef<PlayerSwipe | null>(null);
+  const initialTimeRef = useRef(initialTime);
+  const onProgressRef = useRef(onProgress);
   const currentTimeRef = useRef(initialTime);
   const durationRef = useRef(item.duration ?? 0);
   const restoredRef = useRef(false);
   const lastSavedRef = useRef(initialTime);
+  const chromeTimerRef = useRef<number | null>(null);
+  const chromeVisibleRef = useRef(true);
+  const suppressClickRef = useRef(false);
+  const wakeOnlyClickRef = useRef(false);
   const [paused, setPaused] = useState(true);
   const [buffering, setBuffering] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -432,14 +450,43 @@ function AsmrPlayer({
   const [duration, setDuration] = useState(item.duration ?? 0);
   const [detectedKind, setDetectedKind] = useState(asmrItemKind(item));
   const [metadataReady, setMetadataReady] = useState(false);
-  const [swipeOffset, setSwipeOffset] = useState(0);
+  const [chromeVisible, setChromeVisible] = useState(true);
+  const [gestureSeek, setGestureSeek] = useState<GestureSeek | null>(null);
+
+  useEffect(() => {
+    onProgressRef.current = onProgress;
+  }, [onProgress]);
 
   const saveProgress = useCallback(() => {
     if (durationRef.current > 0) {
-      onProgress(item.id, currentTimeRef.current, durationRef.current);
+      onProgressRef.current(item.id, currentTimeRef.current, durationRef.current);
       lastSavedRef.current = currentTimeRef.current;
     }
-  }, [item.id, onProgress]);
+  }, [item.id]);
+
+  const revealChrome = useCallback(() => {
+    if (chromeTimerRef.current !== null) window.clearTimeout(chromeTimerRef.current);
+    chromeVisibleRef.current = true;
+    setChromeVisible(true);
+    chromeTimerRef.current = window.setTimeout(() => {
+      chromeVisibleRef.current = false;
+      setChromeVisible(false);
+      chromeTimerRef.current = null;
+    }, ASMR_CHROME_VISIBLE_MS);
+  }, []);
+
+  useEffect(() => {
+    if (!expanded) {
+      if (chromeTimerRef.current !== null) window.clearTimeout(chromeTimerRef.current);
+      chromeTimerRef.current = null;
+      return;
+    }
+    revealChrome();
+    return () => {
+      if (chromeTimerRef.current !== null) window.clearTimeout(chromeTimerRef.current);
+      chromeTimerRef.current = null;
+    };
+  }, [expanded, revealChrome]);
 
   useEffect(() => {
     const media = mediaRef.current;
@@ -453,7 +500,7 @@ function AsmrPlayer({
     setFailed(false);
     setPaused(true);
     setMetadataReady(false);
-    setSwipeOffset(0);
+    setGestureSeek(null);
     restoredRef.current = false;
 
     const attachSource = async () => {
@@ -468,7 +515,7 @@ function AsmrPlayer({
               maxBufferLength: 18,
               backBufferLength: 24,
               startFragPrefetch: true,
-              startPosition: initialTime > 1 ? initialTime : -1,
+              startPosition: initialTimeRef.current > 1 ? initialTimeRef.current : -1,
             });
             hls.on(Hls.Events.ERROR, (_, data) => {
               if (!data.fatal) return;
@@ -508,7 +555,7 @@ function AsmrPlayer({
       media.removeAttribute("src");
       media.load();
     };
-  }, [attempt, initialTime, item.format, item.playUrl, saveProgress]);
+  }, [attempt, item.format, item.playUrl, saveProgress]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -538,17 +585,34 @@ function AsmrPlayer({
     else media.pause();
   };
 
-  const handleSwipeStart = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!expanded || detectedKind !== "video") return;
+  const handleSurfaceClick = (event: React.MouseEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest("button, input")) return;
-    const bounds = event.currentTarget.getBoundingClientRect();
-    // Native video controls occupy the lower edge on Android; leave that area to the browser.
-    if (event.clientY >= bounds.bottom - 92) return;
+    if (suppressClickRef.current || wakeOnlyClickRef.current) {
+      suppressClickRef.current = false;
+      wakeOnlyClickRef.current = false;
+      return;
+    }
+    togglePlayback();
+    revealChrome();
+  };
+
+  const handleSwipeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!expanded) return;
+    if ((event.target as HTMLElement).closest("button, input")) return;
+    if (!chromeVisibleRef.current) wakeOnlyClickRef.current = true;
+    revealChrome();
+    if (detectedKind !== "video" || event.button !== 0) return;
+    const startTime = currentTimeRef.current;
     swipeRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      startTime,
+      targetTime: startTime,
       axis: "pending",
+      moved: false,
     };
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -560,21 +624,30 @@ function AsmrPlayer({
   const handleSwipeMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const swipe = swipeRef.current;
     if (!swipe || swipe.pointerId !== event.pointerId) return;
+    swipe.lastX = event.clientX;
+    swipe.lastY = event.clientY;
     const deltaX = event.clientX - swipe.startX;
     const deltaY = event.clientY - swipe.startY;
     const absoluteX = Math.abs(deltaX);
     const absoluteY = Math.abs(deltaY);
     if (swipe.axis === "pending") {
-      if (Math.max(absoluteX, absoluteY) < 12) return;
-      if (absoluteX <= absoluteY * 1.15) {
+      if (Math.max(absoluteX, absoluteY) < ASMR_GESTURE_AXIS_THRESHOLD_PX) return;
+      if (absoluteX > absoluteY * 1.15) {
+        swipe.axis = "horizontal";
+        swipe.moved = true;
+        suppressClickRef.current = true;
+      } else if (absoluteY > absoluteX * 1.15) {
         swipe.axis = "cancelled";
-        return;
-      }
-      swipe.axis = deltaX < 0 ? "left" : "right";
+      } else return;
     }
-    if (swipe.axis !== "left") return;
+    if (swipe.axis !== "horizontal" || durationRef.current <= 0) return;
     event.preventDefault();
-    setSwipeOffset(Math.max(-132, Math.min(0, deltaX)));
+    const width = Math.max(1, event.currentTarget.clientWidth || window.innerWidth);
+    const seekSpan = Math.min(90, Math.max(15, durationRef.current * 0.35));
+    const delta = (deltaX / width) * seekSpan;
+    const targetTime = Math.max(0, Math.min(durationRef.current, swipe.startTime + delta));
+    swipe.targetTime = targetTime;
+    setGestureSeek({ targetTime, delta: targetTime - swipe.startTime });
   };
 
   const handleSwipeEnd = (event: React.PointerEvent<HTMLDivElement>, cancelled: boolean) => {
@@ -588,10 +661,16 @@ function AsmrPlayer({
     } catch {
       // The browser may release capture before pointerup is delivered.
     }
-    const distance = swipe.startX - event.clientX;
-    const shouldClose = !cancelled && swipe.axis === "left" && distance >= 72;
-    setSwipeOffset(0);
-    if (shouldClose) onExpandedChange(false);
+    if (!cancelled && swipe.axis === "horizontal" && durationRef.current > 0) {
+      seek(swipe.targetTime);
+    }
+    setGestureSeek(null);
+    if (cancelled) wakeOnlyClickRef.current = false;
+    if (swipe.moved) {
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+    }
   };
 
   const loadedMetadata = () => {
@@ -606,11 +685,12 @@ function AsmrPlayer({
     setDuration(nextDuration);
     setDetectedKind(nextKind);
     setMetadataReady(true);
-    if (!restoredRef.current && initialTime > 1 && initialTime < nextDuration - 3) {
+    const restoreTime = initialTimeRef.current;
+    if (!restoredRef.current && restoreTime > 1 && restoreTime < nextDuration - 3) {
       restoredRef.current = true;
-      media.currentTime = initialTime;
-      currentTimeRef.current = initialTime;
-      setCurrentTime(initialTime);
+      media.currentTime = restoreTime;
+      currentTimeRef.current = restoreTime;
+      setCurrentTime(restoreTime);
     }
     void fetch(`/api/videos/${item.id}/metadata`, {
       method: "POST",
@@ -627,13 +707,13 @@ function AsmrPlayer({
     if (Math.abs(media.currentTime - lastSavedRef.current) >= 3) saveProgress();
   };
 
-  const seek = (value: number) => {
+  function seek(value: number) {
     const media = mediaRef.current;
     if (!media) return;
     media.currentTime = value;
     currentTimeRef.current = value;
     setCurrentTime(value);
-  };
+  }
 
   const MediaElement = asmrItemKind(item) === "audio" ? "audio" : "video";
   const KindIcon = detectedKind === "audio" ? Headphones : Video;
@@ -644,9 +724,8 @@ function AsmrPlayer({
       role={expanded ? "dialog" : "complementary"}
       aria-modal={expanded || undefined}
       aria-label={`${item.title} 播放器`}
-      style={{ "--swipe-offset": `${swipeOffset}px` } as React.CSSProperties}
     >
-      {expanded && (
+      {expanded && chromeVisible && (
         <div className="player-header">
           <div className="player-heading">
             <span className="player-kicker"><KindIcon size={14} aria-hidden="true" />{kindLabel} · {item.format.toUpperCase()}</span>
@@ -665,13 +744,13 @@ function AsmrPlayer({
         onPointerMove={handleSwipeMove}
         onPointerUp={(event) => handleSwipeEnd(event, false)}
         onPointerCancel={(event) => handleSwipeEnd(event, true)}
+        onClick={handleSurfaceClick}
       >
         <MediaElement
           ref={(node) => { mediaRef.current = node; }}
           playsInline
           preload="auto"
           poster={item.posterUrl ?? undefined}
-          controls={expanded && detectedKind === "video"}
           onLoadedMetadata={loadedMetadata}
           onDurationChange={loadedMetadata}
           onTimeUpdate={timeUpdated}
@@ -679,6 +758,12 @@ function AsmrPlayer({
           onPause={() => { setPaused(true); saveProgress(); }}
           onWaiting={() => setBuffering(true)}
           onCanPlay={() => setBuffering(false)}
+          onSeeking={() => setBuffering(true)}
+          onSeeked={() => {
+            if ((mediaRef.current?.readyState ?? 0) >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+              setBuffering(false);
+            }
+          }}
           onError={() => {
             if (item.format.toLowerCase() === "m3u8") return;
             if (attempt < 2) setAttempt((value) => value + 1);
@@ -687,7 +772,7 @@ function AsmrPlayer({
         />
         {expanded && detectedKind === "audio" && (
           <div className="audio-stage" aria-hidden="true">
-            {metadataReady && !buffering && (
+            {metadataReady && (
               <div className="audio-stage-content">
                 <span className="audio-stage-icon"><Headphones size={34} /></span>
                 <strong>{item.title}</strong>
@@ -697,9 +782,21 @@ function AsmrPlayer({
           </div>
         )}
         {expanded && !failed && (buffering || !metadataReady) && (
-          <div className="player-loading" role="status">
+          <div
+            className={`player-loading${metadataReady ? " is-buffering" : ""}`}
+            role="status"
+            aria-label={metadataReady ? "正在缓冲" : "正在连接媒体"}
+          >
             <LoaderCircle className="spinner" size={24} aria-hidden="true" />
-            <span>{metadataReady ? "正在准备播放" : "正在连接媒体"}</span>
+          </div>
+        )}
+        {expanded && gestureSeek && (
+          <div className="gesture-seek" role="status" aria-live="polite">
+            {gestureSeek.delta < 0
+              ? <Rewind size={22} aria-hidden="true" />
+              : <FastForward size={22} aria-hidden="true" />}
+            <strong>{gestureSeek.delta < 0 ? "-" : "+"}{Math.abs(Math.round(gestureSeek.delta))} 秒</strong>
+            <span>{formatTime(gestureSeek.targetTime)} / {formatTime(duration)}</span>
           </div>
         )}
       </div>
@@ -732,19 +829,17 @@ function AsmrPlayer({
         </>
       )}
 
-      {expanded && metadataReady && !buffering && (
-        <div className="expanded-player-info">
-          <div className="expanded-player-copy">
-            <strong>{item.title}</strong>
-            <span>{item.author}</span>
-          </div>
-          <span className="expanded-player-time">{formatTime(currentTime)} / {formatTime(duration)}</span>
-        </div>
-      )}
-
-      {expanded && detectedKind === "audio" && (
-        <div className="audio-controls">
-          <button className="icon-button" type="button" aria-label={paused ? "播放" : "暂停"} onClick={togglePlayback}>
+      {expanded && metadataReady && chromeVisible && (
+        <div className="asmr-playback-controls">
+          <button
+            className="icon-button"
+            type="button"
+            aria-label={paused ? "播放" : "暂停"}
+            onClick={() => {
+              togglePlayback();
+              revealChrome();
+            }}
+          >
             {paused ? <Play size={24} aria-hidden="true" /> : <Pause size={24} aria-hidden="true" />}
           </button>
           <input
@@ -754,8 +849,12 @@ function AsmrPlayer({
             step="0.1"
             value={Math.min(currentTime, duration || 0)}
             aria-label="播放进度"
-            onChange={(event) => seek(Number(event.target.value))}
+            onChange={(event) => {
+              seek(Number(event.target.value));
+              revealChrome();
+            }}
           />
+          <span>{formatTime(currentTime)} / {formatTime(duration)}</span>
         </div>
       )}
 
