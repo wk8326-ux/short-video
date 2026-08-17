@@ -1,23 +1,32 @@
-# Short Video
+# Private Media Player
 
-Android-first private short-video PWA backed by an AList directory.
+Android-first private media PWA backed by two AList sources.
 
 ```text
-Browser -> FastAPI metadata/resolve API -> AList fs/get -> 302 -> drive CDN
+Guangya: Browser -> FastAPI metadata/resolve API -> AList fs/get -> 302 -> drive CDN
+ASMR:    Browser -> FastAPI library/resolve API -> AList fs/get -> 302 -> HLS/audio origin
 ```
 
-The application server never proxies or transcodes video bytes.
+The application server never proxies or transcodes media bytes.
 
 ## Features
 
-- Vertical swipe playback with adjacent-video preload
+- Three top-level surfaces: short video, long video, and ASMR
+- Guangya duration split at 180 seconds (`< 180` short, `>= 180` long)
+- Vertical swipe playback with adjacent-video preload for Guangya media
 - First-item direct URL prewarming with concurrent AList request deduplication
 - Device-local resume position, mute state, feed mode, and recent history
 - Stable shuffle pagination that avoids the most recently watched videos
 - Android landscape playback through fullscreen orientation lock
+- Author-first ASMR library with title search and all/video/audio filters
+- Adaptive MP3/direct-video/HLS playback with a persistent bottom mini-player
 - Authenticated management view for library rescans and MP4 Fast Start checks
 
 Fast Start checks are manual and read at most the first 256 KiB of each MP4-family file. They do not rewrite or transcode media.
+
+Guangya duration classification runs in the background using small MP4 range reads. Browser metadata is also reported after successful playback. Existing files without known duration temporarily remain in the short-video feed so an upgrade never leaves the default screen empty.
+
+The ASMR scanner indexes only the root author folders and their direct media files. It deliberately does not recurse into HLS segment directories. `hls.js` is loaded only after an HLS item is opened, so the default short-video startup bundle does not include the HLS engine. The ASMR playlist and segment origin must allow browser CORS access.
 
 ## Local development
 
@@ -48,4 +57,11 @@ All settings are environment variables documented in `.env.example`. Application
 
 To change the application password, run `python app/auth.py set-password .env` and restart the container. AList authentication remains independent and can use an AList token or username/password later.
 
-The index is stored in `/data/library.db` and refreshed every 30 minutes by default. Resolved direct URLs are kept in memory for 10 minutes by default and cleared after each scan. Feed modes are random, newest first, and oldest first.
+The index is stored in `/data/library.db` and refreshed every 30 minutes by default. Existing Guangya IDs survive the multi-source migration. Each source is deactivated and refreshed independently, so an ASMR scan failure cannot remove Guangya rows. Resolved direct URLs are cached independently per source for 10 minutes by default and cleared after its scan. Feed modes are random, newest first, and oldest first.
+
+Key source settings:
+
+- `ALIST_BASE_URL` / `ALIST_MEDIA_PATH`: private Guangya AList source.
+- `ASMR_BASE_URL` / `ASMR_MEDIA_PATH`: public ASMR AList source.
+- `DURATION_BOUNDARY_SECONDS`: Guangya short/long boundary, default `180`.
+- `ASMR_EXTENSIONS`: direct files indexed inside each author directory.

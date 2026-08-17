@@ -50,26 +50,78 @@ class LibraryDatabase:
                 connection.execute("ALTER TABLE videos ADD COLUMN fast_start_checked_at TEXT")
             if "fast_start_detail" not in columns:
                 connection.execute("ALTER TABLE videos ADD COLUMN fast_start_detail TEXT")
+            if "source" not in columns:
+                connection.execute(
+                    "ALTER TABLE videos ADD COLUMN source TEXT NOT NULL DEFAULT 'guangya'"
+                )
+            if "author" not in columns:
+                connection.execute("ALTER TABLE videos ADD COLUMN author TEXT")
+            if "duration_seconds" not in columns:
+                connection.execute("ALTER TABLE videos ADD COLUMN duration_seconds REAL")
+            if "media_format" not in columns:
+                connection.execute("ALTER TABLE videos ADD COLUMN media_format TEXT")
+            if "media_kind" not in columns:
+                connection.execute(
+                    "ALTER TABLE videos ADD COLUMN media_kind TEXT NOT NULL DEFAULT 'video'"
+                )
+            if "metadata_checked_at" not in columns:
+                connection.execute("ALTER TABLE videos ADD COLUMN metadata_checked_at TEXT")
+            if "metadata_detail" not in columns:
+                connection.execute("ALTER TABLE videos ADD COLUMN metadata_detail TEXT")
+            connection.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_videos_source_active
+                    ON videos(source, active, id);
+                CREATE INDEX IF NOT EXISTS idx_videos_source_duration
+                    ON videos(source, active, duration_seconds);
+                CREATE INDEX IF NOT EXISTS idx_videos_author
+                    ON videos(source, active, author, media_kind);
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         return connection
 
-    def replace_scan(self, videos: Iterable[dict[str, Any]]) -> int:
-        records = list(videos)
+    def replace_scan(self, videos: Iterable[dict[str, Any]], *, source: str = "guangya") -> int:
+        records = [
+            {
+                **video,
+                "source": source,
+                "author": video.get("author"),
+                "duration_seconds": video.get("duration_seconds"),
+                "media_format": video.get("media_format"),
+                "media_kind": video.get("media_kind") or "video",
+            }
+            for video in videos
+        ]
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("UPDATE videos SET active = 0")
+            connection.execute("UPDATE videos SET active = 0 WHERE source = ?", (source,))
             connection.executemany(
                 """
-                INSERT INTO videos(path, name, size, modified, thumb, active, last_seen)
-                VALUES(:path, :name, :size, :modified, :thumb, 1, CURRENT_TIMESTAMP)
+                INSERT INTO videos(
+                    path, name, size, modified, thumb, source, author,
+                    duration_seconds, media_format, media_kind, active, last_seen
+                )
+                VALUES(
+                    :path, :name, :size, :modified, :thumb, :source, :author,
+                    :duration_seconds, :media_format, :media_kind, 1, CURRENT_TIMESTAMP
+                )
                 ON CONFLICT(path) DO UPDATE SET
                     name = excluded.name,
                     size = excluded.size,
                     modified = excluded.modified,
                     thumb = excluded.thumb,
+                    source = excluded.source,
+                    author = excluded.author,
+                    duration_seconds = COALESCE(videos.duration_seconds, excluded.duration_seconds),
+                    media_format = excluded.media_format,
+                    media_kind = CASE
+                        WHEN videos.metadata_checked_at IS NOT NULL THEN videos.media_kind
+                        ELSE excluded.media_kind
+                    END,
                     active = 1,
                     last_seen = CURRENT_TIMESTAMP
                 """,
@@ -85,10 +137,16 @@ class LibraryDatabase:
             ).fetchone()
         return dict(row) if row else None
 
-    def stats(self) -> dict[str, int]:
+    def stats(self, *, source: str | None = None) -> dict[str, int]:
+        where = "WHERE active = 1"
+        params: tuple[Any, ...] = ()
+        if source:
+            where += " AND source = ?"
+            params = (source,)
         with self._lock, self._connect() as connection:
             row = connection.execute(
-                "SELECT COUNT(*) AS active, COALESCE(SUM(size), 0) AS bytes FROM videos WHERE active = 1"
+                f"SELECT COUNT(*) AS active, COALESCE(SUM(size), 0) AS bytes FROM videos {where}",
+                params,
             ).fetchone()
         return {"videos": int(row["active"]), "bytes": int(row["bytes"])}
 
@@ -100,6 +158,7 @@ class LibraryDatabase:
                 SELECT id, path, name
                 FROM videos
                 WHERE active = 1
+                  AND source = 'guangya'
                   AND (lower(name) LIKE '%.mp4' OR lower(name) LIKE '%.m4v' OR lower(name) LIKE '%.mov')
                   {condition}
                 ORDER BY id
@@ -113,7 +172,7 @@ class LibraryDatabase:
                 """
                 UPDATE videos
                 SET fast_start = ?, fast_start_detail = ?, fast_start_checked_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND active = 1
+                WHERE id = ? AND active = 1 AND source = 'guangya'
                 """,
                 (status, detail[:240], video_id),
             )
@@ -125,6 +184,7 @@ class LibraryDatabase:
                 SELECT fast_start, COUNT(*) AS count
                 FROM videos
                 WHERE active = 1
+                  AND source = 'guangya'
                   AND (lower(name) LIKE '%.mp4' OR lower(name) LIKE '%.m4v' OR lower(name) LIKE '%.mov')
                 GROUP BY fast_start
                 """
@@ -148,7 +208,9 @@ class LibraryDatabase:
                 """
                 SELECT id, name, path, fast_start, fast_start_detail, fast_start_checked_at
                 FROM videos
-                WHERE active = 1 AND fast_start IN ('not_optimized', 'inconclusive', 'error')
+                WHERE active = 1
+                  AND source = 'guangya'
+                  AND fast_start IN ('not_optimized', 'inconclusive', 'error')
                 ORDER BY CASE fast_start WHEN 'not_optimized' THEN 0 WHEN 'error' THEN 1 ELSE 2 END, id
                 LIMIT ?
                 """,
@@ -164,18 +226,30 @@ class LibraryDatabase:
         mode: str,
         exclude_ids: set[int] | None = None,
         start_id: int | None = None,
+        source: str = "guangya",
+        category: str | None = None,
+        duration_boundary: float = 180.0,
     ) -> tuple[list[dict[str, Any]], str | None, int]:
         excluded = exclude_ids or set()
-        filter_key = self._filter_key(excluded, start_id)
+        filter_key = self._filter_key(excluded, start_id, f"{source}:{category or 'all'}")
         seed, offset, cursor_mode, cursor_filter = self._decode_cursor(cursor)
         if cursor and (cursor_mode != mode or cursor_filter != filter_key):
             seed, offset = secrets.randbits(63), 0
 
         with self._lock, self._connect() as connection:
+            conditions = ["active = 1", "source = ?"]
+            params: list[Any] = [source]
+            if category == "short":
+                conditions.append("(duration_seconds < ? OR duration_seconds IS NULL)")
+                params.append(duration_boundary)
+            elif category == "long":
+                conditions.append("duration_seconds >= ?")
+                params.append(duration_boundary)
             rows = [
                 dict(row)
                 for row in connection.execute(
-                    "SELECT * FROM videos WHERE active = 1 ORDER BY id"
+                    f"SELECT * FROM videos WHERE {' AND '.join(conditions)} ORDER BY id",
+                    params,
                 ).fetchall()
             ]
 
@@ -228,7 +302,104 @@ class LibraryDatabase:
             return secrets.randbits(63), 0, "shuffle", ""
 
     @staticmethod
-    def _filter_key(exclude_ids: set[int], start_id: int | None) -> str:
+    def _filter_key(exclude_ids: set[int], start_id: int | None, scope: str = "") -> str:
         value = ",".join(str(video_id) for video_id in sorted(exclude_ids))
         digest = hashlib.blake2s(value.encode(), digest_size=6).hexdigest() if value else ""
-        return f"{digest}:{start_id or ''}"
+        return f"{scope}:{digest}:{start_id or ''}"
+
+    def duration_candidates(self, *, force: bool = False) -> list[dict[str, Any]]:
+        retry_condition = "" if force else (
+            "AND (metadata_checked_at IS NULL "
+            "OR metadata_checked_at < datetime('now', '-1 day'))"
+        )
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, path, name, size
+                FROM videos
+                WHERE active = 1
+                  AND source = 'guangya'
+                  AND duration_seconds IS NULL
+                  AND (lower(name) LIKE '%.mp4' OR lower(name) LIKE '%.m4v' OR lower(name) LIKE '%.mov')
+                  {retry_condition}
+                ORDER BY id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_media_metadata(
+        self,
+        video_id: int,
+        *,
+        duration_seconds: float | None = None,
+        media_kind: str | None = None,
+        detail: str = "browser",
+    ) -> None:
+        assignments = ["metadata_checked_at = CURRENT_TIMESTAMP", "metadata_detail = ?"]
+        params: list[Any] = [detail[:240]]
+        if duration_seconds is not None and duration_seconds > 0:
+            assignments.append("duration_seconds = ?")
+            params.append(float(duration_seconds))
+        if media_kind in {"audio", "video"}:
+            assignments.append("media_kind = ?")
+            params.append(media_kind)
+        params.append(video_id)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                f"UPDATE videos SET {', '.join(assignments)} WHERE id = ? AND active = 1",
+                params,
+            )
+
+    def asmr_authors(self, *, search: str = "") -> list[dict[str, Any]]:
+        conditions = ["active = 1", "source = 'asmr'", "author IS NOT NULL"]
+        params: list[Any] = []
+        if search:
+            conditions.append("author LIKE ? ESCAPE '\\'")
+            params.append(f"%{self._escape_like(search)}%")
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT author,
+                       COUNT(*) AS item_count,
+                       SUM(CASE WHEN media_kind = 'video' THEN 1 ELSE 0 END) AS video_count,
+                       SUM(CASE WHEN media_kind = 'audio' THEN 1 ELSE 0 END) AS audio_count,
+                       MAX(modified) AS modified
+                FROM videos
+                WHERE {' AND '.join(conditions)}
+                GROUP BY author
+                ORDER BY author COLLATE NOCASE
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def asmr_items(
+        self,
+        *,
+        author: str,
+        kind: str = "all",
+        search: str = "",
+    ) -> list[dict[str, Any]]:
+        conditions = ["active = 1", "source = 'asmr'", "author = ?"]
+        params: list[Any] = [author]
+        if kind in {"audio", "video"}:
+            conditions.append("media_kind = ?")
+            params.append(kind)
+        if search:
+            conditions.append("name LIKE ? ESCAPE '\\'")
+            params.append(f"%{self._escape_like(search)}%")
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT *
+                FROM videos
+                WHERE {' AND '.join(conditions)}
+                ORDER BY name COLLATE NOCASE, id
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

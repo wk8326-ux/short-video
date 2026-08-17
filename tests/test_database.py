@@ -89,3 +89,65 @@ def test_fast_start_results_are_persisted_and_summarized(tmp_path):
         "pending": 5,
     }
     assert [issue["id"] for issue in issues] == [2]
+
+
+def test_source_scans_are_isolated_and_duration_boundary_is_180_seconds(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    database.replace_scan(_records())
+    database.update_media_metadata(1, duration_seconds=179.9, detail="test")
+    database.update_media_metadata(2, duration_seconds=180, detail="test")
+
+    asmr = [
+        {
+            "path": "/asmr6/author/track.mp3",
+            "name": "track.mp3",
+            "size": 42,
+            "modified": "2026-08-17T00:00:00Z",
+            "thumb": "",
+            "author": "author",
+            "media_format": "mp3",
+            "media_kind": "audio",
+        }
+    ]
+    database.replace_scan(asmr, source="asmr")
+    database.replace_scan(_records()[:3], source="guangya")
+
+    short, _, short_total = database.feed(
+        limit=20, cursor=None, mode="oldest", category="short"
+    )
+    long, _, long_total = database.feed(
+        limit=20, cursor=None, mode="oldest", category="long"
+    )
+
+    assert short_total == 2  # 179.9 seconds plus one pending metadata row
+    assert [row["id"] for row in long] == [2]
+    assert long_total == 1
+    assert database.stats(source="asmr")["videos"] == 1
+
+
+def test_asmr_authors_and_kind_filters(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    records = [
+        {
+            "path": f"/asmr6/A/{name}",
+            "name": name,
+            "size": 10,
+            "modified": "2026-08-17",
+            "thumb": "",
+            "author": "A",
+            "media_format": name.rsplit(".", 1)[-1],
+            "media_kind": kind,
+        }
+        for name, kind in [("session.m3u8", "video"), ("voice.mp3", "audio")]
+    ]
+    database.replace_scan(records, source="asmr")
+
+    authors = database.asmr_authors()
+    audio = database.asmr_items(author="A", kind="audio")
+
+    assert authors[0]["item_count"] == 2
+    assert authors[0]["video_count"] == 1
+    assert authors[0]["audio_count"] == 1
+    assert [item["name"] for item in audio] == ["voice.mp3"]

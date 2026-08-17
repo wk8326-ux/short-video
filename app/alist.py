@@ -17,15 +17,29 @@ class AListError(RuntimeError):
 
 
 class AListClient:
-    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.AsyncClient | None = None,
+        *,
+        base_url: str | None = None,
+        media_path: str | None = None,
+        extensions: frozenset[str] | None = None,
+        anonymous: bool = False,
+    ):
         self.settings = settings
+        self.base_url = (base_url or settings.alist_base_url).rstrip("/")
+        self.media_path = media_path or settings.alist_media_path
+        self.extensions = extensions or settings.video_extensions
         self._client = client or httpx.AsyncClient(
-            base_url=settings.alist_base_url,
+            base_url=self.base_url,
             follow_redirects=False,
             timeout=httpx.Timeout(20.0, connect=10.0),
         )
         self._owns_client = client is None
-        self._token = settings.alist_token
+        self._token = "" if anonymous else settings.alist_token
+        self._username = "" if anonymous else settings.alist_username
+        self._password = "" if anonymous else settings.alist_password
         self._auth_lock = asyncio.Lock()
 
     async def close(self) -> None:
@@ -33,14 +47,14 @@ class AListClient:
             await self._client.aclose()
 
     async def _login(self) -> None:
-        if not self.settings.alist_username:
+        if not self._username:
             return
         async with self._auth_lock:
             response = await self._client.post(
                 "/api/auth/login",
                 json={
-                    "username": self.settings.alist_username,
-                    "password": self.settings.alist_password,
+                    "username": self._username,
+                    "password": self._password,
                 },
             )
             payload = self._payload(response)
@@ -58,7 +72,7 @@ class AListClient:
 
         payload = self._payload(response)
         code = int(payload.get("code", response.status_code))
-        if code == 401 and retry and self.settings.alist_username:
+        if code == 401 and retry and self._username:
             await self._login()
             return await self._post(endpoint, body, retry=False)
         if code not in (0, 200):
@@ -102,7 +116,7 @@ class AListClient:
         return entries
 
     async def scan(self) -> tuple[list[dict[str, Any]], int]:
-        root = "/" + self.settings.alist_media_path.strip("/")
+        root = "/" + self.media_path.strip("/")
         queue: deque[str] = deque([root])
         videos: list[dict[str, Any]] = []
         directories = 0
@@ -121,7 +135,7 @@ class AListClient:
                     queue.append(child)
                     continue
                 extension = PurePosixPath(name).suffix.lower()
-                if extension not in self.settings.video_extensions:
+                if extension not in self.extensions:
                     continue
                 videos.append(
                     {
@@ -130,9 +144,56 @@ class AListClient:
                         "size": int(entry.get("size") or 0),
                         "modified": entry.get("modified") or entry.get("created"),
                         "thumb": self._absolute_url(str(entry.get("thumb") or "")),
+                        "media_format": extension.lstrip("."),
+                        "media_kind": "video",
                     }
                 )
         return videos, directories
+
+    async def scan_authors(self) -> tuple[list[dict[str, Any]], int]:
+        root = "/" + self.media_path.strip("/")
+        authors = sorted(
+            (
+                entry
+                for entry in await self.list_directory(root)
+                if bool(entry.get("is_dir")) and str(entry.get("name") or "")
+            ),
+            key=lambda entry: str(entry.get("name") or "").casefold(),
+        )
+        semaphore = asyncio.Semaphore(6)
+
+        async def scan_author(entry: dict[str, Any]) -> list[dict[str, Any]]:
+            author = str(entry.get("name") or "")
+            if "/" in author:
+                return []
+            directory = posixpath.join(root, author)
+            async with semaphore:
+                children = await self.list_directory(directory)
+            records: list[dict[str, Any]] = []
+            audio_extensions = {".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus"}
+            for child_entry in children:
+                name = str(child_entry.get("name") or "")
+                if not name or "/" in name or bool(child_entry.get("is_dir")):
+                    continue
+                extension = PurePosixPath(name).suffix.lower()
+                if extension not in self.extensions:
+                    continue
+                records.append(
+                    {
+                        "path": posixpath.join(directory, name),
+                        "name": name,
+                        "size": int(child_entry.get("size") or 0),
+                        "modified": child_entry.get("modified") or child_entry.get("created"),
+                        "thumb": self._absolute_url(str(child_entry.get("thumb") or "")),
+                        "author": author,
+                        "media_format": extension.lstrip("."),
+                        "media_kind": "audio" if extension in audio_extensions else "video",
+                    }
+                )
+            return records
+
+        groups = await asyncio.gather(*(scan_author(author) for author in authors))
+        return [record for group in groups for record in group], len(authors) + 1
 
     async def resolve(self, path: str) -> tuple[str, bool]:
         payload = await self._post("/api/fs/get", {"path": path, "password": ""})
@@ -147,10 +208,23 @@ class AListClient:
         raw_url, requires_headers = await self.resolve(path)
         if requires_headers:
             raise AListError("This media source requires proxy headers")
+        return await self.read_url_range(
+            raw_url,
+            range_header=f"bytes=0-{max_bytes - 1}",
+            max_bytes=max_bytes,
+        )
+
+    async def read_url_range(
+        self,
+        raw_url: str,
+        *,
+        range_header: str,
+        max_bytes: int,
+    ) -> bytes:
         headers = {
             "Accept": "*/*",
             "Accept-Encoding": "identity",
-            "Range": f"bytes=0-{max_bytes - 1}",
+            "Range": range_header,
             "User-Agent": (
                 "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
@@ -177,4 +251,4 @@ class AListClient:
     def _absolute_url(self, value: str) -> str:
         if not value:
             return ""
-        return urljoin(f"{self.settings.alist_base_url}/", value)
+        return urljoin(f"{self.base_url}/", value)

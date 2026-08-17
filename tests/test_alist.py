@@ -86,3 +86,50 @@ async def test_read_prefix_requests_range_and_caps_response():
     await http_client.aclose()
 
     assert prefix == b"a" * 16
+
+
+@pytest.mark.asyncio
+async def test_author_scan_only_indexes_direct_media_files():
+    seen_paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = __import__("json").loads(request.content)
+        seen_paths.append(body["path"])
+        if body["path"] == "/asmr6":
+            content = [
+                {"name": "Author B", "is_dir": True},
+                {"name": "loose.mp3", "is_dir": False},
+            ]
+        else:
+            content = [
+                {"name": "show.m3u8", "is_dir": False, "size": 100},
+                {"name": "voice.mp3", "is_dir": False, "size": 20},
+                {"name": "segments", "is_dir": True},
+                {"name": "cover.jpg", "is_dir": False},
+            ]
+        return httpx.Response(
+            200,
+            json={"code": 200, "data": {"content": content, "total": len(content)}},
+        )
+
+    http_client = httpx.AsyncClient(
+        base_url="https://asmr.example", transport=httpx.MockTransport(handler)
+    )
+    client = AListClient(
+        _settings(),
+        http_client,
+        base_url="https://asmr.example",
+        media_path="/asmr6",
+        extensions=frozenset({".m3u8", ".mp3"}),
+        anonymous=True,
+    )
+
+    records, directories = await client.scan_authors()
+    await http_client.aclose()
+
+    assert seen_paths == ["/asmr6", "/asmr6/Author B"]
+    assert directories == 2
+    assert [(row["name"], row["media_kind"]) for row in records] == [
+        ("show.m3u8", "video"),
+        ("voice.mp3", "audio"),
+    ]

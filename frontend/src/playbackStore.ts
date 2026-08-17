@@ -1,4 +1,5 @@
 export type FeedMode = "shuffle" | "newest" | "oldest";
+export type MediaSurface = "short" | "long" | "asmr";
 
 export type SavedPosition = {
   time: number;
@@ -7,10 +8,12 @@ export type SavedPosition = {
 };
 
 export type PlaybackState = {
-  version: 1;
+  version: 2;
   mode: FeedMode;
+  surface: MediaSurface;
   muted: boolean;
   lastVideoId: number | null;
+  lastVideoIds: Partial<Record<MediaSurface, number>>;
   recentVideoIds: number[];
   positions: Record<string, SavedPosition>;
 };
@@ -21,10 +24,12 @@ const STATE_KEY = "playback";
 const FALLBACK_KEY = "short-video-playback-v1";
 
 const DEFAULT_STATE: PlaybackState = {
-  version: 1,
+  version: 2,
   mode: "shuffle",
+  surface: "short",
   muted: true,
   lastVideoId: null,
+  lastVideoIds: {},
   recentVideoIds: [],
   positions: {},
 };
@@ -79,6 +84,9 @@ function normalizeState(value: unknown): PlaybackState {
   const mode: FeedMode = ["shuffle", "newest", "oldest"].includes(candidate.mode ?? "")
     ? (candidate.mode as FeedMode)
     : "shuffle";
+  const surface: MediaSurface = ["short", "long", "asmr"].includes(candidate.surface ?? "")
+    ? (candidate.surface as MediaSurface)
+    : "short";
   const recentVideoIds = Array.isArray(candidate.recentVideoIds)
     ? candidate.recentVideoIds.filter((id): id is number => Number.isInteger(id) && id > 0).slice(0, 100)
     : [];
@@ -91,16 +99,26 @@ function normalizeState(value: unknown): PlaybackState {
           && Number.isFinite(position.updatedAt);
       })
       .sort(([, left], [, right]) => right.updatedAt - left.updatedAt)
-      .slice(0, 120),
+      .slice(0, 500),
   );
+  const lastVideoIds = Object.fromEntries(
+    Object.entries(candidate.lastVideoIds ?? {}).filter(([key, id]) => {
+      return ["short", "long", "asmr"].includes(key) && Number.isInteger(id) && Number(id) > 0;
+    }),
+  ) as Partial<Record<MediaSurface, number>>;
+  if (!lastVideoIds.short && Number.isInteger(candidate.lastVideoId) && Number(candidate.lastVideoId) > 0) {
+    lastVideoIds.short = Number(candidate.lastVideoId);
+  }
 
   return {
-    version: 1,
+    version: 2,
     mode,
+    surface,
     muted: candidate.muted !== false,
     lastVideoId: Number.isInteger(candidate.lastVideoId) && Number(candidate.lastVideoId) > 0
       ? Number(candidate.lastVideoId)
       : null,
+    lastVideoIds,
     recentVideoIds,
     positions,
   };

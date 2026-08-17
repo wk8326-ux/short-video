@@ -5,7 +5,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -17,17 +17,26 @@ from app.auth import LoginRateLimiter, SESSION_COOKIE, SessionManager, verify_pa
 from app.database import LibraryDatabase
 from app.direct_urls import DirectUrlCache
 from app.faststart import inspect_mp4_prefix
+from app.media_metadata import mp4_duration_seconds
 from app.settings import Settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "0.3.1"
+APP_VERSION = "1.1.0"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
 alist = AListClient(settings)
+asmr_alist = AListClient(
+    settings,
+    base_url=settings.asmr_base_url,
+    media_path=settings.asmr_media_path,
+    extensions=settings.asmr_extensions,
+    anonymous=True,
+)
 direct_urls = DirectUrlCache(alist.resolve, settings.direct_url_cache_seconds)
+asmr_direct_urls = DirectUrlCache(asmr_alist.resolve, settings.direct_url_cache_seconds)
 session_manager = SessionManager(
     settings.session_secret,
     settings.auth_password_hash,
@@ -40,8 +49,20 @@ scan_state: dict[str, Any] = {
     "lastSuccess": None,
     "lastError": None,
     "directories": 0,
+    "sources": {
+        "guangya": {"lastSuccess": None, "lastError": None, "directories": 0},
+        "asmr": {"lastSuccess": None, "lastError": None, "directories": 0},
+    },
 }
 scan_lock = asyncio.Lock()
+metadata_state: dict[str, Any] = {
+    "running": False,
+    "checked": 0,
+    "total": 0,
+    "lastSuccess": None,
+    "lastError": None,
+}
+metadata_lock = asyncio.Lock()
 fast_start_state: dict[str, Any] = {
     "running": False,
     "checked": 0,
@@ -65,20 +86,53 @@ async def scan_library() -> None:
     async with scan_lock:
         scan_state["running"] = True
         try:
-            videos, directories = await alist.scan()
-            count = await asyncio.to_thread(database.replace_scan, videos)
+            errors: list[str] = []
+            total_directories = 0
+            for source, client, cache in (
+                ("guangya", alist, direct_urls),
+                ("asmr", asmr_alist, asmr_direct_urls),
+            ):
+                try:
+                    if source == "asmr":
+                        videos, directories = await client.scan_authors()
+                    else:
+                        videos, directories = await client.scan()
+                    count = await asyncio.to_thread(
+                        database.replace_scan,
+                        videos,
+                        source=source,
+                    )
+                    now = int(time.time())
+                    scan_state["sources"][source].update(
+                        {"lastSuccess": now, "lastError": None, "directories": directories}
+                    )
+                    total_directories += directories
+                    cache.clear()
+                    logger.info(
+                        "Indexed %s %s media items across %s directories",
+                        count,
+                        source,
+                        directories,
+                    )
+                except Exception as exc:
+                    message = f"{source}: {exc}"
+                    errors.append(message)
+                    scan_state["sources"][source]["lastError"] = str(exc)
+                    logger.exception("%s library scan failed", source)
             scan_state.update(
                 {
-                    "lastSuccess": int(time.time()),
-                    "lastError": None,
-                    "directories": directories,
+                    "lastSuccess": (
+                        int(time.time()) if len(errors) < 2 else scan_state["lastSuccess"]
+                    ),
+                    "lastError": "; ".join(errors) or None,
+                    "directories": total_directories,
                 }
             )
-            direct_urls.clear()
-            logger.info("Indexed %s videos across %s directories", count, directories)
-        except Exception as exc:
-            scan_state["lastError"] = str(exc)
-            logger.exception("Library scan failed")
+            if not metadata_lock.locked():
+                spawn_background(
+                    check_media_metadata(force=False),
+                    name="media-metadata-check",
+                )
         finally:
             scan_state["running"] = False
 
@@ -134,6 +188,66 @@ async def check_fast_start(*, force: bool) -> None:
             fast_start_state["running"] = False
 
 
+async def check_media_metadata(*, force: bool) -> None:
+    if metadata_lock.locked():
+        return
+    async with metadata_lock:
+        metadata_state.update(
+            {"running": True, "checked": 0, "total": 0, "lastError": None}
+        )
+        try:
+            videos = await asyncio.to_thread(database.duration_candidates, force=force)
+            metadata_state["total"] = len(videos)
+            semaphore = asyncio.Semaphore(3)
+
+            async def inspect(video: dict[str, Any]) -> None:
+                duration: float | None = None
+                detail = "duration not found in MP4 ranges"
+                try:
+                    async with semaphore:
+                        raw_url, requires_headers = await direct_urls.get(
+                            video["id"], video["path"]
+                        )
+                        if requires_headers:
+                            raise AListError("This media source requires proxy headers")
+                        prefix_size = 256 * 1024
+                        prefix = await alist.read_url_range(
+                            raw_url,
+                            range_header=f"bytes=0-{prefix_size - 1}",
+                            max_bytes=prefix_size,
+                        )
+                        duration = mp4_duration_seconds(prefix)
+                        if duration is None and int(video.get("size") or 0) > prefix_size:
+                            suffix_size = min(1024 * 1024, int(video["size"]))
+                            suffix = await alist.read_url_range(
+                                raw_url,
+                                range_header=f"bytes=-{suffix_size}",
+                                max_bytes=suffix_size,
+                            )
+                            duration = mp4_duration_seconds(prefix, suffix)
+                    if duration is not None:
+                        detail = "MP4 mvhd range probe"
+                except Exception as exc:
+                    detail = str(exc)
+                    logger.warning("Duration check failed for %s: %s", video["path"], exc)
+                await asyncio.to_thread(
+                    database.update_media_metadata,
+                    video["id"],
+                    duration_seconds=duration,
+                    detail=detail,
+                )
+                metadata_state["checked"] += 1
+
+            await asyncio.gather(*(inspect(video) for video in videos))
+            metadata_state["lastSuccess"] = int(time.time())
+            logger.info("Checked media duration for %s videos", len(videos))
+        except Exception as exc:
+            metadata_state["lastError"] = str(exc)
+            logger.exception("Media metadata check failed")
+        finally:
+            metadata_state["running"] = False
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await asyncio.to_thread(database.initialize)
@@ -147,6 +261,7 @@ async def lifespan(_: FastAPI):
         task.cancel()
     await asyncio.gather(*background_tasks, return_exceptions=True)
     await alist.close()
+    await asmr_alist.close()
 
 
 app = FastAPI(
@@ -173,7 +288,7 @@ async def security_headers(request: Request, call_next):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self'; style-src 'self'; "
         "img-src 'self' data: https:; media-src 'self' blob: https:; "
-        "connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+        "connect-src 'self' https:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     )
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
@@ -248,14 +363,17 @@ async def health() -> dict[str, Any]:
 
 @app.get("/api/admin/status")
 async def admin_status() -> dict[str, Any]:
-    library, summary, issues = await asyncio.gather(
+    library, guangya_library, asmr_library, summary, issues = await asyncio.gather(
         asyncio.to_thread(database.stats),
+        asyncio.to_thread(database.stats, source="guangya"),
+        asyncio.to_thread(database.stats, source="asmr"),
         asyncio.to_thread(database.fast_start_summary),
         asyncio.to_thread(database.fast_start_issues, limit=20),
     )
     return {
-        "library": library,
+        "library": {**library, "guangya": guangya_library, "asmr": asmr_library},
         "scan": dict(scan_state),
+        "metadata": dict(metadata_state),
         "fastStart": {**fast_start_state, "summary": summary},
         "issues": issues,
     }
@@ -297,7 +415,8 @@ def parse_excluded_ids(value: str | None) -> set[int]:
 
 async def prewarm_play_url(video: dict[str, Any]) -> None:
     try:
-        await direct_urls.get(video["id"], video["path"])
+        cache = asmr_direct_urls if video.get("source") == "asmr" else direct_urls
+        await cache.get(video["id"], video["path"])
     except Exception as exc:
         logger.warning("Direct URL prewarm failed for video %s: %s", video["id"], exc)
 
@@ -309,6 +428,7 @@ async def feed(
     mode: str = Query(default="shuffle", pattern="^(shuffle|newest|oldest)$"),
     exclude: str | None = Query(default=None, max_length=1024),
     start: int | None = Query(default=None, ge=1),
+    category: str = Query(default="short", pattern="^(short|long)$"),
 ) -> dict[str, Any]:
     rows, next_cursor, total = await asyncio.to_thread(
         database.feed,
@@ -317,6 +437,9 @@ async def feed(
         mode=mode,
         exclude_ids=parse_excluded_ids(exclude),
         start_id=start,
+        source="guangya",
+        category=category,
+        duration_boundary=settings.duration_boundary_seconds,
     )
     if rows:
         spawn_background(
@@ -330,6 +453,7 @@ async def feed(
                 "title": Path(row["name"]).stem,
                 "size": row["size"],
                 "modified": row["modified"],
+                "duration": row.get("duration_seconds"),
                 "playUrl": f"/api/videos/{row['id']}/play",
                 "posterUrl": f"/api/videos/{row['id']}/poster" if row.get("thumb") else None,
             }
@@ -348,7 +472,8 @@ async def play(video_id: int, refresh: bool = False):
         raise HTTPException(status_code=404, detail="Video not found")
 
     try:
-        raw_url, requires_headers = await direct_urls.get(
+        cache = asmr_direct_urls if video.get("source") == "asmr" else direct_urls
+        raw_url, requires_headers = await cache.get(
             video_id,
             video["path"],
             refresh=refresh,
@@ -363,6 +488,80 @@ async def play(video_id: int, refresh: bool = False):
         status_code=302,
         headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
     )
+
+
+class MediaMetadataReport(BaseModel):
+    duration: float | None = Field(default=None, gt=0, le=604800)
+    media_kind: Literal["audio", "video"] | None = Field(default=None, alias="mediaKind")
+
+
+@app.post("/api/videos/{video_id}/metadata", status_code=204)
+async def report_media_metadata(video_id: int, payload: MediaMetadataReport):
+    video = await asyncio.to_thread(database.get_video, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Media not found")
+    await asyncio.to_thread(
+        database.update_media_metadata,
+        video_id,
+        duration_seconds=payload.duration,
+        media_kind=payload.media_kind,
+        detail="browser metadata",
+    )
+
+
+@app.get("/api/asmr/authors")
+async def asmr_authors(
+    q: str = Query(default="", max_length=100),
+) -> dict[str, Any]:
+    rows = await asyncio.to_thread(database.asmr_authors, search=q.strip())
+    return {
+        "items": [
+            {
+                "name": row["author"],
+                "itemCount": int(row["item_count"] or 0),
+                "videoCount": int(row["video_count"] or 0),
+                "audioCount": int(row["audio_count"] or 0),
+                "modified": row["modified"],
+            }
+            for row in rows
+        ],
+        "total": len(rows),
+        "scan": scan_state["sources"]["asmr"],
+    }
+
+
+@app.get("/api/asmr/authors/{author}/items")
+async def asmr_author_items(
+    author: str,
+    kind: str = Query(default="all", pattern="^(all|video|audio)$"),
+    q: str = Query(default="", max_length=100),
+) -> dict[str, Any]:
+    rows = await asyncio.to_thread(
+        database.asmr_items,
+        author=author,
+        kind=kind,
+        search=q.strip(),
+    )
+    if not rows and not await asyncio.to_thread(database.asmr_authors, search=author):
+        raise HTTPException(status_code=404, detail="Author not found")
+    return {
+        "items": [
+            {
+                "id": row["id"],
+                "title": Path(row["name"]).stem,
+                "author": row["author"],
+                "size": row["size"],
+                "modified": row["modified"],
+                "duration": row.get("duration_seconds"),
+                "format": row.get("media_format"),
+                "kind": row.get("media_kind") or "video",
+                "playUrl": f"/api/videos/{row['id']}/play",
+                "posterUrl": f"/api/videos/{row['id']}/poster" if row.get("thumb") else None,
+            }
+            for row in rows
+        ],
+        "total": len(rows),
+    }
 
 
 @app.get("/api/videos/{video_id}/poster")

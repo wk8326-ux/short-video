@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.0] - 2026-08-17
+
+### Added
+
+- Short and long Guangya surfaces split at 180 seconds.
+- Background MP4 duration probing plus browser metadata reporting.
+- Independent public ASMR AList indexing by root author folder.
+- Author search, media title search, and all/video/audio filters.
+- Direct MP3, video, and HLS playback with a persistent mini-player.
+- Lazy-loaded ASMR library and HLS engine to protect short-video startup time.
+
+### Changed
+
+- SQLite scans, URL caches, statistics, and Fast Start work are source-aware.
+- Playback preferences now remember the selected media surface and per-surface resume item.
+- CSP permits HTTPS HLS playlist and segment requests.
+
 ## [1.0.0] - 2026-08-16
 
 ### Added

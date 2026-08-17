@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 def _positive_int(name: str, default: int, minimum: int) -> int:
@@ -27,12 +27,28 @@ class Settings:
     auth_password_hash: str
     session_secret: str
     session_days: int
+    asmr_base_url: str = "https://www.asmrgay.com"
+    asmr_media_path: str = "/asmr6"
+    asmr_extensions: frozenset[str] = field(
+        default_factory=lambda: frozenset(
+            {".m3u8", ".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus", ".mp4", ".m4v", ".mov", ".webm"}
+        )
+    )
+    duration_boundary_seconds: int = 180
 
     @classmethod
     def from_env(cls) -> "Settings":
         extensions = {
             value.strip().lower()
             for value in os.getenv("VIDEO_EXTENSIONS", ".mp4,.m4v,.mov,.webm").split(",")
+            if value.strip()
+        }
+        asmr_extensions = {
+            value.strip().lower()
+            for value in os.getenv(
+                "ASMR_EXTENSIONS",
+                ".m3u8,.mp3,.m4a,.aac,.flac,.wav,.ogg,.opus,.mp4,.m4v,.mov,.webm",
+            ).split(",")
             if value.strip()
         }
         return cls(
@@ -49,6 +65,10 @@ class Settings:
             auth_password_hash=os.getenv("AUTH_PASSWORD_HASH", "").strip(),
             session_secret=os.getenv("SESSION_SECRET", "").strip(),
             session_days=_positive_int("SESSION_DAYS", 180, 1),
+            asmr_base_url=os.getenv("ASMR_BASE_URL", "https://www.asmrgay.com").rstrip("/"),
+            asmr_media_path=os.getenv("ASMR_MEDIA_PATH", "/asmr6"),
+            asmr_extensions=frozenset(asmr_extensions),
+            duration_boundary_seconds=_positive_int("DURATION_BOUNDARY_SECONDS", 180, 1),
         )
 
     def validate(self) -> None:
@@ -56,6 +76,10 @@ class Settings:
             raise ValueError("ALIST_BASE_URL must be an absolute HTTP(S) URL")
         if not self.alist_media_path.startswith("/"):
             raise ValueError("ALIST_MEDIA_PATH must start with /")
+        if not self.asmr_base_url.startswith(("http://", "https://")):
+            raise ValueError("ASMR_BASE_URL must be an absolute HTTP(S) URL")
+        if not self.asmr_media_path.startswith("/"):
+            raise ValueError("ASMR_MEDIA_PATH must start with /")
         if not self.auth_password_hash.startswith("scrypt:"):
             raise ValueError("AUTH_PASSWORD_HASH is missing; run: python app/auth.py init-env .env")
         if len(self.session_secret) < 32:

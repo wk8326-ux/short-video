@@ -29,13 +29,16 @@ import {
   VolumeX,
   XCircle,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
   loadPlaybackState,
   updatePlaybackState,
   type FeedMode,
   type PlaybackState,
 } from "./playbackStore";
+import type { MediaSurface } from "./playbackStore";
+
+const AsmrLibrary = lazy(() => import("./AsmrLibrary"));
 
 type VideoItem = {
   id: number;
@@ -44,6 +47,7 @@ type VideoItem = {
   modified: string | null;
   playUrl: string;
   posterUrl: string | null;
+  duration: number | null;
 };
 
 type FeedResponse = {
@@ -261,6 +265,7 @@ type PlayerAppProps = { onUnauthorized: () => void };
 function PlayerApp({ onUnauthorized }: PlayerAppProps) {
   const [preferences, setPreferences] = useState<PlaybackState | null>(null);
   const [mode, setMode] = useState<FeedMode>("shuffle");
+  const [surface, setSurface] = useState<MediaSurface>("short");
   const [items, setItems] = useState<VideoItem[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [landscapeIndex, setLandscapeIndex] = useState<number | null>(null);
@@ -291,6 +296,7 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
       if (cancelled) return;
       recentRef.current = state.recentVideoIds;
       setMode(state.mode);
+      setSurface(state.surface);
       setMuted(state.muted);
       setPreferences(state);
     });
@@ -324,7 +330,11 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
     };
   }, [menuOpen]);
 
-  const requestPage = useCallback(async (reset: boolean, requestedMode: FeedMode) => {
+  const requestPage = useCallback(async (
+    reset: boolean,
+    requestedMode: FeedMode,
+    requestedSurface: Exclude<MediaSurface, "asmr">,
+  ) => {
     if (reset) abortRef.current?.abort();
     else if (loadingRef.current || !cursorRef.current) return;
     const controller = new AbortController();
@@ -333,7 +343,11 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
     setLoading(true);
     setError("");
     const generation = generationRef.current;
-    const params = new URLSearchParams({ limit: "12", mode: requestedMode });
+    const params = new URLSearchParams({
+      limit: "12",
+      mode: requestedMode,
+      category: requestedSurface,
+    });
     if (!reset && cursorRef.current) params.set("cursor", cursorRef.current);
     if (sessionExcludeRef.current.length) params.set("exclude", sessionExcludeRef.current.join(","));
     if (sessionStartRef.current) params.set("start", String(sessionStartRef.current));
@@ -360,7 +374,9 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
 
       if (reset && data.items.length === 0 && data.scan.running) {
         window.setTimeout(() => {
-          if (generation === generationRef.current) void requestPage(true, requestedMode);
+          if (generation === generationRef.current) {
+            void requestPage(true, requestedMode, requestedSurface);
+          }
         }, 1600);
       } else if (reset && data.items.length === 0 && data.scan.lastError) {
         setError("目录索引失败，请稍后重试");
@@ -377,24 +393,24 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
   }, [onUnauthorized]);
 
   useEffect(() => {
-    if (!preferences) return;
+    if (!preferences || surface === "asmr") return;
     generationRef.current += 1;
     cursorRef.current = null;
     sessionExcludeRef.current = mode === "shuffle" ? [...recentRef.current] : [];
-    sessionStartRef.current = initialFeedRef.current ? preferences.lastVideoId : null;
+    sessionStartRef.current = preferences.lastVideoIds[surface] ?? null;
     initialFeedRef.current = false;
     setItems([]);
     activeIndexRef.current = 0;
     setActiveIndex(0);
     feedRef.current?.scrollTo({ top: 0 });
-    void requestPage(true, mode);
+    void requestPage(true, mode, surface);
     return () => abortRef.current?.abort();
-  }, [mode, preferences, requestPage]);
+  }, [mode, preferences, requestPage, surface]);
 
   useEffect(() => {
     if (!cursorRef.current || activeIndex < items.length - 4) return;
-    void requestPage(false, mode);
-  }, [activeIndex, items.length, mode, requestPage]);
+    if (surface !== "asmr") void requestPage(false, mode, surface);
+  }, [activeIndex, items.length, mode, requestPage, surface]);
 
   useEffect(() => {
     if (view !== "player") return;
@@ -425,8 +441,13 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
   const markWatched = useCallback((videoId: number) => {
     const recent = [videoId, ...recentRef.current.filter((id) => id !== videoId)].slice(0, 100);
     recentRef.current = recent;
-    updatePlaybackState((state) => ({ ...state, lastVideoId: videoId, recentVideoIds: recent }));
-  }, []);
+    updatePlaybackState((state) => ({
+      ...state,
+      lastVideoId: videoId,
+      lastVideoIds: { ...state.lastVideoIds, [surface]: videoId },
+      recentVideoIds: recent,
+    }));
+  }, [surface]);
 
   const recordProgress = useCallback((videoId: number, rawTime: number, duration: number) => {
     if (!Number.isFinite(rawTime) || !Number.isFinite(duration) || duration <= 0) return;
@@ -445,6 +466,15 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
     setMode(nextMode);
     setMenuOpen(false);
     updatePlaybackState({ mode: nextMode });
+  };
+
+  const changeSurface = (nextSurface: MediaSurface) => {
+    if (nextSurface === surface) return;
+    landscapeIndexRef.current = null;
+    setLandscapeIndex(null);
+    setMenuOpen(false);
+    setSurface(nextSurface);
+    updatePlaybackState({ surface: nextSurface });
   };
 
   const changeMuted = useCallback((nextMuted: boolean) => {
@@ -525,11 +555,24 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
   const effectiveActiveIndex = landscapeIndex ?? activeIndex;
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell${surface === "asmr" ? " is-library" : ""}`}>
       <header className="top-bar">
-        <div className="wordmark" aria-label="短片">
-          <span aria-hidden="true" />
-          短片
+        <div className="surface-tabs" role="tablist" aria-label="媒体分类">
+          {([
+            ["short", "短视频"],
+            ["long", "长视频"],
+            ["asmr", "ASMR"],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={surface === value}
+              onClick={() => changeSurface(value)}
+            >
+              {label}
+            </button>
+          ))}
         </div>
         <div className="mode-control" ref={menuRef}>
           <button
@@ -544,7 +587,7 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
           </button>
           {menuOpen && (
             <div className="mode-menu" id="player-menu" role="menu">
-              {MODES.map((entry) => {
+              {surface !== "asmr" && MODES.map((entry) => {
                 const Icon = entry.icon;
                 return (
                   <button
@@ -560,7 +603,7 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
                   </button>
                 );
               })}
-              <div className="menu-separator" role="separator" />
+              {surface !== "asmr" && <div className="menu-separator" role="separator" />}
               <button type="button" role="menuitem" onClick={openManagement}>
                 <Settings2 size={18} aria-hidden="true" />
                 <span>管理</span>
@@ -576,7 +619,15 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
         </div>
       </header>
 
-      <div className="feed" ref={feedRef} aria-label={`${selectedMode.label}视频列表`}>
+      {surface === "asmr" ? (
+        <Suspense fallback={<div className="feed-state"><LoaderCircle className="spinner" size={28} aria-hidden="true" /></div>}>
+          <AsmrLibrary
+            positions={preferences?.positions ?? {}}
+            onProgress={recordProgress}
+            onUnauthorized={onUnauthorized}
+          />
+        </Suspense>
+      ) : <div className="feed" ref={feedRef} aria-label={`${selectedMode.label}视频列表`}>
         {items.map((item, index) => (
           <VideoSlide
             key={`${mode}-${item.id}`}
@@ -609,7 +660,7 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
               <>
                 <p>{error || "目录中没有可播放的视频"}</p>
                 {error && (
-                  <button className="retry-button" type="button" onClick={() => void requestPage(true, mode)}>
+                  <button className="retry-button" type="button" onClick={() => void requestPage(true, mode, surface)}>
                     <RefreshCw size={18} aria-hidden="true" />
                     重试
                   </button>
@@ -618,7 +669,7 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
             )}
           </div>
         )}
-      </div>
+      </div>}
 
       {error && items.length > 0 && <div className="notice" role="status">{error}</div>}
     </main>
@@ -862,6 +913,7 @@ function VideoSlide({
   const chromeTimerRef = useRef<number | null>(null);
   const chromeVisibleRef = useRef(true);
   const restoredRef = useRef(false);
+  const metadataReportedRef = useRef(false);
   const currentTimeRef = useRef(initialTime);
   const durationRef = useRef(0);
   const lastPersistedRef = useRef(initialTime);
@@ -899,6 +951,7 @@ function VideoSlide({
 
   useEffect(() => {
     restoredRef.current = false;
+    metadataReportedRef.current = false;
   }, [source]);
 
   useEffect(() => {
@@ -1145,6 +1198,14 @@ function VideoSlide({
     const nextDuration = Number.isFinite(video.duration) ? video.duration : 0;
     durationRef.current = nextDuration;
     setDuration(nextDuration);
+    if (nextDuration > 0 && !metadataReportedRef.current) {
+      metadataReportedRef.current = true;
+      void fetch(`/api/videos/${item.id}/metadata`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ duration: nextDuration, mediaKind: "video" }),
+      }).catch(() => undefined);
+    }
     if (nextDuration > 0 && !restoredRef.current) {
       restoredRef.current = true;
       if (initialTime > 1 && initialTime < nextDuration - 3) {
