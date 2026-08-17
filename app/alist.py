@@ -11,6 +11,11 @@ import httpx
 
 from app.settings import Settings
 
+USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
+)
+
 
 class AListError(RuntimeError):
     pass
@@ -56,6 +61,7 @@ class AListClient:
                     "username": self._username,
                     "password": self._password,
                 },
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
             )
             payload = self._payload(response)
             token = str((payload.get("data") or {}).get("token") or "")
@@ -64,7 +70,9 @@ class AListClient:
             self._token = token
 
     async def _post(self, endpoint: str, body: dict[str, Any], retry: bool = True) -> dict[str, Any]:
-        headers = {"Authorization": self._token} if self._token else {}
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+        if self._token:
+            headers["Authorization"] = self._token
         try:
             response = await self._client.post(endpoint, json=body, headers=headers)
         except httpx.HTTPError as exc:
@@ -225,10 +233,7 @@ class AListClient:
             "Accept": "*/*",
             "Accept-Encoding": "identity",
             "Range": range_header,
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": USER_AGENT,
         }
         try:
             async with self._client.stream(

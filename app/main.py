@@ -21,9 +21,10 @@ from app.media_metadata import mp4_duration_seconds
 from app.settings import Settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -196,7 +197,11 @@ async def check_media_metadata(*, force: bool) -> None:
             {"running": True, "checked": 0, "total": 0, "lastError": None}
         )
         try:
-            videos = await asyncio.to_thread(database.duration_candidates, force=force)
+            videos = await asyncio.to_thread(
+                database.duration_candidates,
+                force=force,
+                limit=settings.metadata_probe_batch_size,
+            )
             metadata_state["total"] = len(videos)
             semaphore = asyncio.Semaphore(3)
 

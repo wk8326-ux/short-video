@@ -35,6 +35,7 @@ class Settings:
         )
     )
     duration_boundary_seconds: int = 180
+    metadata_probe_batch_size: int = 30
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -69,6 +70,7 @@ class Settings:
             asmr_media_path=os.getenv("ASMR_MEDIA_PATH", "/asmr6"),
             asmr_extensions=frozenset(asmr_extensions),
             duration_boundary_seconds=_positive_int("DURATION_BOUNDARY_SECONDS", 180, 1),
+            metadata_probe_batch_size=_positive_int("METADATA_PROBE_BATCH_SIZE", 30, 1),
         )
 
     def validate(self) -> None:

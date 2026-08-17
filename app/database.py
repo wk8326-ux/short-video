@@ -307,7 +307,12 @@ class LibraryDatabase:
         digest = hashlib.blake2s(value.encode(), digest_size=6).hexdigest() if value else ""
         return f"{scope}:{digest}:{start_id or ''}"
 
-    def duration_candidates(self, *, force: bool = False) -> list[dict[str, Any]]:
+    def duration_candidates(
+        self,
+        *,
+        force: bool = False,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
         retry_condition = "" if force else (
             "AND (metadata_checked_at IS NULL "
             "OR metadata_checked_at < datetime('now', '-1 day'))"
@@ -322,8 +327,10 @@ class LibraryDatabase:
                   AND duration_seconds IS NULL
                   AND (lower(name) LIKE '%.mp4' OR lower(name) LIKE '%.m4v' OR lower(name) LIKE '%.mov')
                   {retry_condition}
-                ORDER BY id
-                """
+                ORDER BY size DESC, id
+                LIMIT ?
+                """,
+                (max(1, limit),),
             ).fetchall()
         return [dict(row) for row in rows]
 

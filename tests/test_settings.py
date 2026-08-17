@@ -23,3 +23,4 @@ def test_asmr_and_duration_defaults(monkeypatch):
     assert settings.asmr_base_url == "https://www.asmrgay.com"
     assert settings.asmr_media_path == "/asmr6"
     assert settings.duration_boundary_seconds == 180
+    assert settings.metadata_probe_batch_size == 30

@@ -26,6 +26,7 @@ def _settings() -> Settings:
 @pytest.mark.asyncio
 async def test_recursive_scan_and_resolve():
     async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["user-agent"].startswith("Mozilla/5.0")
         body = __import__("json").loads(request.content)
         if request.url.path == "/api/fs/list" and body["path"] == "/media":
             content = [

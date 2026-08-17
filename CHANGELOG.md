@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.1] - 2026-08-17
+
+### Fixed
+
+- Use a browser User-Agent for AList API requests rejected by the ASMR site's WAF.
+- Limit MP4 duration probing to the 30 largest pending files per scan.
+- Update Vite to 7.3.6 to resolve development-server security advisories.
+
 ## [1.1.0] - 2026-08-17
 
 ### Added

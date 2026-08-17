@@ -151,3 +151,16 @@ def test_asmr_authors_and_kind_filters(tmp_path):
     assert authors[0]["video_count"] == 1
     assert authors[0]["audio_count"] == 1
     assert [item["name"] for item in audio] == ["voice.mp3"]
+
+
+def test_duration_probe_batch_is_limited_and_prioritizes_large_files(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    database.replace_scan(_records())
+
+    candidates = database.duration_candidates(limit=2)
+
+    assert [candidate["name"] for candidate in candidates] == [
+        "video-7.mp4",
+        "video-6.mp4",
+    ]

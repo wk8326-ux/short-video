@@ -24,7 +24,7 @@ The application server never proxies or transcodes media bytes.
 
 Fast Start checks are manual and read at most the first 256 KiB of each MP4-family file. They do not rewrite or transcode media.
 
-Guangya duration classification runs in the background using small MP4 range reads. Browser metadata is also reported after successful playback. Existing files without known duration temporarily remain in the short-video feed so an upgrade never leaves the default screen empty.
+Guangya duration classification runs in the background using small MP4 range reads. Each scan checks at most 30 pending files, largest first; browser metadata is also reported after successful playback. Existing files without known duration temporarily remain in the short-video feed so an upgrade never leaves the default screen empty.
 
 The ASMR scanner indexes only the root author folders and their direct media files. It deliberately does not recurse into HLS segment directories. `hls.js` is loaded only after an HLS item is opened, so the default short-video startup bundle does not include the HLS engine. The ASMR playlist and segment origin must allow browser CORS access.
 
@@ -64,4 +64,5 @@ Key source settings:
 - `ALIST_BASE_URL` / `ALIST_MEDIA_PATH`: private Guangya AList source.
 - `ASMR_BASE_URL` / `ASMR_MEDIA_PATH`: public ASMR AList source.
 - `DURATION_BOUNDARY_SECONDS`: Guangya short/long boundary, default `180`.
+- `METADATA_PROBE_BATCH_SIZE`: maximum MP4 duration probes per scan, default `30`.
 - `ASMR_EXTENSIONS`: direct files indexed inside each author directory.
