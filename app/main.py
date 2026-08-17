@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.2.0"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -96,7 +96,11 @@ async def scan_library() -> None:
             ):
                 try:
                     if source == "asmr":
-                        videos, directories = await client.scan_authors()
+                        videos, directories = await client.scan_authors(
+                            search_paths=settings.asmr_search_paths,
+                            author_group_paths=settings.asmr_author_group_paths,
+                            search_result_limit=settings.asmr_search_result_limit,
+                        )
                     else:
                         videos, directories = await client.scan()
                     count = await asyncio.to_thread(

@@ -1,13 +1,13 @@
 # Private Media Player
 
-Android-first private media PWA backed by two AList sources.
+Private Android media player and fallback PWA backed by two AList sources.
 
 ```text
 Guangya: Browser -> FastAPI metadata/resolve API -> AList fs/get -> 302 -> drive CDN
 ASMR:    Browser -> FastAPI library/resolve API -> AList fs/get -> 302 -> HLS/audio origin
 ```
 
-The application server never proxies or transcodes media bytes.
+The application server never proxies or transcodes media bytes. Both Android and the PWA follow the authenticated play endpoint's 302 response and fetch media directly from the drive origin or CDN.
 
 ## Features
 
@@ -20,15 +20,35 @@ The application server never proxies or transcodes media bytes.
 - Android landscape playback through fullscreen orientation lock
 - Author-first ASMR library with title search and all/video/audio filters
 - Adaptive MP3/direct-video/HLS playback with a persistent bottom mini-player
+- Native Android client with a persistent 1 GiB media cache and stable cache keys
+- ASMR audio/video background playback with lock-screen and notification controls
+- ASMR video landscape playback with five-second chrome fade and horizontal seeking
 - Authenticated management view for library rescans and MP4 Fast Start checks
 
 Fast Start checks are manual and read at most the first 256 KiB of each MP4-family file. They do not rewrite or transcode media.
 
 Guangya duration classification runs in the background using small MP4 range reads. Each scan checks at most 30 pending files, largest first; browser metadata is also reported after successful playback. Existing files without known duration temporarily remain in the short-video feed so an upgrade never leaves the default screen empty.
 
-The ASMR scanner indexes only the root author folders and their direct media files. It deliberately does not recurse into HLS segment directories. `hls.js` stays out of the default short-video startup bundle and is warmed only after the ASMR library is active. The first author media resolver is also prewarmed without proxying media bytes. The ASMR playlist and segment origin must allow browser CORS access.
+The ASMR scanner keeps `/asmr6` compatibility and searches configured `/asmr` trees by media extension. Known category folders are flattened to the first author folder beneath them, while HLS segment files remain excluded. `hls.js` stays out of the default PWA short-video startup bundle and is warmed only after the ASMR library is active. The first author media resolver is also prewarmed without proxying media bytes. The ASMR playlist and segment origin must allow browser CORS access; the native Android client does not depend on browser CORS.
 
 ASMR directory API requests are paced at four requests per second by default and retry temporary HTTP 429 responses. This keeps the public source scan polite and predictable.
+
+## Android client
+
+The native client lives in `android/`, targets Android 8.0 and later, and uses Media3/ExoPlayer. It reuses the existing login, feed, ASMR, management, and 302 play APIs.
+
+Cached media is stored in the app's private storage and capped at 1 GiB with least-recently-used eviction. Short videos up to 96 MiB are prefetched in full; larger short videos cache the first 24 MiB; long video and audio cache the first 12 MiB. Already cached bytes bypass play-URL resolution, and HLS playlists/segments use stable keys without signed query parameters.
+
+Only ASMR media continues when the app is backgrounded or the screen is locked. Short and long feeds pause. Android exposes ASMR playback through a foreground media session with notification and lock-screen play/pause controls, audio focus, headset-disconnect handling, and a network wake lock. On Android 13 or later, allow notifications when prompted to keep the controls visible.
+
+Build an installable internal APK:
+
+```powershell
+cd android
+.\gradlew.bat lintDebug testDebugUnitTest assembleDebug --no-daemon
+```
+
+The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. The checked-in Gradle configuration uses Tencent mirrors first so builds do not depend on direct access to GitHub or Maven Central.
 
 ## Local development
 
@@ -65,6 +85,9 @@ Key source settings:
 
 - `ALIST_BASE_URL` / `ALIST_MEDIA_PATH`: private Guangya AList source.
 - `ASMR_BASE_URL` / `ASMR_MEDIA_PATH`: public ASMR AList source.
+- `ASMR_SEARCH_PATHS`: additional AList trees searched by media extension, default `/asmr`.
+- `ASMR_AUTHOR_GROUP_PATHS`: category folders whose first child is treated as the author.
+- `ASMR_SEARCH_RESULT_LIMIT`: upper bound for each extension search, default `100000`.
 - `ASMR_REQUEST_INTERVAL_SECONDS`: minimum delay between ASMR AList API calls, default `0.25`.
 - `DURATION_BOUNDARY_SECONDS`: Guangya short/long boundary, default `180`.
 - `METADATA_PROBE_BATCH_SIZE`: maximum MP4 duration probes per scan, default `30`.

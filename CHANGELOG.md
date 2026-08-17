@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.2.0] - 2026-08-17
+
+### Added
+
+- Add a native Android 8+ client using Kotlin, Jetpack Compose, Media3, and ExoPlayer.
+- Add a persistent 1 GiB phone-local media cache with stable keys, prefix/full-file prefetch, and cached-byte playback that bypasses repeat 302 resolution.
+- Add ASMR audio and video background playback with lock-screen and notification controls, audio focus, headset-disconnect handling, and a network wake lock.
+- Add ASMR video landscape playback with the feed's five-second chrome fade, center play/pause control, progress control, mute control, and horizontal seeking.
+- Index the additional `/asmr` AList tree and flatten configured category folders into author-level library entries.
+
+### Fixed
+
+- Restore the active ASMR media into the Android UI when the task is reopened while its media service is still playing.
+- Return to portrait when an expanded ASMR video is closed or collapsed from landscape.
+- Explicitly opt in to the Media3 cache APIs and resolve Android 8 theme compatibility findings reported by lint.
+
+### Improved
+
+- Stream ASMR search pages into SQLite without retaining duplicate 40k+ item lists in memory.
+- Use Tencent mirrors for Gradle and Maven dependencies in restricted network environments.
+
 ## [1.1.6] - 2026-08-17
 
 ### Fixed

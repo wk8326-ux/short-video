@@ -4,6 +4,17 @@ import os
 from dataclasses import dataclass, field
 
 
+DEFAULT_ASMR_AUTHOR_GROUP_PATHS = (
+    "/asmr/\u4e2d\u6587\u97f3\u58f0",
+    "/asmr/\u4e9a\u592a",
+    "/asmr/\u5973\u6027\u5411",
+    "/asmr/\u672a\u5206\u7c7b",
+    "/asmr/\u82f1\u8bed\u97f3\u58f0",
+    "/asmr/\u975eASMR\u8d44\u6e90",
+    "/asmr/\u97f3\u58f0\u6c49\u5316",
+)
+
+
 def _positive_int(name: str, default: int, minimum: int) -> int:
     raw = os.getenv(name, str(default))
     try:
@@ -18,6 +29,16 @@ def _positive_float(name: str, default: float, minimum: float) -> float:
         return max(minimum, float(raw))
     except ValueError:
         return default
+
+
+def _paths(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    values = default if raw is None else tuple(raw.split(","))
+    return tuple(
+        "/" + value.strip().strip("/")
+        for value in values
+        if value.strip() and value.strip() != "/"
+    )
 
 
 @dataclass(frozen=True)
@@ -45,6 +66,11 @@ class Settings:
     duration_boundary_seconds: int = 180
     metadata_probe_batch_size: int = 30
     asmr_request_interval_seconds: float = 0.25
+    asmr_search_paths: tuple[str, ...] = ("/asmr",)
+    asmr_author_group_paths: frozenset[str] = field(
+        default_factory=lambda: frozenset(DEFAULT_ASMR_AUTHOR_GROUP_PATHS)
+    )
+    asmr_search_result_limit: int = 100000
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -83,6 +109,13 @@ class Settings:
             asmr_request_interval_seconds=_positive_float(
                 "ASMR_REQUEST_INTERVAL_SECONDS", 0.25, 0.0
             ),
+            asmr_search_paths=_paths("ASMR_SEARCH_PATHS", ("/asmr",)),
+            asmr_author_group_paths=frozenset(
+                _paths("ASMR_AUTHOR_GROUP_PATHS", DEFAULT_ASMR_AUTHOR_GROUP_PATHS)
+            ),
+            asmr_search_result_limit=_positive_int(
+                "ASMR_SEARCH_RESULT_LIMIT", 100000, 1
+            ),
         )
 
     def validate(self) -> None:
@@ -94,6 +127,10 @@ class Settings:
             raise ValueError("ASMR_BASE_URL must be an absolute HTTP(S) URL")
         if not self.asmr_media_path.startswith("/"):
             raise ValueError("ASMR_MEDIA_PATH must start with /")
+        if any(not path.startswith("/") for path in self.asmr_search_paths):
+            raise ValueError("ASMR_SEARCH_PATHS entries must start with /")
+        if any(not path.startswith("/") for path in self.asmr_author_group_paths):
+            raise ValueError("ASMR_AUTHOR_GROUP_PATHS entries must start with /")
         if not self.auth_password_hash.startswith("scrypt:"):
             raise ValueError("AUTH_PASSWORD_HASH is missing; run: python app/auth.py init-env .env")
         if len(self.session_secret) < 32:

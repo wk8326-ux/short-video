@@ -85,17 +85,21 @@ class LibraryDatabase:
         return connection
 
     def replace_scan(self, videos: Iterable[dict[str, Any]], *, source: str = "guangya") -> int:
-        records = [
-            {
-                **video,
-                "source": source,
-                "author": video.get("author"),
-                "duration_seconds": video.get("duration_seconds"),
-                "media_format": video.get("media_format"),
-                "media_kind": video.get("media_kind") or "video",
-            }
-            for video in videos
-        ]
+        count = 0
+
+        def records():
+            nonlocal count
+            for video in videos:
+                count += 1
+                yield {
+                    **video,
+                    "source": source,
+                    "author": video.get("author"),
+                    "duration_seconds": video.get("duration_seconds"),
+                    "media_format": video.get("media_format"),
+                    "media_kind": video.get("media_kind") or "video",
+                }
+
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("UPDATE videos SET active = 0 WHERE source = ?", (source,))
@@ -126,10 +130,10 @@ class LibraryDatabase:
                     active = 1,
                     last_seen = CURRENT_TIMESTAMP
                 """,
-                records,
+                records(),
             )
             connection.commit()
-        return len(records)
+        return count
 
     def get_video(self, video_id: int) -> dict[str, Any] | None:
         with self._lock, self._connect() as connection:

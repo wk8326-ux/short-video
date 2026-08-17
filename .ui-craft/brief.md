@@ -1,6 +1,6 @@
 # Product purpose
 
-Play private Guangya short/long video feeds and browse a separate author-organized ASMR library, all with direct origin delivery.
+Play private Guangya short/long video feeds and browse a separate author-organized ASMR library in a native Android client or fallback PWA, all with direct origin delivery.
 
 # Primary user
 
@@ -15,7 +15,7 @@ One private user watching and listening primarily on an Android phone in repeat 
 
 # Success metric
 
-The user resumes media at the saved position, sees no recent repeats in shuffle mode, can browse ASMR by author and format, and can inspect library health without leaving the PWA.
+The user resumes media at the saved position, sees no recent repeats in shuffle mode, can browse ASMR by author and format, and can inspect library health without leaving the app.
 
 # Out of scope
 
@@ -39,3 +39,5 @@ The user resumes media at the saved position, sees no recent repeats in shuffle 
 - **2026-08-17** - Treat every M3U8 ASMR item as video, regardless of stale browser metadata. *Why:* This source uses M3U8 for video and an audio classification selects the wrong media element and controls.
 - **2026-08-17** - Android system back/edge gestures close the expanded ASMR player before they can leave the PWA. *Why:* OS-level edge gestures can preempt page pointer handling, so player dismissal must participate in browser history.
 - **2026-08-17** - Keep portrait feed chrome visible at the edges and let any non-control surface tap toggle playback. In landscape, hide chrome after five seconds, let a non-control tap only toggle chrome visibility, and reserve playback for the center button. *Why:* Portrait favors one-tap viewing while landscape needs an unobstructed frame and unambiguous control targets.
+- **2026-08-17** - Keep ASMR audio and video playing through screen lock and app backgrounding, while short and long feeds pause outside the foreground. *Why:* ASMR is often consumed as continuous listening, but feed media should never continue unexpectedly.
+- **2026-08-17** - Give ASMR video the same landscape control grammar as short and long video: five-second chrome fade, surface tap for chrome, center-only play/pause, horizontal seeking, and automatic portrait restoration when the player closes. *Why:* One video interaction model reduces mistakes and prevents the library from being stranded in landscape.

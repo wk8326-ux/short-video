@@ -137,6 +137,71 @@ async def test_author_scan_only_indexes_direct_media_files():
 
 
 @pytest.mark.asyncio
+async def test_author_scan_merges_search_index_and_derives_nested_authors():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = __import__("json").loads(request.content)
+        if request.url.path == "/api/fs/list":
+            return httpx.Response(
+                200,
+                json={"code": 200, "data": {"content": [], "total": 0}},
+            )
+        assert request.url.path == "/api/fs/search"
+        extension = body["keywords"]
+        entries = {
+            ".m3u8": [
+                {
+                    "parent": "/asmr/Creator/work",
+                    "name": "show.m3u8",
+                    "is_dir": False,
+                    "size": 100,
+                }
+            ],
+            ".mp3": [
+                {
+                    "parent": "/asmr/Category/Nested Author/album",
+                    "name": "voice.mp3",
+                    "is_dir": False,
+                    "size": 20,
+                },
+                {
+                    "parent": "/other",
+                    "name": "outside.mp3",
+                    "is_dir": False,
+                    "size": 1,
+                },
+            ],
+        }.get(extension, [])
+        return httpx.Response(
+            200,
+            json={"code": 200, "data": {"content": entries, "total": len(entries)}},
+        )
+
+    http_client = httpx.AsyncClient(
+        base_url="https://asmr.example", transport=httpx.MockTransport(handler)
+    )
+    client = AListClient(
+        _settings(),
+        http_client,
+        base_url="https://asmr.example",
+        media_path="/asmr6",
+        extensions=frozenset({".m3u8", ".mp3"}),
+        anonymous=True,
+    )
+
+    records, directories = await client.scan_authors(
+        search_paths=("/asmr",),
+        author_group_paths=frozenset({"/asmr/Category"}),
+    )
+    await http_client.aclose()
+
+    assert directories == 4
+    assert [(row["author"], row["name"], row["media_kind"]) for row in records] == [
+        ("Creator", "show.m3u8", "video"),
+        ("Nested Author", "voice.mp3", "audio"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_rate_limited_api_request_is_retried():
     calls = 0
 

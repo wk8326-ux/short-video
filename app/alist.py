@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import posixpath
+from collections.abc import AsyncIterator
 from collections import deque
 from pathlib import PurePosixPath
 from typing import Any
@@ -163,6 +164,39 @@ class AListClient:
             page += 1
         return entries
 
+    async def search_files(self, parent: str, keyword: str) -> list[dict[str, Any]]:
+        return [entry async for entry in self.iter_search_files(parent, keyword)]
+
+    async def iter_search_files(
+        self,
+        parent: str,
+        keyword: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        page = 1
+        yielded = 0
+        while True:
+            payload = await self._post(
+                "/api/fs/search",
+                {
+                    "parent": parent,
+                    "keywords": keyword,
+                    "scope": 0,
+                    "page": page,
+                    "per_page": 200,
+                    "password": "",
+                },
+            )
+            data = payload.get("data") or {}
+            content = data.get("content") if isinstance(data, dict) else data
+            batch = list(content or [])
+            for entry in batch:
+                yield entry
+                yielded += 1
+            total = int(data.get("total") or yielded) if isinstance(data, dict) else yielded
+            if yielded >= total or len(batch) < 200:
+                break
+            page += 1
+
     async def scan(self) -> tuple[list[dict[str, Any]], int]:
         root = "/" + self.media_path.strip("/")
         queue: deque[str] = deque([root])
@@ -198,7 +232,13 @@ class AListClient:
                 )
         return videos, directories
 
-    async def scan_authors(self) -> tuple[list[dict[str, Any]], int]:
+    async def scan_authors(
+        self,
+        *,
+        search_paths: tuple[str, ...] = (),
+        author_group_paths: frozenset[str] = frozenset(),
+        search_result_limit: int = 100000,
+    ) -> tuple[list[dict[str, Any]], int]:
         root = "/" + self.media_path.strip("/")
         authors = sorted(
             (
@@ -241,7 +281,75 @@ class AListClient:
             return records
 
         groups = await asyncio.gather(*(scan_author(author) for author in authors))
-        return [record for group in groups for record in group], len(authors) + 1
+        records = [record for group in groups for record in group]
+        directory_count = len(authors) + 1
+
+        normalized_groups = {
+            "/" + path.strip("/") for path in author_group_paths if path.strip("/")
+        }
+        searched_paths: set[str] = set()
+        searched_parents: set[str] = set()
+        audio_extensions = {".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus"}
+        for configured_root in search_paths:
+            root = "/" + configured_root.strip("/")
+            for extension in sorted(self.extensions):
+                async for entry in self.iter_search_files(root, extension):
+                    if bool(entry.get("is_dir")):
+                        continue
+                    name = str(entry.get("name") or "")
+                    parent = "/" + str(entry.get("parent") or "").strip("/")
+                    if not name or "/" in name or PurePosixPath(name).suffix.lower() != extension:
+                        continue
+                    if parent != root and not parent.startswith(root + "/"):
+                        continue
+                    path = posixpath.join(parent, name)
+                    if path in searched_paths:
+                        continue
+                    author = self._search_author(
+                        root,
+                        parent,
+                        author_group_paths=normalized_groups,
+                    )
+                    if not author:
+                        continue
+                    searched_paths.add(path)
+                    searched_parents.add(parent)
+                    records.append(
+                        {
+                            "path": path,
+                            "name": name,
+                            "size": int(entry.get("size") or 0),
+                            "modified": entry.get("modified") or entry.get("created"),
+                            "thumb": self._absolute_url(str(entry.get("thumb") or "")),
+                            "author": author,
+                            "media_format": extension.lstrip("."),
+                            "media_kind": "audio" if extension in audio_extensions else "video",
+                        }
+                    )
+                    if len(searched_paths) > search_result_limit:
+                        raise AListError(
+                            f"ASMR search result limit exceeded ({search_result_limit})"
+                        )
+            directory_count += len(searched_parents) + 1
+
+        deduplicated = {record["path"]: record for record in records}
+        return list(deduplicated.values()), directory_count
+
+    @staticmethod
+    def _search_author(
+        root: str,
+        parent: str,
+        *,
+        author_group_paths: set[str],
+    ) -> str:
+        relative = parent.removeprefix(root).strip("/")
+        parts = [part for part in relative.split("/") if part]
+        if not parts:
+            return ""
+        first_path = posixpath.join(root, parts[0])
+        if first_path in author_group_paths:
+            return parts[1] if len(parts) > 1 else ""
+        return parts[0]
 
     async def resolve(self, path: str) -> tuple[str, bool]:
         payload = await self._post("/api/fs/get", {"path": path, "password": ""})
