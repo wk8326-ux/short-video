@@ -119,6 +119,7 @@ class LibraryDatabase:
                     duration_seconds = COALESCE(videos.duration_seconds, excluded.duration_seconds),
                     media_format = excluded.media_format,
                     media_kind = CASE
+                        WHEN LOWER(COALESCE(excluded.media_format, '')) = 'm3u8' THEN 'video'
                         WHEN videos.metadata_checked_at IS NOT NULL THEN videos.media_kind
                         ELSE excluded.media_kind
                     END,
@@ -348,7 +349,11 @@ class LibraryDatabase:
             assignments.append("duration_seconds = ?")
             params.append(float(duration_seconds))
         if media_kind in {"audio", "video"}:
-            assignments.append("media_kind = ?")
+            assignments.append(
+                "media_kind = CASE "
+                "WHEN LOWER(COALESCE(media_format, '')) = 'm3u8' THEN 'video' "
+                "ELSE ? END"
+            )
             params.append(media_kind)
         params.append(video_id)
         with self._lock, self._connect() as connection:
@@ -368,8 +373,14 @@ class LibraryDatabase:
                 f"""
                 SELECT author,
                        COUNT(*) AS item_count,
-                       SUM(CASE WHEN media_kind = 'video' THEN 1 ELSE 0 END) AS video_count,
-                       SUM(CASE WHEN media_kind = 'audio' THEN 1 ELSE 0 END) AS audio_count,
+                       SUM(CASE
+                           WHEN LOWER(COALESCE(media_format, '')) = 'm3u8'
+                                OR media_kind = 'video' THEN 1 ELSE 0
+                       END) AS video_count,
+                       SUM(CASE
+                           WHEN LOWER(COALESCE(media_format, '')) != 'm3u8'
+                                AND media_kind = 'audio' THEN 1 ELSE 0
+                       END) AS audio_count,
                        MAX(modified) AS modified
                 FROM videos
                 WHERE {' AND '.join(conditions)}
@@ -389,9 +400,14 @@ class LibraryDatabase:
     ) -> list[dict[str, Any]]:
         conditions = ["active = 1", "source = 'asmr'", "author = ?"]
         params: list[Any] = [author]
-        if kind in {"audio", "video"}:
-            conditions.append("media_kind = ?")
-            params.append(kind)
+        if kind == "video":
+            conditions.append(
+                "(LOWER(COALESCE(media_format, '')) = 'm3u8' OR media_kind = 'video')"
+            )
+        elif kind == "audio":
+            conditions.append(
+                "LOWER(COALESCE(media_format, '')) != 'm3u8' AND media_kind = 'audio'"
+            )
         if search:
             conditions.append("name LIKE ? ESCAPE '\\'")
             params.append(f"%{self._escape_like(search)}%")

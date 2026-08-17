@@ -153,6 +153,31 @@ def test_asmr_authors_and_kind_filters(tmp_path):
     assert [item["name"] for item in audio] == ["voice.mp3"]
 
 
+def test_m3u8_cannot_be_reclassified_as_audio_by_browser_metadata(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    database.replace_scan(
+        [
+            {
+                "path": "/asmr6/A/session.m3u8",
+                "name": "session.m3u8",
+                "size": 10,
+                "modified": "2026-08-17",
+                "thumb": "",
+                "author": "A",
+                "media_format": "m3u8",
+                "media_kind": "video",
+            }
+        ],
+        source="asmr",
+    )
+    item = database.asmr_items(author="A")[0]
+
+    database.update_media_metadata(item["id"], media_kind="audio", detail="browser metadata")
+
+    assert database.get_video(item["id"])["media_kind"] == "video"
+
+
 def test_duration_probe_batch_is_limited_and_prioritizes_large_files(tmp_path):
     database = LibraryDatabase(str(tmp_path / "library.db"))
     database.initialize()

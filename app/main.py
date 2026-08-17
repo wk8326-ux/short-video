@@ -565,7 +565,9 @@ async def asmr_author_items(
                 "modified": row["modified"],
                 "duration": row.get("duration_seconds"),
                 "format": row.get("media_format"),
-                "kind": row.get("media_kind") or "video",
+                "kind": "video"
+                if (row.get("media_format") or "").lower() == "m3u8"
+                else (row.get("media_kind") or "video"),
                 "playUrl": f"/api/videos/{row['id']}/play",
                 "posterUrl": f"/api/videos/{row['id']}/poster" if row.get("thumb") else None,
             }

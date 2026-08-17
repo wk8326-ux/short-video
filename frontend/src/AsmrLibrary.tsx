@@ -42,10 +42,20 @@ type AsmrLibraryProps = {
 };
 
 type KindFilter = "all" | "video" | "audio";
+const ASMR_PLAYER_HISTORY_KEY = "__shortVideoAsmrPlayer";
 
 type HlsConstructor = typeof import("hls.js").default;
 
 let hlsEnginePromise: Promise<HlsConstructor> | null = null;
+
+function asmrItemKind(item: AsmrItem): "audio" | "video" {
+  return item.format.toLowerCase() === "m3u8" ? "video" : item.kind;
+}
+
+function normalizeAsmrItem(item: AsmrItem): AsmrItem {
+  const kind = asmrItemKind(item);
+  return kind === item.kind ? item : { ...item, kind };
+}
 
 function preloadHlsEngine(): Promise<HlsConstructor> {
   hlsEnginePromise ??= import("hls.js").then(({ default: Hls }) => Hls);
@@ -78,6 +88,8 @@ export default function AsmrLibrary({
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const playerHistoryRef = useRef<string | null>(null);
+  const playerHistoryClosingRef = useRef(false);
 
   const loadAuthors = useCallback(async () => {
     setLoading(true);
@@ -117,7 +129,7 @@ export default function AsmrLibrary({
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json() as { items: AsmrItem[] };
-      setItems(data.items);
+      setItems(data.items.map(normalizeAsmrItem));
     }).catch((requestError: unknown) => {
       if (requestError instanceof DOMException && requestError.name === "AbortError") return;
       setError("无法载入该作者的媒体");
@@ -128,9 +140,29 @@ export default function AsmrLibrary({
   useEffect(() => {
     const firstHlsItem = items.find((item) => item.format.toLowerCase() === "m3u8");
     if (!firstHlsItem) return;
-    const timer = window.setTimeout(() => primeAsmrItem(firstHlsItem), 280);
-    return () => window.clearTimeout(timer);
+    primeAsmrItem(firstHlsItem);
   }, [items]);
+
+  useEffect(() => {
+    if (!expanded || !current) return;
+    const marker = `${current.id}:${Date.now()}`;
+    const existingState = window.history.state;
+    const baseState = existingState && typeof existingState === "object"
+      ? existingState as Record<string, unknown>
+      : {};
+    window.history.pushState({ ...baseState, [ASMR_PLAYER_HISTORY_KEY]: marker }, "");
+    playerHistoryRef.current = marker;
+    playerHistoryClosingRef.current = false;
+
+    const closeFromHistory = () => {
+      if (playerHistoryRef.current !== marker) return;
+      playerHistoryRef.current = null;
+      playerHistoryClosingRef.current = false;
+      setExpanded(false);
+    };
+    window.addEventListener("popstate", closeFromHistory);
+    return () => window.removeEventListener("popstate", closeFromHistory);
+  }, [current, expanded]);
 
   const recordProgress = useCallback((videoId: number, rawTime: number, duration: number) => {
     const time = duration - rawTime <= 3 || rawTime / duration >= 0.97
@@ -164,9 +196,28 @@ export default function AsmrLibrary({
     setKind("all");
   };
 
-  const playItem = (item: AsmrItem) => {
+  const changeExpanded = useCallback((nextExpanded: boolean) => {
+    if (nextExpanded) {
+      setExpanded(true);
+      return;
+    }
+    const marker = playerHistoryRef.current;
+    const currentState = window.history.state as Record<string, unknown> | null;
+    if (marker && currentState?.[ASMR_PLAYER_HISTORY_KEY] === marker) {
+      if (playerHistoryClosingRef.current) return;
+      playerHistoryClosingRef.current = true;
+      window.history.back();
+      return;
+    }
+    playerHistoryRef.current = null;
+    playerHistoryClosingRef.current = false;
+    setExpanded(false);
+  }, []);
+
+  const playItem = (rawItem: AsmrItem) => {
+    const item = normalizeAsmrItem(rawItem);
     setCurrent(item);
-    setExpanded(item.kind === "video");
+    setExpanded(asmrItemKind(item) === "video");
     updatePlaybackState((state) => ({
       ...state,
       lastVideoId: item.id,
@@ -307,7 +358,7 @@ export default function AsmrLibrary({
           item={current}
           expanded={expanded}
           initialTime={localPositions[String(current.id)]?.time ?? 0}
-          onExpandedChange={setExpanded}
+          onExpandedChange={changeExpanded}
           onClose={() => setCurrent(null)}
           onProgress={recordProgress}
         />
@@ -379,9 +430,8 @@ function AsmrPlayer({
   const [attempt, setAttempt] = useState(0);
   const [currentTime, setCurrentTime] = useState(initialTime);
   const [duration, setDuration] = useState(item.duration ?? 0);
-  const [detectedKind, setDetectedKind] = useState(item.kind);
+  const [detectedKind, setDetectedKind] = useState(asmrItemKind(item));
   const [metadataReady, setMetadataReady] = useState(false);
-  const [started, setStarted] = useState(false);
   const [swipeOffset, setSwipeOffset] = useState(0);
 
   const saveProgress = useCallback(() => {
@@ -403,7 +453,6 @@ function AsmrPlayer({
     setFailed(false);
     setPaused(true);
     setMetadataReady(false);
-    setStarted(false);
     setSwipeOffset(0);
     restoredRef.current = false;
 
@@ -419,6 +468,7 @@ function AsmrPlayer({
               maxBufferLength: 18,
               backBufferLength: 24,
               startFragPrefetch: true,
+              startPosition: initialTime > 1 ? initialTime : -1,
             });
             hls.on(Hls.Events.ERROR, (_, data) => {
               if (!data.fatal) return;
@@ -458,7 +508,7 @@ function AsmrPlayer({
       media.removeAttribute("src");
       media.load();
     };
-  }, [attempt, item.format, item.playUrl, saveProgress]);
+  }, [attempt, initialTime, item.format, item.playUrl, saveProgress]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -549,7 +599,9 @@ function AsmrPlayer({
     if (!media) return;
     const nextDuration = Number.isFinite(media.duration) ? media.duration : 0;
     const isVideo = media instanceof HTMLVideoElement && media.videoWidth > 0;
-    const nextKind = isVideo ? "video" : "audio";
+    const nextKind = item.format.toLowerCase() === "m3u8"
+      ? "video"
+      : isVideo ? "video" : "audio";
     durationRef.current = nextDuration;
     setDuration(nextDuration);
     setDetectedKind(nextKind);
@@ -583,7 +635,7 @@ function AsmrPlayer({
     setCurrentTime(value);
   };
 
-  const MediaElement = item.kind === "audio" ? "audio" : "video";
+  const MediaElement = asmrItemKind(item) === "audio" ? "audio" : "video";
   const KindIcon = detectedKind === "audio" ? Headphones : Video;
   const kindLabel = detectedKind === "audio" ? "音频" : "视频";
   return (
@@ -623,7 +675,7 @@ function AsmrPlayer({
           onLoadedMetadata={loadedMetadata}
           onDurationChange={loadedMetadata}
           onTimeUpdate={timeUpdated}
-          onPlaying={() => { setPaused(false); setStarted(true); setBuffering(false); }}
+          onPlaying={() => { setPaused(false); setBuffering(false); }}
           onPause={() => { setPaused(true); saveProgress(); }}
           onWaiting={() => setBuffering(true)}
           onCanPlay={() => setBuffering(false)}
@@ -633,21 +685,18 @@ function AsmrPlayer({
             else { setBuffering(false); setFailed(true); }
           }}
         />
-        {detectedKind === "audio" && (
+        {expanded && detectedKind === "audio" && (
           <div className="audio-stage" aria-hidden="true">
-            <div className="audio-stage-content">
-              <span className="audio-stage-icon"><Headphones size={34} /></span>
-              <strong>{item.title}</strong>
-              <span>{item.author} · {item.format.toUpperCase()}</span>
-            </div>
+            {metadataReady && !buffering && (
+              <div className="audio-stage-content">
+                <span className="audio-stage-icon"><Headphones size={34} /></span>
+                <strong>{item.title}</strong>
+                <span>{item.author} · {item.format.toUpperCase()}</span>
+              </div>
+            )}
           </div>
         )}
-        {detectedKind === "video" && !started && !failed && (
-          <div className="media-placeholder" aria-hidden="true">
-            <Video size={42} />
-          </div>
-        )}
-        {!failed && (buffering || !metadataReady) && (
+        {expanded && !failed && (buffering || !metadataReady) && (
           <div className="player-loading" role="status">
             <LoaderCircle className="spinner" size={24} aria-hidden="true" />
             <span>{metadataReady ? "正在准备播放" : "正在连接媒体"}</span>
@@ -683,7 +732,7 @@ function AsmrPlayer({
         </>
       )}
 
-      {expanded && (
+      {expanded && metadataReady && !buffering && (
         <div className="expanded-player-info">
           <div className="expanded-player-copy">
             <strong>{item.title}</strong>

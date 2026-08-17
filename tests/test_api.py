@@ -60,7 +60,8 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
                     "thumb": "",
                     "author": "Author",
                     "media_format": "m3u8",
-                    "media_kind": "video",
+                    # Simulate a stale browser metadata report from an older release.
+                    "media_kind": "audio",
                 }
             ],
             source="asmr",
@@ -70,9 +71,14 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
         long = client.get("/api/feed?category=long&mode=oldest", headers=headers)
         authors = client.get("/api/asmr/authors", headers=headers)
         items = client.get("/api/asmr/authors/Author/items", headers=headers)
+        audio_items = client.get("/api/asmr/authors/Author/items?kind=audio", headers=headers)
 
     assert [item["title"] for item in short.json()["items"]] == ["short"]
     assert [item["title"] for item in long.json()["items"]] == ["long"]
     assert authors.json()["items"][0]["name"] == "Author"
+    assert authors.json()["items"][0]["videoCount"] == 1
+    assert authors.json()["items"][0]["audioCount"] == 0
     assert items.json()["items"][0]["format"] == "m3u8"
+    assert items.json()["items"][0]["kind"] == "video"
+    assert audio_items.json()["items"] == []
     assert any(name.startswith("prewarm-asmr-play-") for name in spawned_names)

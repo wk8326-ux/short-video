@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.5] - 2026-08-17
+
+### Fixed
+
+- Remove duplicate ASMR loading placeholders so compact audio keeps one right-side spinner and expanded playback keeps one centered status.
+- Treat every ASMR M3U8 item as video across scans, filters, API responses, and playback, even when older browser metadata says audio.
+- Make Android back and edge gestures close expanded ASMR playback before leaving the PWA.
+
+### Improved
+
+- Start HLS engine and resolver prewarming as soon as author media arrives, and pass saved playback position into HLS startup.
+
 ## [1.1.4] - 2026-08-17
 
 ### Improved
