@@ -1,7 +1,6 @@
 package you.deepfuck.shortvideo.data
 
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -10,6 +9,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import you.deepfuck.shortvideo.update.ResumableUpdateDownloader
+import you.deepfuck.shortvideo.update.UpdateDownloadHttpException
 
 class ApiException(val statusCode: Int, message: String) : IOException(message)
 
@@ -190,45 +191,16 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             throw IOException("Update download URL is not trusted")
         }
 
-        client.newCall(Request.Builder().url(targetUrl).get().build()).execute().use { response ->
-            if (!response.isSuccessful) {
-                val detail = response.body?.string()?.let {
-                    runCatching { JSONObject(it).optString("detail") }.getOrNull()
-                }
-                throw ApiException(response.code, detail ?: "HTTP ${response.code}")
-            }
-            val body = response.body ?: throw IOException("Update download is empty")
-            if (body.contentLength() >= 0L && body.contentLength() != update.size) {
-                throw IOException("Update download size changed")
-            }
-            val parent = target.parentFile ?: throw IOException("Update cache path is invalid")
-            if (!parent.isDirectory && !parent.mkdirs()) {
-                throw IOException("Update cache directory cannot be created")
-            }
-            val partial = File(parent, "${target.name}.part")
-            try {
-                partial.delete()
-                var downloaded = 0L
-                onProgress(downloaded, update.size)
-                body.byteStream().use { input ->
-                    FileOutputStream(partial).buffered().use { output ->
-                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                        while (true) {
-                            val read = input.read(buffer)
-                            if (read < 0) break
-                            output.write(buffer, 0, read)
-                            downloaded += read
-                            onProgress(downloaded, update.size)
-                        }
-                    }
-                }
-                if (downloaded != update.size) throw IOException("Update download is incomplete")
-                if (target.exists() && !target.delete()) throw IOException("Old update cannot be replaced")
-                if (!partial.renameTo(target)) throw IOException("Update cannot be finalized")
-            } catch (error: Throwable) {
-                partial.delete()
-                throw error
-            }
+        try {
+            ResumableUpdateDownloader(client).download(
+                url = targetUrl,
+                target = target,
+                expectedSize = update.size,
+                expectedSha256 = update.sha256,
+                onProgress = onProgress,
+            )
+        } catch (error: UpdateDownloadHttpException) {
+            throw ApiException(error.statusCode, "HTTP ${error.statusCode}")
         }
     }
 

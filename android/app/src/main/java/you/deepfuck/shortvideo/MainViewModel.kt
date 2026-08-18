@@ -5,6 +5,9 @@ import android.content.Intent
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.ExistingWorkPolicy
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import java.io.File
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
@@ -15,12 +18,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import you.deepfuck.shortvideo.data.AdminStatus
 import you.deepfuck.shortvideo.data.ApiException
+import you.deepfuck.shortvideo.data.AppUpdateInfo
 import you.deepfuck.shortvideo.data.AppUpdatePhase
 import you.deepfuck.shortvideo.data.AppUpdateUiState
 import you.deepfuck.shortvideo.data.AsmrAuthor
@@ -36,6 +39,7 @@ import you.deepfuck.shortvideo.media.PlaybackEngineProvider
 import you.deepfuck.shortvideo.media.PlaybackService
 import you.deepfuck.shortvideo.logging.AppLogStore
 import you.deepfuck.shortvideo.update.isUpdateAvailable
+import you.deepfuck.shortvideo.update.AppUpdateWork
 import you.deepfuck.shortvideo.update.sha256Matches
 
 enum class AuthenticationState { CHECKING, SIGNED_IN, SIGNED_OUT }
@@ -78,6 +82,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = PlaybackPreferences(application)
     private val api = MediaApi(preferences)
     private val logs = AppLogStore.get(application)
+    private val workManager = WorkManager.getInstance(application)
     val playback: PlaybackEngine = PlaybackEngineProvider.get(application)
     private val restoredMedia = playback.currentMedia()
 
@@ -121,6 +126,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var audioQueue: List<MediaEntry> = emptyList()
     private var pendingAudioAdvanceId: Long? = null
     private var appUpdateJob: Job? = null
+    private var appUpdateObserverJob: Job? = null
     private var playbackServiceRunning = false
 
     init {
@@ -173,6 +179,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun logout() {
         appUpdateJob?.cancel()
+        appUpdateObserverJob?.cancel()
         saveCurrentPosition()
         viewModelScope.launch(Dispatchers.IO) { api.logout() }
         playback.stop()
@@ -466,6 +473,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun checkForAppUpdate() {
         appUpdateJob?.cancel()
+        appUpdateObserverJob?.cancel()
         mutableState.value = mutableState.value.copy(
             appUpdate = AppUpdateUiState(
                 phase = AppUpdatePhase.CHECKING,
@@ -475,17 +483,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         appUpdateJob = viewModelScope.launch {
             try {
                 val info = withContext(Dispatchers.IO) { api.appUpdate() }
+                if (!isUpdateAvailable(BuildConfig.VERSION_CODE, info.versionCode)) {
+                    mutableState.value = mutableState.value.copy(
+                        appUpdate = AppUpdateUiState(
+                            phase = AppUpdatePhase.LATEST,
+                            currentVersionName = BuildConfig.VERSION_NAME,
+                            info = info,
+                        ),
+                    )
+                    return@launch
+                }
+                val target = AppUpdateWork.targetFile(getApplication(), info)
+                val targetReady = withContext(Dispatchers.IO) {
+                    target.isFile && target.length() == info.size && sha256Matches(target, info.sha256)
+                }
+                val partialBytes = AppUpdateWork.partialFile(getApplication(), info)
+                    .length()
+                    .coerceAtMost(info.size)
+                val activeWork = if (targetReady) null else withContext(Dispatchers.IO) {
+                    activeAppUpdateWork(info)
+                }
                 mutableState.value = mutableState.value.copy(
                     appUpdate = AppUpdateUiState(
-                        phase = if (isUpdateAvailable(BuildConfig.VERSION_CODE, info.versionCode)) {
-                            AppUpdatePhase.AVAILABLE
-                        } else {
-                            AppUpdatePhase.LATEST
+                        phase = when {
+                            targetReady -> AppUpdatePhase.READY
+                            activeWork != null -> AppUpdatePhase.DOWNLOADING
+                            else -> AppUpdatePhase.AVAILABLE
                         },
                         currentVersionName = BuildConfig.VERSION_NAME,
                         info = info,
+                        progress = when {
+                            targetReady -> 1f
+                            activeWork != null -> workDownloadedBytes(activeWork, partialBytes)
+                                .toFloat() / info.size
+                            else -> partialBytes.toFloat() / info.size
+                        }.coerceIn(0f, 1f),
+                        downloadedBytes = if (targetReady) info.size else activeWork?.let {
+                            workDownloadedBytes(it, partialBytes)
+                        } ?: partialBytes,
+                        downloadedApkPath = target.absolutePath.takeIf { targetReady },
                     ),
                 )
+                activeWork?.let { observeAppUpdateWork(info, it.id) }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -504,8 +543,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun downloadAppUpdate() {
         val update = mutableState.value.appUpdate.info ?: return
         appUpdateJob?.cancel()
-        val directory = File(getApplication<Application>().cacheDir, "app-updates")
-        val target = File(directory, "short-video-${update.versionCode}.apk")
+        appUpdateObserverJob?.cancel()
+        val target = AppUpdateWork.targetFile(getApplication(), update)
         if (target.isFile && target.length() == update.size && sha256Matches(target, update.sha256)) {
             mutableState.value = mutableState.value.copy(
                 appUpdate = mutableState.value.appUpdate.copy(
@@ -518,48 +557,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             return
         }
+        val retainedBytes = AppUpdateWork.partialFile(getApplication(), update)
+            .length()
+            .coerceAtMost(update.size)
         mutableState.value = mutableState.value.copy(
             appUpdate = mutableState.value.appUpdate.copy(
                 phase = AppUpdatePhase.DOWNLOADING,
-                progress = 0f,
-                downloadedBytes = 0L,
+                progress = (retainedBytes.toFloat() / update.size).coerceIn(0f, 1f),
+                downloadedBytes = retainedBytes,
                 downloadedApkPath = null,
                 message = null,
             ),
         )
         appUpdateJob = viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) {
-                    var lastPercent = -1
-                    api.downloadAppUpdate(update, target) { downloaded, total ->
-                        ensureActive()
-                        val percent = if (total > 0L) ((downloaded * 100L) / total).toInt() else 0
-                        if (percent != lastPercent) {
-                            lastPercent = percent
-                            mutableState.update { current ->
-                                current.copy(
-                                    appUpdate = current.appUpdate.copy(
-                                        progress = (downloaded.toFloat() / total.coerceAtLeast(1L)).coerceIn(0f, 1f),
-                                        downloadedBytes = downloaded,
-                                    ),
-                                )
-                            }
-                        }
-                    }
-                    if (!sha256Matches(target, update.sha256)) {
-                        target.delete()
-                        throw IOException("Downloaded APK failed SHA-256 verification")
+                val workId = withContext(Dispatchers.IO) {
+                    activeAppUpdateWork(update)?.id ?: run {
+                        val request = AppUpdateWork.request(update)
+                        workManager.enqueueUniqueWork(
+                            AppUpdateWork.uniqueName(update.versionCode),
+                            ExistingWorkPolicy.KEEP,
+                            request,
+                        ).result.get()
+                        activeAppUpdateWork(update)?.id ?: request.id
                     }
                 }
-                mutableState.value = mutableState.value.copy(
-                    appUpdate = mutableState.value.appUpdate.copy(
-                        phase = AppUpdatePhase.READY,
-                        progress = 1f,
-                        downloadedBytes = update.size,
-                        downloadedApkPath = target.absolutePath,
-                        message = null,
-                    ),
-                )
+                logs.info("app_update_background_enqueued", "version=${update.versionCode} retained=$retainedBytes")
+                observeAppUpdateWork(update, workId)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -578,7 +602,95 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun dismissAppUpdate() {
         appUpdateJob?.cancel()
         appUpdateJob = null
+        appUpdateObserverJob?.cancel()
+        appUpdateObserverJob = null
+        if (mutableState.value.appUpdate.phase == AppUpdatePhase.DOWNLOADING) {
+            logs.info(
+                "app_update_ui_dismissed",
+                "background=true bytes=${mutableState.value.appUpdate.downloadedBytes}",
+            )
+        }
         mutableState.value = mutableState.value.copy(appUpdate = AppUpdateUiState())
+    }
+
+    private fun activeAppUpdateWork(update: AppUpdateInfo): WorkInfo? =
+        workManager.getWorkInfosForUniqueWork(AppUpdateWork.uniqueName(update.versionCode))
+            .get()
+            .firstOrNull { !it.state.isFinished }
+
+    private fun workDownloadedBytes(workInfo: WorkInfo, fallbackBytes: Long): Long =
+        workInfo.progress
+            .getLong(AppUpdateWork.KEY_DOWNLOADED_BYTES, -1L)
+            .takeIf { it >= 0L }
+            ?.coerceAtLeast(fallbackBytes)
+            ?: fallbackBytes
+
+    private fun observeAppUpdateWork(update: AppUpdateInfo, workId: java.util.UUID) {
+        appUpdateObserverJob?.cancel()
+        appUpdateObserverJob = viewModelScope.launch {
+            while (isActive) {
+                val workInfo = withContext(Dispatchers.IO) {
+                    workManager.getWorkInfoById(workId).get()
+                } ?: break
+                val current = mutableState.value.appUpdate
+                if (current.phase == AppUpdatePhase.IDLE || current.info?.versionCode != update.versionCode) break
+
+                val partialBytes = AppUpdateWork.partialFile(getApplication(), update)
+                    .length()
+                    .coerceAtMost(update.size)
+                val downloadedBytes = workDownloadedBytes(workInfo, partialBytes)
+                    .coerceIn(0L, update.size)
+                when (workInfo.state) {
+                    WorkInfo.State.ENQUEUED,
+                    WorkInfo.State.BLOCKED,
+                    WorkInfo.State.RUNNING,
+                    -> mutableState.update { state ->
+                        state.copy(
+                            appUpdate = state.appUpdate.copy(
+                                phase = AppUpdatePhase.DOWNLOADING,
+                                progress = (downloadedBytes.toFloat() / update.size).coerceIn(0f, 1f),
+                                downloadedBytes = downloadedBytes,
+                                downloadedApkPath = null,
+                                message = null,
+                            ),
+                        )
+                    }
+                    WorkInfo.State.SUCCEEDED -> {
+                        val target = AppUpdateWork.targetFile(getApplication(), update)
+                        val verified = withContext(Dispatchers.IO) {
+                            target.isFile && target.length() == update.size && sha256Matches(target, update.sha256)
+                        }
+                        mutableState.update { state ->
+                            state.copy(
+                                appUpdate = state.appUpdate.copy(
+                                    phase = if (verified) AppUpdatePhase.READY else AppUpdatePhase.ERROR,
+                                    progress = if (verified) 1f else state.appUpdate.progress,
+                                    downloadedBytes = if (verified) update.size else partialBytes,
+                                    downloadedApkPath = target.absolutePath.takeIf { verified },
+                                    message = if (verified) null else "安装包校验失败，请继续下载",
+                                ),
+                            )
+                        }
+                    }
+                    WorkInfo.State.FAILED,
+                    WorkInfo.State.CANCELLED,
+                    -> mutableState.update { state ->
+                        state.copy(
+                            appUpdate = state.appUpdate.copy(
+                                phase = AppUpdatePhase.ERROR,
+                                progress = (partialBytes.toFloat() / update.size).coerceIn(0f, 1f),
+                                downloadedBytes = partialBytes,
+                                downloadedApkPath = null,
+                                message = workInfo.outputData.getString(AppUpdateWork.KEY_ERROR)
+                                    ?: "下载暂时中断，已保留进度，可继续下载",
+                            ),
+                        )
+                    }
+                }
+                if (workInfo.state.isFinished) break
+                delay(400)
+            }
+        }
     }
 
     fun reportAppUpdateInstallError(message: String) {
@@ -968,6 +1080,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun handleUnauthorized(error: Throwable): Boolean {
         if ((error as? ApiException)?.statusCode != 401) return false
         appUpdateJob?.cancel()
+        appUpdateObserverJob?.cancel()
         preferences.clearSession()
         playback.stop()
         stopPlaybackService()
@@ -1045,6 +1158,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         appUpdateJob?.cancel()
+        appUpdateObserverJob?.cancel()
         saveCurrentPosition()
         playback.setOnPlaybackEndedListener(null)
         super.onCleared()

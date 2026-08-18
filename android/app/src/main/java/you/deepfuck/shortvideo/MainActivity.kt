@@ -90,7 +90,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun installAppUpdate(apkPath: String) {
-        val updateDirectory = File(cacheDir, "app-updates").canonicalFile
+        val updateDirectory = File(filesDir, "app-updates").canonicalFile
         val apk = runCatching { File(apkPath).canonicalFile }.getOrNull()
         if (
             apk == null ||

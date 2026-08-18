@@ -2,10 +2,12 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="file" path="media-cache/" />
+        <exclude domain="file" path="app-updates/" />
         <exclude domain="sharedpref" path="short_video.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="media-cache/" />
+        <exclude domain="file" path="app-updates/" />
         <exclude domain="sharedpref" path="short_video.xml" />
     </device-transfer>
 </data-extraction-rules>

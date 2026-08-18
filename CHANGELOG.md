@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.4] - 2026-08-18
+
+### Added
+
+- Continue application-update downloads through WorkManager after the update dialog or app leaves the foreground.
+- Resume interrupted APK downloads from a persistent partial file using verified HTTP byte ranges.
+
+### Changed
+
+- Store downloaded updates in the app's persistent files directory and restore active, completed, or interrupted update state when the update screen is reopened.
+- Label update actions as background or resumable downloads while retaining Android's required system-installer confirmation.
+
+### Fixed
+
+- Preserve valid downloaded bytes across network failures, process recreation, and WorkManager retries instead of restarting every update from zero.
+
 ## [1.3.3] - 2026-08-18
 
 ### Added

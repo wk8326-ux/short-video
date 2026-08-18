@@ -57,16 +57,16 @@ Android updates are published from `/data/app-update`, which is inside the exist
 
 ```json
 {
-  "versionCode": 133,
-  "versionName": "1.3.3",
-  "apkFile": "short-video-android-v1.3.3-debug.apk",
+  "versionCode": 134,
+  "versionName": "1.3.4",
+  "apkFile": "short-video-android-v1.3.4-debug.apk",
   "sha256": "<64 lowercase hex characters>",
-  "size": 22320649,
-  "notes": "保存短视频、长视频和 ASMR 播放状态，修复跨页面播放与 ASMR 闪退，并增加可导出的运行日志。"
+  "size": 22586112,
+  "notes": "支持应用切到后台后继续下载更新，并在网络中断后从已下载位置断点续传。"
 }
 ```
 
-The first updater-enabled build still needs one manual installation. From later versions, use `更多 -> 检查更新`; Android asks once for permission to install unknown apps, then the system installer completes each upgrade.
+The first updater-enabled build still needs one manual installation. From later versions, use `更多 -> 检查更新`; downloads continue in the background and resume from retained bytes after interruption. Android asks once for permission to install unknown apps, then the system installer completes each upgrade.
 
 ## Local development
 

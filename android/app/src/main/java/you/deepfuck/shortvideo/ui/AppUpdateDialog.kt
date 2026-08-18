@@ -71,6 +71,13 @@ internal fun AppUpdateDialog(
                             color = TextFaint,
                             style = MaterialTheme.typography.bodySmall,
                         )
+                        if (state.downloadedBytes > 0L) {
+                            Text(
+                                "已保留 ${formatBytes(state.downloadedBytes)}，继续下载时将从断点恢复。",
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
                     }
                     AppUpdatePhase.DOWNLOADING -> {
                         LinearProgressIndicator(
@@ -83,6 +90,11 @@ internal fun AppUpdateDialog(
                             "${formatBytes(state.downloadedBytes)} / ${info?.let { formatBytes(it.size) }.orEmpty()}  ·  ${(state.progress * 100).toInt()}%",
                             color = TextSecondary,
                             style = MaterialTheme.typography.labelMedium,
+                        )
+                        Text(
+                            "关闭此窗口或切到后台后仍会继续下载；连接中断时会保留当前进度。",
+                            color = TextFaint,
+                            style = MaterialTheme.typography.bodySmall,
                         )
                     }
                     AppUpdatePhase.READY -> Text(
@@ -106,13 +118,24 @@ internal fun AppUpdateDialog(
         },
         confirmButton = {
             when (state.phase) {
-                AppUpdatePhase.AVAILABLE -> PrimaryAction("下载并安装", onDownload)
+                AppUpdatePhase.AVAILABLE -> PrimaryAction(
+                    if (state.downloadedBytes > 0L) "继续下载" else "下载并安装",
+                    onDownload,
+                )
                 AppUpdatePhase.READY -> PrimaryAction("打开安装器") {
                     state.downloadedApkPath?.let(onInstall)
                 }
                 AppUpdatePhase.LATEST -> PrimaryAction("完成", onDismiss)
                 AppUpdatePhase.ERROR -> PrimaryAction(
-                    if (state.downloadedApkPath != null) "重试安装" else if (info != null) "重新下载" else "重新检查",
+                    if (state.downloadedApkPath != null) {
+                        "重试安装"
+                    } else if (info != null && state.downloadedBytes > 0L) {
+                        "继续下载"
+                    } else if (info != null) {
+                        "重新下载"
+                    } else {
+                        "重新检查"
+                    },
                 ) {
                     when {
                         state.downloadedApkPath != null -> onInstall(state.downloadedApkPath)
@@ -129,7 +152,13 @@ internal fun AppUpdateDialog(
         dismissButton = {
             if (state.phase != AppUpdatePhase.LATEST) {
                 TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 44.dp)) {
-                    Text(if (state.phase in listOf(AppUpdatePhase.CHECKING, AppUpdatePhase.DOWNLOADING)) "取消" else "稍后")
+                    Text(
+                        when (state.phase) {
+                            AppUpdatePhase.CHECKING -> "取消"
+                            AppUpdatePhase.DOWNLOADING -> "后台下载"
+                            else -> "稍后"
+                        },
+                    )
                 }
             }
         },

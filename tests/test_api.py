@@ -137,6 +137,10 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
         update = client.get("/api/app/update", headers=headers)
         update_head = client.head(update.json()["downloadUrl"], headers=headers)
         update_apk = client.get(update.json()["downloadUrl"], headers=headers)
+        update_range = client.get(
+            update.json()["downloadUrl"],
+            headers={**headers, "Range": "bytes=3-"},
+        )
         stale_update = client.get("/api/app/update/apk?versionCode=131", headers=headers)
 
     assert [item["title"] for item in short.json()["items"]] == ["short"]
@@ -166,5 +170,9 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     assert update_apk.content == b"signed-apk"
     assert update_apk.headers["content-type"] == "application/vnd.android.package-archive"
     assert update_apk.headers["x-apk-sha256"] == sha256
+    assert update_range.status_code == 206
+    assert update_range.content == b"ned-apk"
+    assert update_range.headers["accept-ranges"] == "bytes"
+    assert update_range.headers["content-range"] == "bytes 3-9/10"
     assert stale_update.status_code == 409
     assert any(name.startswith("prewarm-asmr-play-") for name in spawned_names)
