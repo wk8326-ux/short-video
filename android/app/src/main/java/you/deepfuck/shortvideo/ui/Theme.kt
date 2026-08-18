@@ -12,6 +12,10 @@ val TextSecondary = Color(0xFFB7B2AC)
 val TextFaint = Color(0xFF7E7B77)
 val Accent = Color(0xFFE7464F)
 val Line = Color(0x1FFFFFFF)
+val FrostedChromeSurface = Color(0xDDF7F7F5)
+val FrostedChromeContent = Color(0xFF18191B)
+val FrostedChromeMuted = Color(0xFF5D6064)
+val FrostedChromeOutline = Color(0xB3FFFFFF)
 
 private val ShortVideoColors = darkColorScheme(
     primary = Accent,

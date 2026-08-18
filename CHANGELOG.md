@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.2.2] - 2026-08-18
+
+### Improved
+
+- Replace dark translucent Android playback controls with higher-contrast white frosted controls and dark foreground icons.
+- Move the short-video, long-video, ASMR, and management navigation slightly closer to the top safe-area edge.
+- Show complete ASMR author names on a dedicated line for faster scanning and search.
+
 ## [1.2.1] - 2026-08-17
 
 ### Fixed

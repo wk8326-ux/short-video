@@ -2,6 +2,7 @@ package you.deepfuck.shortvideo.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +35,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -48,7 +50,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -267,7 +268,8 @@ internal fun AppNavigation(
         Row(
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
-                .background(Color(0xB3090A0B))
+                .background(FrostedChromeSurface)
+                .border(1.dp, FrostedChromeOutline, RoundedCornerShape(6.dp))
                 .padding(3.dp),
         ) {
             MediaSurface.entries.forEach { surface ->
@@ -275,7 +277,7 @@ internal fun AppNavigation(
                     onClick = { onSurface(surface) },
                     modifier = Modifier.height(40.dp),
                     colors = ButtonDefaults.textButtonColors(
-                        contentColor = if (state.surface == surface) TextPrimary else TextFaint,
+                        contentColor = if (state.surface == surface) Accent else FrostedChromeMuted,
                     ),
                 ) {
                     Text(
@@ -289,7 +291,11 @@ internal fun AppNavigation(
         Box {
             IconButton(
                 onClick = { menuOpen = true },
-                modifier = Modifier.clip(CircleShape).background(Color(0xA6090A0B)),
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(FrostedChromeSurface)
+                    .border(1.dp, FrostedChromeOutline, CircleShape),
+                colors = IconButtonDefaults.iconButtonColors(contentColor = FrostedChromeContent),
             ) {
                 Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
             }

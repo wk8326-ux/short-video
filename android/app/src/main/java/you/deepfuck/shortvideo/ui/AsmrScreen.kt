@@ -1,6 +1,7 @@
 package you.deepfuck.shortvideo.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -96,7 +97,7 @@ internal fun AsmrScreen(
 ) {
     Box(Modifier.fillMaxSize().background(Canvas)) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(2.dp))
             AppNavigation(
                 state = state,
                 compact = false,
@@ -192,29 +193,35 @@ private fun AuthorLibrary(
                 ),
             ) {
                 items(filtered, key = AsmrAuthor::name) { author ->
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clickable { onAuthor(author.name) }
-                            .padding(vertical = 15.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                            .padding(vertical = 14.dp),
                     ) {
-                        Box(
-                            Modifier.size(42.dp).background(Color(0x12FFFFFF), CircleShape),
-                            contentAlignment = Alignment.Center,
+                        Text(
+                            author.name,
+                            fontWeight = FontWeight.Medium,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
+                            color = TextPrimary,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(author.name.take(1), color = TextSecondary, fontWeight = FontWeight.SemiBold)
-                        }
-                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                            Text(author.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(4.dp))
                             Text(
                                 "${author.videoCount} 视频  ·  ${author.audioCount} 音频",
                                 color = TextFaint,
                                 style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                             )
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                "${author.itemCount} 项",
+                                color = TextSecondary,
+                                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                            )
                         }
-                        Text(author.itemCount.toString(), color = TextSecondary)
                     }
                     HorizontalDivider(color = Line)
                 }
@@ -527,7 +534,13 @@ private fun ExpandedAsmrPlayer(
         seekTarget?.let {
             Text(
                 "${formatDuration(it)} / ${formatDuration(player.durationMs)}",
-                modifier = Modifier.align(Alignment.Center).clip(RoundedCornerShape(6.dp)).background(Color(0xD0090A0B)).padding(14.dp),
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(FrostedChromeSurface)
+                    .border(1.dp, FrostedChromeOutline, RoundedCornerShape(6.dp))
+                    .padding(14.dp),
+                color = FrostedChromeContent,
             )
         }
     }

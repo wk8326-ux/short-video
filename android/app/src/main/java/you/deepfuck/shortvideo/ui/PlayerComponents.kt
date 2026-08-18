@@ -6,6 +6,7 @@ package you.deepfuck.shortvideo.ui
 
 import android.graphics.Color as AndroidColor
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
@@ -48,12 +49,13 @@ internal fun BufferSpinner(visible: Boolean, modifier: Modifier = Modifier) {
         Box(
             modifier = Modifier
                 .size(48.dp)
-                .background(Color(0x76090A0B), CircleShape),
+                .background(FrostedChromeSurface, CircleShape)
+                .border(1.dp, FrostedChromeOutline, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             CircularProgressIndicator(
                 modifier = Modifier.size(24.dp),
-                color = TextSecondary,
+                color = Accent,
                 strokeWidth = 2.dp,
             )
         }

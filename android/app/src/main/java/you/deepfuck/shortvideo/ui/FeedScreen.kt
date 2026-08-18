@@ -1,6 +1,7 @@
 package you.deepfuck.shortvideo.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -34,6 +35,7 @@ import androidx.compose.material.icons.outlined.Replay10
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -134,7 +136,7 @@ internal fun FeedScreen(
             )
         }
         if (!fullscreen || fullscreenChromeVisible) {
-            Box(Modifier.statusBarsPadding().padding(top = 8.dp)) {
+            Box(Modifier.statusBarsPadding().padding(top = 2.dp)) {
                 AppNavigation(
                     state = state,
                     compact = false,
@@ -316,10 +318,10 @@ private fun FeedPage(
                 modifier = Modifier.align(Alignment.Center).padding(top = 104.dp),
                 horizontalArrangement = Arrangement.spacedBy(84.dp),
             ) {
-                IconButton(onClick = { onSeekBy(-10_000L) }) {
+                CircleControl(label = "后退 10 秒", onClick = { onSeekBy(-10_000L) }) {
                     Icon(Icons.Outlined.Replay10, contentDescription = "后退 10 秒")
                 }
-                IconButton(onClick = { onSeekBy(10_000L) }) {
+                CircleControl(label = "快进 10 秒", onClick = { onSeekBy(10_000L) }) {
                     Icon(Icons.Outlined.FastForward, contentDescription = "快进 10 秒")
                 }
             }
@@ -330,7 +332,8 @@ private fun FeedPage(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xC2090A0B))
+                    .background(FrostedChromeSurface)
+                    .border(1.dp, FrostedChromeOutline, RoundedCornerShape(6.dp))
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -338,8 +341,12 @@ private fun FeedPage(
                 Icon(
                     if (target >= player.positionMs) Icons.Outlined.FastForward else Icons.Outlined.Replay10,
                     contentDescription = null,
+                    tint = FrostedChromeContent,
                 )
-                Text("${formatDuration(target)} / ${formatDuration(player.durationMs)}")
+                Text(
+                    "${formatDuration(target)} / ${formatDuration(player.durationMs)}",
+                    color = FrostedChromeContent,
+                )
             }
         }
     }
@@ -390,8 +397,10 @@ internal fun CircleControl(
         modifier = modifier
             .size(size.dp)
             .clip(CircleShape)
-            .background(Color(0xA6090A0B))
+            .background(FrostedChromeSurface)
+            .border(1.dp, FrostedChromeOutline, CircleShape)
             .semantics { contentDescription = label },
+        colors = IconButtonDefaults.iconButtonColors(contentColor = FrostedChromeContent),
     ) {
         content()
     }
