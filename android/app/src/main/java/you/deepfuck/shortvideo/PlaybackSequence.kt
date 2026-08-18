@@ -1,6 +1,7 @@
 package you.deepfuck.shortvideo
 
 import you.deepfuck.shortvideo.data.MediaEntry
+import you.deepfuck.shortvideo.data.MediaSurface
 
 internal fun nextFeedIndex(currentIndex: Int, itemCount: Int): Int? {
     if (itemCount <= 0) return null
@@ -15,6 +16,8 @@ internal fun nextAudioEntry(items: List<MediaEntry>, afterId: Long): MediaEntry?
 
 internal fun shouldAttachFeedPlayer(active: Boolean, entryId: Long, mediaId: Long?): Boolean =
     active && mediaId == entryId
+
+internal fun shouldActivateFeedItem(surface: MediaSurface): Boolean = surface != MediaSurface.ASMR
 
 internal fun shouldLoadMore(
     lastVisibleIndex: Int,

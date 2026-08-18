@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import you.deepfuck.shortvideo.data.MediaEntry
+import you.deepfuck.shortvideo.data.MediaSurface
 
 class PlaybackSequenceTest {
     @Test
@@ -40,6 +41,13 @@ class PlaybackSequenceTest {
         assertFalse(shouldLoadMore(lastVisibleIndex = 23, itemCount = 24, loading = true, hasMore = true))
         assertFalse(shouldLoadMore(lastVisibleIndex = 23, itemCount = 24, loading = false, hasMore = false))
         assertFalse(shouldLoadMore(lastVisibleIndex = -1, itemCount = 0, loading = false, hasMore = true))
+    }
+
+    @Test
+    fun staleFeedCallbacksCannotRestartPlaybackInsideAsmr() {
+        assertTrue(shouldActivateFeedItem(MediaSurface.SHORT))
+        assertTrue(shouldActivateFeedItem(MediaSurface.LONG))
+        assertFalse(shouldActivateFeedItem(MediaSurface.ASMR))
     }
 
     private fun media(id: Long, kind: String) = MediaEntry(

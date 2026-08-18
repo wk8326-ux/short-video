@@ -206,6 +206,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun activateFeedItem(index: Int) {
         val state = mutableState.value
+        if (!shouldActivateFeedItem(state.surface)) return
         val entry = state.feedItems.getOrNull(index) ?: return
         if (activeFeedItemId == entry.id) return
         saveCurrentPosition()
