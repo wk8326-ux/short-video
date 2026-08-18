@@ -56,12 +56,12 @@ Android updates are published from `/data/app-update`, which is inside the exist
 
 ```json
 {
-  "versionCode": 131,
-  "versionName": "1.3.1",
-  "apkFile": "short-video-android-v1.3.1-debug.apk",
+  "versionCode": 132,
+  "versionName": "1.3.2",
+  "apkFile": "short-video-android-v1.3.2-debug.apk",
   "sha256": "<64 lowercase hex characters>",
   "size": 21000000,
-  "notes": "修复跨页面声音、ASMR 返回闪退和预加载提示，增加音频/视频独立后台播放开关"
+  "notes": "修复切换 ASMR 误触发下一条和后台播放闪退，增加完整作者搜索与动态播放标识"
 }
 ```
 

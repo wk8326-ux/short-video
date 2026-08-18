@@ -1,5 +1,12 @@
 package you.deepfuck.shortvideo.ui
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -33,7 +40,6 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Forward10
 import androidx.compose.material.icons.outlined.Fullscreen
 import androidx.compose.material.icons.outlined.FullscreenExit
-import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Refresh
@@ -62,7 +68,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -70,6 +81,8 @@ import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlin.math.PI
+import kotlin.math.sin
 import you.deepfuck.shortvideo.AppUiState
 import you.deepfuck.shortvideo.shouldLoadMore
 import you.deepfuck.shortvideo.data.AsmrAuthor
@@ -85,7 +98,6 @@ internal fun AsmrScreen(
     fullscreen: Boolean,
     onAuthor: (String) -> Unit,
     onBackAuthor: () -> Unit,
-    onLoadMoreAuthors: () -> Unit,
     onLoadMoreItems: () -> Unit,
     onFilter: (String) -> Unit,
     onQuery: (String) -> Unit,
@@ -97,7 +109,7 @@ internal fun AsmrScreen(
     onMuted: (Boolean) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
-    onBackgroundPlayback: (audio: Boolean, enabled: Boolean) -> Unit,
+    onVideoBackgroundPlayback: (Boolean) -> Unit,
     onFullscreen: (Boolean) -> Unit,
 ) {
     val screenStates = rememberSaveableStateHolder()
@@ -111,11 +123,9 @@ internal fun AsmrScreen(
                         authors = state.asmrAuthors,
                         total = state.asmrAuthorsTotal,
                         loading = state.asmrLoading,
-                        hasMore = state.asmrAuthorsHasMore,
                         error = state.asmrError,
                         listState = rememberLazyListState(),
                         onAuthor = onAuthor,
-                        onLoadMore = onLoadMoreAuthors,
                     )
                 }
             } else {
@@ -138,11 +148,9 @@ internal fun AsmrScreen(
             MiniPlayer(
                 entry = state.nowPlaying,
                 player = player,
-                backgroundPlayback = state.asmrAudioBackgroundPlayback,
                 onExpand = onExpand,
                 onToggle = onToggle,
                 onClose = onClose,
-                onBackgroundPlayback = { enabled -> onBackgroundPlayback(true, enabled) },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
         }
@@ -161,7 +169,7 @@ internal fun AsmrScreen(
                 onMuted = onMuted,
                 onSeek = onSeek,
                 onSeekBy = onSeekBy,
-                onBackgroundPlayback = { enabled -> onBackgroundPlayback(false, enabled) },
+                onBackgroundPlayback = onVideoBackgroundPlayback,
                 onFullscreen = onFullscreen,
             )
         }
@@ -173,24 +181,13 @@ private fun AuthorLibrary(
     authors: List<AsmrAuthor>,
     total: Int,
     loading: Boolean,
-    hasMore: Boolean,
     error: String?,
     listState: LazyListState,
     onAuthor: (String) -> Unit,
-    onLoadMore: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     val filtered = remember(authors, query) {
         if (query.isBlank()) authors else authors.filter { it.name.contains(query, ignoreCase = true) }
-    }
-    LaunchedEffect(listState, filtered.size, loading, hasMore, query) {
-        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
-            .distinctUntilChanged()
-            .collect { lastVisible ->
-                if (query.isBlank() && shouldLoadMore(lastVisible, filtered.size, loading, hasMore)) {
-                    onLoadMore()
-                }
-            }
     }
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 18.dp)) {
@@ -264,9 +261,6 @@ private fun AuthorLibrary(
                         }
                     }
                     HorizontalDivider(color = Line)
-                }
-                if (loading) {
-                    item(key = "loading-more-authors") { LoadingMoreRow() }
                 }
             }
         }
@@ -406,11 +400,7 @@ private fun AuthorMedia(
                                 visible = true,
                                 modifier = Modifier.size(20.dp),
                             )
-                            active && player.playWhenReady -> Icon(
-                                Icons.Outlined.GraphicEq,
-                                contentDescription = "正在播放",
-                                tint = Accent,
-                            )
+                            active && player.playWhenReady -> PlayingEqualizer()
                             else -> Icon(
                                 Icons.Filled.PlayArrow,
                                 contentDescription = if (active) "继续播放" else "播放",
@@ -432,11 +422,9 @@ private fun AuthorMedia(
 private fun MiniPlayer(
     entry: MediaEntry,
     player: PlayerSnapshot,
-    backgroundPlayback: Boolean,
     onExpand: () -> Unit,
     onToggle: () -> Unit,
     onClose: () -> Unit,
-    onBackgroundPlayback: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -460,19 +448,6 @@ private fun MiniPlayer(
                 style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
             )
         }
-        if (entry.isAudio) {
-            IconButton(
-                onClick = { onBackgroundPlayback(!backgroundPlayback) },
-                colors = IconButtonDefaults.iconButtonColors(
-                    contentColor = if (backgroundPlayback) Accent else Color.White,
-                ),
-            ) {
-                Icon(
-                    Icons.Outlined.Headphones,
-                    contentDescription = if (backgroundPlayback) "关闭音频后台播放" else "开启音频后台播放",
-                )
-            }
-        }
         Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
             if (player.isBuffering) {
                 DelayedSpinner(visible = true, modifier = Modifier.size(22.dp))
@@ -492,6 +467,40 @@ private fun MiniPlayer(
             onClick = onClose,
             colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
         ) { Icon(Icons.Outlined.Close, contentDescription = "关闭播放器") }
+    }
+}
+
+@Composable
+private fun PlayingEqualizer(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "playing equalizer")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 850, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "playing equalizer phase",
+    )
+    Canvas(
+        modifier = modifier
+            .size(22.dp)
+            .semantics { contentDescription = "正在播放" },
+    ) {
+        val barWidth = size.width / 7f
+        val gap = barWidth
+        val phases = floatArrayOf(0f, 0.34f, 0.67f)
+        phases.forEachIndexed { index, offset ->
+            val wave = ((sin((phase + offset) * 2f * PI).toFloat() + 1f) / 2f)
+            val barHeight = size.height * (0.28f + wave * 0.66f)
+            val left = gap + index * (barWidth + gap)
+            drawRoundRect(
+                color = Accent,
+                topLeft = Offset(left, (size.height - barHeight) / 2f),
+                size = Size(barWidth, barHeight),
+                cornerRadius = CornerRadius(barWidth / 2f),
+            )
+        }
     }
 }
 

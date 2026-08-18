@@ -7,6 +7,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
+import you.deepfuck.shortvideo.media.PlaybackEndedEvent
+import you.deepfuck.shortvideo.media.PlaybackIdentity
 
 class PlaybackSequenceTest {
     @Test
@@ -51,11 +53,56 @@ class PlaybackSequenceTest {
     }
 
     @Test
-    fun onlyTheCurrentMediaCanAdvanceAfterPlaybackEnds() {
-        assertTrue(shouldHandlePlaybackEnded(endedMediaId = 7L, engineMediaId = 7L, stateMediaId = 7L))
-        assertFalse(shouldHandlePlaybackEnded(endedMediaId = 6L, engineMediaId = 7L, stateMediaId = 7L))
-        assertFalse(shouldHandlePlaybackEnded(endedMediaId = 7L, engineMediaId = null, stateMediaId = 7L))
-        assertFalse(shouldHandlePlaybackEnded(endedMediaId = 7L, engineMediaId = 7L, stateMediaId = null))
+    fun onlyTheCurrentPlaybackGenerationCanAdvanceAfterPlaybackEnds() {
+        val current = PlaybackEndedEvent(mediaId = 7L, generation = 4L)
+        val stale = PlaybackEndedEvent(mediaId = 7L, generation = 3L)
+
+        assertTrue(
+            shouldHandlePlaybackEnded(
+                event = current,
+                engineMediaId = 7L,
+                engineGeneration = 4L,
+                stateMediaId = 7L,
+            ),
+        )
+        assertFalse(
+            shouldHandlePlaybackEnded(
+                event = stale,
+                engineMediaId = 7L,
+                engineGeneration = 4L,
+                stateMediaId = 7L,
+            ),
+        )
+        assertFalse(
+            shouldHandlePlaybackEnded(
+                event = current,
+                engineMediaId = null,
+                engineGeneration = 4L,
+                stateMediaId = 7L,
+            ),
+        )
+        assertFalse(
+            shouldHandlePlaybackEnded(
+                event = current,
+                engineMediaId = 7L,
+                engineGeneration = 5L,
+                stateMediaId = 7L,
+            ),
+        )
+    }
+
+    @Test
+    fun playbackIdentityIsInvalidBeforeStopCanDispatchCallbacks() {
+        val identity = PlaybackIdentity()
+        identity.activate(mediaId = 7L)
+        var eventDuringStop: PlaybackEndedEvent? = null
+
+        identity.invalidateThen {
+            eventDuringStop = identity.endedEvent()
+        }
+
+        assertNull(eventDuringStop)
+        assertEquals(2L, identity.generation)
     }
 
     @Test
@@ -68,15 +115,15 @@ class PlaybackSequenceTest {
     }
 
     @Test
-    fun asmrBackgroundPlaybackIsControlledPerMediaKind() {
+    fun asmrAudioAlwaysKeepsPlayingWhileVideoRemainsOptIn() {
         val audio = media(id = 1L, kind = "audio")
         val video = media(id = 2L, kind = "video")
 
-        assertFalse(shouldKeepPlayingInBackground(MediaSurface.SHORT, video, audioEnabled = true, videoEnabled = true))
-        assertFalse(shouldKeepPlayingInBackground(MediaSurface.ASMR, audio, audioEnabled = false, videoEnabled = true))
-        assertTrue(shouldKeepPlayingInBackground(MediaSurface.ASMR, audio, audioEnabled = true, videoEnabled = false))
-        assertTrue(shouldKeepPlayingInBackground(MediaSurface.ASMR, video, audioEnabled = false, videoEnabled = true))
-        assertFalse(shouldKeepPlayingInBackground(MediaSurface.ASMR, null, audioEnabled = true, videoEnabled = true))
+        assertFalse(shouldKeepPlayingInBackground(MediaSurface.SHORT, video, videoEnabled = true))
+        assertTrue(shouldKeepPlayingInBackground(MediaSurface.ASMR, audio, videoEnabled = false))
+        assertTrue(shouldKeepPlayingInBackground(MediaSurface.ASMR, video, videoEnabled = true))
+        assertFalse(shouldKeepPlayingInBackground(MediaSurface.ASMR, video, videoEnabled = false))
+        assertFalse(shouldKeepPlayingInBackground(MediaSurface.ASMR, null, videoEnabled = true))
     }
 
     private fun media(id: Long, kind: String) = MediaEntry(

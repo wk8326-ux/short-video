@@ -2,6 +2,7 @@ package you.deepfuck.shortvideo
 
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
+import you.deepfuck.shortvideo.media.PlaybackEndedEvent
 
 internal fun nextFeedIndex(currentIndex: Int, itemCount: Int): Int? {
     if (itemCount <= 0) return null
@@ -20,10 +21,13 @@ internal fun shouldAttachFeedPlayer(active: Boolean, entryId: Long, mediaId: Lon
 internal fun shouldActivateFeedItem(surface: MediaSurface): Boolean = surface != MediaSurface.ASMR
 
 internal fun shouldHandlePlaybackEnded(
-    endedMediaId: Long?,
+    event: PlaybackEndedEvent,
     engineMediaId: Long?,
+    engineGeneration: Long,
     stateMediaId: Long?,
-): Boolean = endedMediaId != null && endedMediaId == engineMediaId && endedMediaId == stateMediaId
+): Boolean = event.mediaId == engineMediaId &&
+    event.mediaId == stateMediaId &&
+    event.generation == engineGeneration
 
 internal fun feedPrefetchCandidates(
     items: List<MediaEntry>,
@@ -34,10 +38,9 @@ internal fun feedPrefetchCandidates(
 internal fun shouldKeepPlayingInBackground(
     surface: MediaSurface,
     media: MediaEntry?,
-    audioEnabled: Boolean,
     videoEnabled: Boolean,
 ): Boolean = surface == MediaSurface.ASMR && media != null &&
-    if (media.isAudio) audioEnabled else videoEnabled
+    if (media.isAudio) true else videoEnabled
 
 internal fun shouldLoadMore(
     lastVisibleIndex: Int,

@@ -100,11 +100,13 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         )
     }
 
-    fun asmrAuthors(query: String = "", limit: Int = ASMR_PAGE_SIZE, offset: Int = 0): AsmrPage<AsmrAuthor> {
+    fun asmrAuthors(query: String = "", limit: Int? = null, offset: Int = 0): AsmrPage<AsmrAuthor> {
         val target = url("/api/asmr/authors").newBuilder().apply {
             if (query.isNotBlank()) addQueryParameter("q", query)
-            addQueryParameter("limit", limit.toString())
-            addQueryParameter("offset", offset.toString())
+            if (limit != null) {
+                addQueryParameter("limit", limit.toString())
+                addQueryParameter("offset", offset.toString())
+            }
         }.build()
         val payload = getJson(target.toString())
         val items = payload.optJSONArray("items")

@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.2] - 2026-08-18
+
+### Fixed
+
+- Invalidate the active playback generation before stopping ExoPlayer so delayed or synchronous end events cannot advance a short or long feed after switching to ASMR.
+- Keep the ASMR media session stable while pausing, opening management, or changing background preferences, removing the rapid service restart path that could crash the app.
+
+### Changed
+
+- Treat ASMR audio as music-style playback that always continues through management, screen lock, and app backgrounding; ASMR video retains its explicit background toggle.
+- Load the complete ASMR author metadata index once per app session so local search covers every author, while keeping author media lists paginated.
+- Replace the static current-audio icon with a compact animated equalizer and remove the redundant audio background toggle from the mini-player.
+
 ## [1.2.3] - 2026-08-18
 
 ### Added

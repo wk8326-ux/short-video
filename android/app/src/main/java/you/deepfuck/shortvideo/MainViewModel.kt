@@ -30,6 +30,7 @@ import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.data.PlaybackPreferences
 import you.deepfuck.shortvideo.media.PlaybackEngine
+import you.deepfuck.shortvideo.media.PlaybackEndedEvent
 import you.deepfuck.shortvideo.media.PlaybackEngineProvider
 import you.deepfuck.shortvideo.media.PlaybackService
 import you.deepfuck.shortvideo.update.isUpdateAvailable
@@ -51,7 +52,6 @@ data class AppUiState(
     val feedError: String? = null,
     val asmrAuthors: List<AsmrAuthor> = emptyList(),
     val asmrAuthorsTotal: Int = 0,
-    val asmrAuthorsHasMore: Boolean = false,
     val asmrItems: List<MediaEntry> = emptyList(),
     val asmrTotal: Int = 0,
     val asmrItemsHasMore: Boolean = false,
@@ -62,7 +62,6 @@ data class AppUiState(
     val asmrQuery: String = "",
     val expandedMedia: MediaEntry? = null,
     val nowPlaying: MediaEntry? = null,
-    val asmrAudioBackgroundPlayback: Boolean = false,
     val asmrVideoBackgroundPlayback: Boolean = false,
     val showManagement: Boolean = false,
     val adminStatus: AdminStatus? = null,
@@ -87,13 +86,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             surface = preferences.surface,
             mode = preferences.mode,
             muted = preferences.muted,
-            asmrAudioBackgroundPlayback = preferences.asmrAudioBackgroundPlayback,
             asmrVideoBackgroundPlayback = preferences.asmrVideoBackgroundPlayback,
             nowPlaying = restoredMedia.takeIf {
                 shouldKeepPlayingInBackground(
                     preferences.surface,
                     it,
-                    preferences.asmrAudioBackgroundPlayback,
                     preferences.asmrVideoBackgroundPlayback,
                 )
             },
@@ -104,10 +101,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var feedCursor: String? = null
     private var feedJob: Job? = null
     private var asmrAuthorsJob: Job? = null
+    private var asmrAuthorsLoaded = false
     private val asmrItemJobs = mutableMapOf<String, Job>()
     private var activeFeedItemId: Long? = null
     private val asmrItemsCache = mutableMapOf<String, List<MediaEntry>>()
-    private var asmrAuthorsNextOffset: Int? = 0
     private val asmrItemsNextOffsets = mutableMapOf<String, Int?>()
     private val asmrItemsTotals = mutableMapOf<String, Int>()
     private var audioQueueAuthor: String? = null
@@ -118,8 +115,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         playback.setMuted(preferences.muted)
-        playback.setOnPlaybackEndedListener { endedMediaId ->
-            viewModelScope.launch { advanceAfterPlaybackEnded(endedMediaId) }
+        playback.setOnPlaybackEndedListener { event ->
+            viewModelScope.launch { advanceAfterPlaybackEnded(event) }
         }
         if (api.hasSession()) {
             restoreCurrentSurface()
@@ -175,13 +172,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun changeSurface(surface: MediaSurface) {
-        if (surface == mutableState.value.surface) return
+        val previousSurface = mutableState.value.surface
+        if (surface == previousSurface) return
         saveCurrentPosition()
-        playback.stop()
-        stopPlaybackService()
-        if (mutableState.value.surface == MediaSurface.ASMR) {
-            asmrAuthorsJob?.cancel()
-            asmrAuthorsJob = null
+        if (previousSurface == MediaSurface.ASMR) {
             val itemJobs = asmrItemJobs.values.toList()
             asmrItemJobs.clear()
             itemJobs.forEach { it.cancel() }
@@ -200,11 +194,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             feedError = null,
             asmrError = null,
         )
+        playback.stop()
+        stopPlaybackService()
         if (surface == MediaSurface.ASMR) {
             val author = mutableState.value.selectedAuthor
             when {
-                author == null && mutableState.value.asmrAuthors.isEmpty() -> loadAsmrAuthors(reset = true)
-                author != null && !asmrItemsCache.containsKey(author) -> loadAsmrItems(author, reset = true)
+                author == null -> loadAsmrAuthors()
+                !asmrItemsCache.containsKey(author) -> loadAsmrItems(author, reset = true)
             }
         } else {
             restoreFeed(surface)
@@ -229,8 +225,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         playback.togglePlayback()
         if (playback.player.playWhenReady && keepCurrentAsmrPlaybackInBackground()) {
             startPlaybackService()
-        } else if (!playback.player.playWhenReady && mutableState.value.surface == MediaSurface.ASMR) {
-            stopPlaybackService()
         }
     }
 
@@ -286,13 +280,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun loadMoreAsmrAuthors() {
-        val state = mutableState.value
-        if (state.surface == MediaSurface.ASMR && state.selectedAuthor == null) {
-            loadAsmrAuthors(reset = false)
-        }
-    }
-
     fun loadMoreAsmrItems() {
         val author = mutableState.value.selectedAuthor ?: return
         loadAsmrItems(author, reset = false)
@@ -335,17 +322,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (backgroundPlaybackEnabled(entry)) startPlaybackService() else stopPlaybackService()
     }
 
-    fun setAsmrBackgroundPlayback(audio: Boolean, enabled: Boolean) {
-        if (audio) {
-            preferences.asmrAudioBackgroundPlayback = enabled
-            mutableState.value = mutableState.value.copy(asmrAudioBackgroundPlayback = enabled)
-        } else {
-            preferences.asmrVideoBackgroundPlayback = enabled
-            mutableState.value = mutableState.value.copy(asmrVideoBackgroundPlayback = enabled)
-        }
+    fun setAsmrVideoBackgroundPlayback(enabled: Boolean) {
+        preferences.asmrVideoBackgroundPlayback = enabled
+        mutableState.value = mutableState.value.copy(asmrVideoBackgroundPlayback = enabled)
         val current = mutableState.value.nowPlaying ?: return
-        if (current.isAudio != audio) return
-        if (enabled && playback.player.playWhenReady) startPlaybackService() else stopPlaybackService()
+        if (current.isAudio) return
+        if (enabled && playback.player.playWhenReady) startPlaybackService()
     }
 
     fun expandNowPlaying() {
@@ -545,7 +527,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun restoreCurrentSurface() {
-        if (mutableState.value.surface == MediaSurface.ASMR) loadAsmrAuthors(reset = true)
+        if (mutableState.value.surface == MediaSurface.ASMR) loadAsmrAuthors()
         else restoreFeed(mutableState.value.surface)
     }
 
@@ -620,29 +602,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun loadAsmrAuthors(reset: Boolean) {
-        if (reset) {
-            asmrAuthorsJob?.cancel()
-            asmrAuthorsNextOffset = 0
-        } else if (asmrAuthorsJob?.isActive == true) {
-            return
-        }
-        val offset = asmrAuthorsNextOffset ?: return
-        val existing = if (reset) emptyList() else mutableState.value.asmrAuthors
+    private fun loadAsmrAuthors() {
+        if (asmrAuthorsLoaded || asmrAuthorsJob?.isActive == true) return
         mutableState.value = mutableState.value.copy(asmrLoading = true, asmrError = null)
         asmrAuthorsJob = viewModelScope.launch {
-            val page = runApi { api.asmrAuthors(offset = offset) }.getOrElse {
+            val page = runApi { api.asmrAuthors() }.getOrElse {
                 handleAsmrError(it, "无法载入 ASMR 目录")
                 return@launch
             }
-            val names = existing.mapTo(mutableSetOf()) { it.name }
-            val merged = existing + page.items.filter { names.add(it.name) }
-            asmrAuthorsNextOffset = page.nextOffset
-            if (mutableState.value.surface != MediaSurface.ASMR || mutableState.value.selectedAuthor != null) return@launch
+            asmrAuthorsLoaded = true
             mutableState.value = mutableState.value.copy(
-                asmrAuthors = merged,
+                asmrAuthors = page.items,
                 asmrAuthorsTotal = page.total,
-                asmrAuthorsHasMore = page.nextOffset != null,
                 asmrLoading = false,
                 asmrError = null,
             )
@@ -703,12 +674,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun advanceAfterPlaybackEnded(endedMediaId: Long?) {
+    private fun advanceAfterPlaybackEnded(event: PlaybackEndedEvent) {
         val state = mutableState.value
         if (
             !shouldHandlePlaybackEnded(
-                endedMediaId = endedMediaId,
+                event = event,
                 engineMediaId = playback.currentMedia()?.id,
+                engineGeneration = playback.currentPlaybackGeneration(),
                 stateMediaId = state.nowPlaying?.id,
             )
         ) return
@@ -798,7 +770,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun backgroundPlaybackEnabled(entry: MediaEntry): Boolean {
         val state = mutableState.value
         return if (entry.isAudio) {
-            state.asmrAudioBackgroundPlayback
+            true
         } else {
             state.asmrVideoBackgroundPlayback
         }
@@ -809,7 +781,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return shouldKeepPlayingInBackground(
             surface = state.surface,
             media = state.nowPlaying,
-            audioEnabled = state.asmrAudioBackgroundPlayback,
             videoEnabled = state.asmrVideoBackgroundPlayback,
         )
     }

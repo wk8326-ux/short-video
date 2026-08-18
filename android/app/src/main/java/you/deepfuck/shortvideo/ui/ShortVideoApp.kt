@@ -147,11 +147,13 @@ fun ShortVideoApp(
                             fullscreen = fullscreen,
                             onAuthor = viewModel::selectAsmrAuthor,
                             onBackAuthor = viewModel::leaveAsmrAuthor,
-                            onLoadMoreAuthors = viewModel::loadMoreAsmrAuthors,
                             onLoadMoreItems = viewModel::loadMoreAsmrItems,
                             onFilter = viewModel::setAsmrFilter,
                             onQuery = viewModel::setAsmrQuery,
-                            onPlay = viewModel::playAsmr,
+                            onPlay = { entry ->
+                                viewModel.playAsmr(entry)
+                                if (entry.isAudio) onBackgroundPlaybackRequested()
+                            },
                             onExpand = viewModel::expandNowPlaying,
                             onCollapse = viewModel::collapsePlayer,
                             onClose = viewModel::closeAsmrPlayer,
@@ -159,9 +161,9 @@ fun ShortVideoApp(
                             onMuted = viewModel::setMuted,
                             onSeek = viewModel.playback::seekTo,
                             onSeekBy = viewModel.playback::seekBy,
-                            onBackgroundPlayback = { audio, enabled ->
+                            onVideoBackgroundPlayback = { enabled ->
                                 if (enabled) onBackgroundPlaybackRequested()
-                                viewModel.setAsmrBackgroundPlayback(audio, enabled)
+                                viewModel.setAsmrVideoBackgroundPlayback(enabled)
                             },
                             onFullscreen = {
                                 fullscreen = it

@@ -31,10 +31,6 @@ class PlaybackPreferences(context: Context) {
         get() = preferences.getBoolean(KEY_MUTED, true)
         set(value) = preferences.edit().putBoolean(KEY_MUTED, value).apply()
 
-    var asmrAudioBackgroundPlayback: Boolean
-        get() = preferences.getBoolean(KEY_ASMR_AUDIO_BACKGROUND, false)
-        set(value) = preferences.edit().putBoolean(KEY_ASMR_AUDIO_BACKGROUND, value).apply()
-
     var asmrVideoBackgroundPlayback: Boolean
         get() = preferences.getBoolean(KEY_ASMR_VIDEO_BACKGROUND, false)
         set(value) = preferences.edit().putBoolean(KEY_ASMR_VIDEO_BACKGROUND, value).apply()
@@ -108,7 +104,6 @@ class PlaybackPreferences(context: Context) {
         const val KEY_SURFACE = "surface"
         const val KEY_MODE = "mode"
         const val KEY_MUTED = "muted"
-        const val KEY_ASMR_AUDIO_BACKGROUND = "asmr_audio_background"
         const val KEY_ASMR_VIDEO_BACKGROUND = "asmr_video_background"
         const val KEY_RECENT = "recent"
         const val KEY_POSITIONS = "positions"

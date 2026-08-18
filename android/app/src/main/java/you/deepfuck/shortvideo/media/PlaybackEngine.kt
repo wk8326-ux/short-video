@@ -48,6 +48,32 @@ data class PlayerSnapshot(
     val error: String? = null,
 )
 
+data class PlaybackEndedEvent(
+    val mediaId: Long,
+    val generation: Long,
+)
+
+internal class PlaybackIdentity {
+    private var mediaId: Long? = null
+    var generation: Long = 0L
+        private set
+
+    fun activate(mediaId: Long) {
+        generation += 1L
+        this.mediaId = mediaId
+    }
+
+    fun endedEvent(): PlaybackEndedEvent? = mediaId?.let {
+        PlaybackEndedEvent(mediaId = it, generation = generation)
+    }
+
+    fun invalidateThen(playerMutation: () -> Unit) {
+        generation += 1L
+        mediaId = null
+        playerMutation()
+    }
+}
+
 class PlaybackEngine(context: Context, private val api: MediaApi) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val cache = MediaCacheStore.get(context)
@@ -57,7 +83,8 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     private val prefetchLock = Any()
     private var prefetchGeneration = 0L
     private var activeCacheWriter: CacheWriter? = null
-    private var onPlaybackEnded: ((Long?) -> Unit)? = null
+    private val playbackIdentity = PlaybackIdentity()
+    private var onPlaybackEnded: ((PlaybackEndedEvent) -> Unit)? = null
 
     private val upstreamFactory = ResolvingDataSource.Factory(
         DefaultHttpDataSource.Factory()
@@ -89,8 +116,8 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     publish()
-                    if (playbackState == Player.STATE_ENDED) {
-                        onPlaybackEnded?.invoke(currentEntry?.id)
+                    if (playbackState == Player.STATE_ENDED && player.playbackState == Player.STATE_ENDED) {
+                        playbackIdentity.endedEvent()?.let { onPlaybackEnded?.invoke(it) }
                     }
                 }
                 override fun onIsPlayingChanged(isPlaying: Boolean) = publish()
@@ -109,6 +136,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             if (autoPlay) player.play()
             return
         }
+        playbackIdentity.activate(entry.id)
         currentEntry = entry
         val media = MediaItem.Builder()
             .setMediaId(entry.id.toString())
@@ -138,12 +166,13 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     }
 
     fun restart() {
+        currentEntry?.id?.let(playbackIdentity::activate)
         player.seekTo(0L)
         player.play()
         publish()
     }
 
-    fun setOnPlaybackEndedListener(listener: ((Long?) -> Unit)?) {
+    fun setOnPlaybackEndedListener(listener: ((PlaybackEndedEvent) -> Unit)?) {
         onPlaybackEnded = listener
     }
 
@@ -168,9 +197,11 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     }
 
     fun stop() {
-        player.pause()
-        player.clearMediaItems()
         currentEntry = null
+        playbackIdentity.invalidateThen {
+            player.pause()
+            player.clearMediaItems()
+        }
         publish()
     }
 
@@ -199,7 +230,10 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun currentMedia(): MediaEntry? = currentEntry
 
+    fun currentPlaybackGeneration(): Long = playbackIdentity.generation
+
     fun release() {
+        currentEntry = null
         prefetchJob?.cancel()
         synchronized(prefetchLock) {
             prefetchGeneration += 1L
@@ -207,7 +241,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             activeCacheWriter = null
         }
         scope.cancel()
-        player.release()
+        playbackIdentity.invalidateThen(player::release)
     }
 
     private fun cacheProgressive(surface: MediaSurface, entry: MediaEntry, generation: Long) {
