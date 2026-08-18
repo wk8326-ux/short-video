@@ -13,14 +13,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -33,26 +32,27 @@ import androidx.compose.material.icons.outlined.Audiotrack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Fullscreen
 import androidx.compose.material.icons.outlined.FullscreenExit
-import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,7 +65,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import you.deepfuck.shortvideo.AppUiState
+import you.deepfuck.shortvideo.shouldLoadMore
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.media.PlayerSnapshot
@@ -79,6 +81,8 @@ internal fun AsmrScreen(
     fullscreen: Boolean,
     onAuthor: (String) -> Unit,
     onBackAuthor: () -> Unit,
+    onLoadMoreAuthors: () -> Unit,
+    onLoadMoreItems: () -> Unit,
     onFilter: (String) -> Unit,
     onQuery: (String) -> Unit,
     onPlay: (MediaEntry) -> Unit,
@@ -90,24 +94,28 @@ internal fun AsmrScreen(
     onSeek: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
 ) {
-    val screenStates = rememberSaveableStateHolder()
+    val authorListState = rememberLazyListState()
     Box(Modifier.fillMaxSize().background(Canvas)) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             Spacer(Modifier.height(52.dp))
             if (state.selectedAuthor == null) {
-                screenStates.SaveableStateProvider("asmr-authors") {
-                    AuthorLibrary(
-                        authors = state.asmrAuthors,
-                        loading = state.asmrLoading,
-                        error = state.asmrError,
-                        onAuthor = onAuthor,
-                    )
-                }
+                AuthorLibrary(
+                    authors = state.asmrAuthors,
+                    total = state.asmrAuthorsTotal,
+                    loading = state.asmrLoading,
+                    hasMore = state.asmrAuthorsHasMore,
+                    error = state.asmrError,
+                    listState = authorListState,
+                    onAuthor = onAuthor,
+                    onLoadMore = onLoadMoreAuthors,
+                )
             } else {
-                screenStates.SaveableStateProvider("asmr-author:${state.selectedAuthor}") {
+                key(state.selectedAuthor) {
                     AuthorMedia(
                         state = state,
+                        listState = rememberLazyListState(),
                         onBack = onBackAuthor,
+                        onLoadMore = onLoadMoreItems,
                         onFilter = onFilter,
                         onQuery = onQuery,
                         onPlay = onPlay,
@@ -148,20 +156,36 @@ internal fun AsmrScreen(
 @Composable
 private fun AuthorLibrary(
     authors: List<AsmrAuthor>,
+    total: Int,
     loading: Boolean,
+    hasMore: Boolean,
     error: String?,
+    listState: LazyListState,
     onAuthor: (String) -> Unit,
+    onLoadMore: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
-    val listState = rememberLazyListState()
     val filtered = remember(authors, query) {
         if (query.isBlank()) authors else authors.filter { it.name.contains(query, ignoreCase = true) }
+    }
+    LaunchedEffect(listState, filtered.size, loading, hasMore, query) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+            .distinctUntilChanged()
+            .collect { lastVisible ->
+                if (query.isBlank() && shouldLoadMore(lastVisible, filtered.size, loading, hasMore)) {
+                    onLoadMore()
+                }
+            }
     }
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 18.dp)) {
             Text("ASMR 媒体库", fontWeight = FontWeight.SemiBold, style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(5.dp))
-            Text("${authors.size} 位作者", color = TextFaint, style = androidx.compose.material3.MaterialTheme.typography.labelMedium)
+            Text(
+                if (total > authors.size) "已载入 ${authors.size} / $total 位作者" else "${authors.size} 位作者",
+                color = TextFaint,
+                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+            )
             Spacer(Modifier.height(16.dp))
             OutlinedTextField(
                 value = query,
@@ -169,9 +193,16 @@ private fun AuthorLibrary(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 placeholder = { Text("搜索作者") },
-                leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, tint = Color.White) },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 shape = RoundedCornerShape(6.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedBorderColor = Color.White.copy(alpha = 0.46f),
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.18f),
+                    cursorColor = Color.White,
+                ),
             )
         }
         when {
@@ -230,12 +261,13 @@ private fun AuthorLibrary(
 @Composable
 private fun AuthorMedia(
     state: AppUiState,
+    listState: LazyListState,
     onBack: () -> Unit,
+    onLoadMore: () -> Unit,
     onFilter: (String) -> Unit,
     onQuery: (String) -> Unit,
     onPlay: (MediaEntry) -> Unit,
 ) {
-    val listState = rememberLazyListState()
     val filtered = remember(state.asmrItems, state.asmrFilter, state.asmrQuery) {
         state.asmrItems.filter { item ->
             val kindMatches = state.asmrFilter == "all" ||
@@ -244,20 +276,35 @@ private fun AuthorMedia(
             kindMatches && (state.asmrQuery.isBlank() || item.title.contains(state.asmrQuery, ignoreCase = true))
         }
     }
+    LaunchedEffect(listState, filtered.size, state.asmrLoading, state.asmrItemsHasMore, state.asmrQuery) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+            .distinctUntilChanged()
+            .collect { lastVisible ->
+                if (
+                    state.asmrQuery.isBlank() &&
+                    shouldLoadMore(lastVisible, filtered.size, state.asmrLoading, state.asmrItemsHasMore)
+                ) {
+                    onLoadMore()
+                }
+            }
+    }
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onBack) {
+            IconButton(
+                onClick = onBack,
+                colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
+            ) {
                 Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回作者列表")
             }
             Column(Modifier.weight(1f)) {
                 Text(
                     state.selectedAuthor.orEmpty(),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
                     fontWeight = FontWeight.SemiBold,
+                    color = Color.White,
+                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
                 )
                 Text(
                     if (state.asmrLoading || state.asmrItems.size < state.asmrTotal) {
@@ -271,16 +318,26 @@ private fun AuthorMedia(
             }
         }
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp).clip(RoundedCornerShape(6.dp)).background(Color(0x0FFFFFFF)).padding(3.dp),
+            modifier = Modifier.padding(horizontal = 16.dp),
         ) {
             listOf("all" to "全部", "video" to "视频", "audio" to "音频").forEach { (key, label) ->
-                TextButton(
-                    onClick = { onFilter(key) },
-                    modifier = Modifier.weight(1f).height(40.dp),
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = if (state.asmrFilter == key) TextPrimary else TextFaint,
-                    ),
-                ) { Text(label, fontWeight = if (state.asmrFilter == key) FontWeight.SemiBold else FontWeight.Normal) }
+                val selected = state.asmrFilter == key
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    TextButton(
+                        onClick = { onFilter(key) },
+                        modifier = Modifier.fillMaxWidth().height(40.dp),
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = Color.White.copy(alpha = if (selected) 1f else 0.62f),
+                        ),
+                    ) { Text(label, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal) }
+                    Box(
+                        Modifier
+                            .width(24.dp)
+                            .height(2.dp)
+                            .clip(RoundedCornerShape(1.dp))
+                            .background(if (selected) Accent else Color.Transparent),
+                    )
+                }
             }
         }
         OutlinedTextField(
@@ -289,8 +346,15 @@ private fun AuthorMedia(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             singleLine = true,
             placeholder = { Text("搜索媒体") },
-            leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+            leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, tint = Color.White) },
             shape = RoundedCornerShape(6.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedTextColor = TextPrimary,
+                unfocusedTextColor = TextPrimary,
+                focusedBorderColor = Color.White.copy(alpha = 0.46f),
+                unfocusedBorderColor = Color.White.copy(alpha = 0.18f),
+                cursorColor = Color.White,
+            ),
         )
         when {
             state.asmrLoading && state.asmrItems.isEmpty() -> ListLoadingPlaceholder()
@@ -308,7 +372,7 @@ private fun AuthorMedia(
                         Icon(
                             if (entry.isAudio) Icons.Outlined.Audiotrack else Icons.Outlined.Movie,
                             contentDescription = null,
-                            tint = if (state.nowPlaying?.id == entry.id) Accent else TextFaint,
+                            tint = Color.White,
                             modifier = Modifier.size(22.dp),
                         )
                         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
@@ -320,7 +384,7 @@ private fun AuthorMedia(
                                 style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                             )
                         }
-                        Icon(Icons.Filled.PlayArrow, contentDescription = "播放", tint = TextSecondary)
+                        Icon(Icons.Filled.PlayArrow, contentDescription = "播放", tint = Color.White)
                     }
                     HorizontalDivider(color = Line)
                 }
@@ -344,7 +408,7 @@ private fun MiniPlayer(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xF2111214))
+            .background(Color.Black.copy(alpha = 0.78f))
             .navigationBarsPadding()
             .height(72.dp)
             .then(if (entry.isAudio) Modifier else Modifier.clickable(onClick = onExpand))
@@ -366,12 +430,18 @@ private fun MiniPlayer(
             if (player.isBuffering) {
                 DelayedSpinner(visible = true, modifier = Modifier.size(22.dp))
             } else {
-                IconButton(onClick = onToggle) {
+                IconButton(
+                    onClick = onToggle,
+                    colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
+                ) {
                     Icon(if (player.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = if (player.isPlaying) "暂停" else "播放")
                 }
             }
         }
-        IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, contentDescription = "关闭播放器") }
+        IconButton(
+            onClick = onClose,
+            colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
+        ) { Icon(Icons.Outlined.Close, contentDescription = "关闭播放器") }
     }
 }
 
@@ -426,29 +496,7 @@ private fun ExpandedAsmrPlayer(
                 )
             },
     ) {
-        if (entry.isAudio) {
-            Column(
-                modifier = Modifier.fillMaxSize().safeDrawingPadding(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Box(Modifier.size(78.dp).background(Color(0x12FFFFFF), CircleShape), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.Headphones, contentDescription = null, modifier = Modifier.size(34.dp), tint = TextSecondary)
-                }
-                Spacer(Modifier.height(20.dp))
-                Text(
-                    entry.title,
-                    modifier = Modifier.padding(horizontal = 32.dp),
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(entry.author.orEmpty(), color = TextFaint)
-            }
-        } else {
-            PlayerHost(exoPlayer, Modifier.fillMaxSize())
-        }
+        PlayerHost(exoPlayer, Modifier.fillMaxSize())
         BufferSpinner(player.isBuffering)
 
         if (controlsVisible) {
@@ -460,17 +508,24 @@ private fun ExpandedAsmrPlayer(
                     .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onCollapse) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "收起播放器") }
+                IconButton(
+                    onClick = onCollapse,
+                    colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
+                ) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "收起播放器") }
                 Column(Modifier.weight(1f)) {
                     Text(entry.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
                     Text(entry.author.orEmpty(), maxLines = 1, color = TextFaint, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
                 }
-                if (!entry.isAudio) {
-                    IconButton(onClick = { onFullscreen(!fullscreen) }) {
-                        Icon(if (fullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen, contentDescription = if (fullscreen) "退出横屏" else "横屏")
-                    }
+                IconButton(
+                    onClick = { onFullscreen(!fullscreen) },
+                    colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
+                ) {
+                    Icon(if (fullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen, contentDescription = if (fullscreen) "退出横屏" else "横屏")
                 }
-                IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, contentDescription = "关闭播放器") }
+                IconButton(
+                    onClick = onClose,
+                    colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
+                ) { Icon(Icons.Outlined.Close, contentDescription = "关闭播放器") }
             }
 
             Column(
@@ -482,7 +537,11 @@ private fun ExpandedAsmrPlayer(
                     .padding(start = 12.dp, end = 12.dp, top = 34.dp, bottom = 10.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onToggle, modifier = Modifier.size(48.dp)) {
+                    IconButton(
+                        onClick = onToggle,
+                        modifier = Modifier.size(48.dp),
+                        colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
+                    ) {
                         Icon(if (player.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = if (player.isPlaying) "暂停" else "播放")
                     }
                     FineProgressBar(
@@ -579,7 +638,7 @@ private fun LoadingMoreRow() {
         modifier = Modifier.fillMaxWidth().height(52.dp),
         contentAlignment = Alignment.Center,
     ) {
-        CircularProgressIndicator(Modifier.size(18.dp), color = TextSecondary, strokeWidth = 2.dp)
+        DelayedSpinner(visible = true, modifier = Modifier.size(18.dp))
     }
 }
 

@@ -1,12 +1,6 @@
 package you.deepfuck.shortvideo.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -51,6 +45,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -133,21 +128,8 @@ fun ShortVideoApp(
             )
         } else {
             Box(Modifier.fillMaxSize()) {
-                AnimatedContent(
-                    targetState = state.surface,
-                    transitionSpec = {
-                        val direction = if (targetState.ordinal > initialState.ordinal) 1 else -1
-                        (
-                            slideInHorizontally(tween(200)) { width -> direction * width / 8 } +
-                                fadeIn(tween(120))
-                            ).togetherWith(
-                            slideOutHorizontally(tween(150)) { width -> -direction * width / 8 } +
-                                fadeOut(tween(100)),
-                        )
-                    },
-                    label = "媒体分类切换",
-                ) { surface ->
-                    if (surface == MediaSurface.ASMR) {
+                key(state.surface) {
+                    if (state.surface == MediaSurface.ASMR) {
                         AsmrScreen(
                             state = state,
                             player = player,
@@ -156,6 +138,8 @@ fun ShortVideoApp(
                             fullscreen = fullscreen,
                             onAuthor = viewModel::selectAsmrAuthor,
                             onBackAuthor = viewModel::leaveAsmrAuthor,
+                            onLoadMoreAuthors = viewModel::loadMoreAsmrAuthors,
+                            onLoadMoreItems = viewModel::loadMoreAsmrItems,
                             onFilter = viewModel::setAsmrFilter,
                             onQuery = viewModel::setAsmrQuery,
                             onPlay = { entry ->

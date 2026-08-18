@@ -59,6 +59,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import you.deepfuck.shortvideo.AppUiState
+import you.deepfuck.shortvideo.shouldAttachFeedPlayer
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
@@ -234,7 +235,7 @@ private fun FeedPage(
                 },
             ),
     ) {
-        if (active) playerHost()
+        if (shouldAttachFeedPlayer(active, entry.id, player.mediaId)) playerHost()
         BufferSpinner(active && player.isBuffering && player.mediaId == entry.id)
 
         val controlsVisible = !fullscreen || chromeVisible

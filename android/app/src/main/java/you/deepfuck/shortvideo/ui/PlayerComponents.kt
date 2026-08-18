@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -32,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
@@ -55,8 +55,8 @@ internal fun PlayerHost(player: ExoPlayer, modifier: Modifier = Modifier) {
             PlayerView(context).apply {
                 useController = false
                 keepScreenOn = true
-                setKeepContentOnPlayerReset(true)
-                setShutterBackgroundColor(AndroidColor.TRANSPARENT)
+                setKeepContentOnPlayerReset(false)
+                setShutterBackgroundColor(AndroidColor.BLACK)
                 resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 this.player = player
             }
@@ -84,11 +84,32 @@ internal fun DelayedSpinner(visible: Boolean, modifier: Modifier = Modifier) {
         }
     }
     if (!delayedVisible) return
-    CircularProgressIndicator(
-        modifier = modifier.size(24.dp),
-        color = Color.White,
-        strokeWidth = 2.dp,
+    val transition = rememberInfiniteTransition(label = "loading ring")
+    val rotation by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(850, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "loading ring rotation",
     )
+    Canvas(
+        modifier = modifier
+            .size(24.dp)
+            .semantics { contentDescription = "正在加载" },
+    ) {
+        val stroke = 2.dp.toPx()
+        drawArc(
+            color = Color.White,
+            startAngle = rotation,
+            sweepAngle = 252f,
+            useCenter = false,
+            topLeft = Offset(stroke / 2f, stroke / 2f),
+            size = androidx.compose.ui.geometry.Size(size.width - stroke, size.height - stroke),
+            style = Stroke(width = stroke, cap = StrokeCap.Round),
+        )
+    }
 }
 
 @Composable
