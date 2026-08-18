@@ -19,6 +19,26 @@ internal fun shouldAttachFeedPlayer(active: Boolean, entryId: Long, mediaId: Lon
 
 internal fun shouldActivateFeedItem(surface: MediaSurface): Boolean = surface != MediaSurface.ASMR
 
+internal fun shouldHandlePlaybackEnded(
+    endedMediaId: Long?,
+    engineMediaId: Long?,
+    stateMediaId: Long?,
+): Boolean = endedMediaId != null && endedMediaId == engineMediaId && endedMediaId == stateMediaId
+
+internal fun feedPrefetchCandidates(
+    items: List<MediaEntry>,
+    activeIndex: Int,
+    count: Int = 2,
+): List<MediaEntry> = items.drop((activeIndex + 1).coerceAtLeast(0)).take(count)
+
+internal fun shouldKeepPlayingInBackground(
+    surface: MediaSurface,
+    media: MediaEntry?,
+    audioEnabled: Boolean,
+    videoEnabled: Boolean,
+): Boolean = surface == MediaSurface.ASMR && media != null &&
+    if (media.isAudio) audioEnabled else videoEnabled
+
 internal fun shouldLoadMore(
     lastVisibleIndex: Int,
     itemCount: Int,

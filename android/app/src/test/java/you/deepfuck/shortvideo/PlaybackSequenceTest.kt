@@ -50,6 +50,35 @@ class PlaybackSequenceTest {
         assertFalse(shouldActivateFeedItem(MediaSurface.ASMR))
     }
 
+    @Test
+    fun onlyTheCurrentMediaCanAdvanceAfterPlaybackEnds() {
+        assertTrue(shouldHandlePlaybackEnded(endedMediaId = 7L, engineMediaId = 7L, stateMediaId = 7L))
+        assertFalse(shouldHandlePlaybackEnded(endedMediaId = 6L, engineMediaId = 7L, stateMediaId = 7L))
+        assertFalse(shouldHandlePlaybackEnded(endedMediaId = 7L, engineMediaId = null, stateMediaId = 7L))
+        assertFalse(shouldHandlePlaybackEnded(endedMediaId = 7L, engineMediaId = 7L, stateMediaId = null))
+    }
+
+    @Test
+    fun feedPrefetchStartsAfterTheActiveItem() {
+        val items = (1L..5L).map { media(id = it, kind = "video") }
+
+        assertEquals(listOf(items[2], items[3]), feedPrefetchCandidates(items, activeIndex = 1))
+        assertEquals(listOf(items[4]), feedPrefetchCandidates(items, activeIndex = 3))
+        assertTrue(feedPrefetchCandidates(items, activeIndex = 4).isEmpty())
+    }
+
+    @Test
+    fun asmrBackgroundPlaybackIsControlledPerMediaKind() {
+        val audio = media(id = 1L, kind = "audio")
+        val video = media(id = 2L, kind = "video")
+
+        assertFalse(shouldKeepPlayingInBackground(MediaSurface.SHORT, video, audioEnabled = true, videoEnabled = true))
+        assertFalse(shouldKeepPlayingInBackground(MediaSurface.ASMR, audio, audioEnabled = false, videoEnabled = true))
+        assertTrue(shouldKeepPlayingInBackground(MediaSurface.ASMR, audio, audioEnabled = true, videoEnabled = false))
+        assertTrue(shouldKeepPlayingInBackground(MediaSurface.ASMR, video, audioEnabled = false, videoEnabled = true))
+        assertFalse(shouldKeepPlayingInBackground(MediaSurface.ASMR, null, audioEnabled = true, videoEnabled = true))
+    }
+
     private fun media(id: Long, kind: String) = MediaEntry(
         id = id,
         title = "media-$id",

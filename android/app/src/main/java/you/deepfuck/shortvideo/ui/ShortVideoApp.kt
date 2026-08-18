@@ -151,16 +151,18 @@ fun ShortVideoApp(
                             onLoadMoreItems = viewModel::loadMoreAsmrItems,
                             onFilter = viewModel::setAsmrFilter,
                             onQuery = viewModel::setAsmrQuery,
-                            onPlay = { entry ->
-                                onBackgroundPlaybackRequested()
-                                viewModel.playAsmr(entry)
-                            },
+                            onPlay = viewModel::playAsmr,
                             onExpand = viewModel::expandNowPlaying,
                             onCollapse = viewModel::collapsePlayer,
                             onClose = viewModel::closeAsmrPlayer,
-                            onToggle = viewModel.playback::togglePlayback,
+                            onToggle = viewModel::togglePlayback,
                             onMuted = viewModel::setMuted,
                             onSeek = viewModel.playback::seekTo,
+                            onSeekBy = viewModel.playback::seekBy,
+                            onBackgroundPlayback = { audio, enabled ->
+                                if (enabled) onBackgroundPlaybackRequested()
+                                viewModel.setAsmrBackgroundPlayback(audio, enabled)
+                            },
                             onFullscreen = {
                                 fullscreen = it
                                 onFullscreenChanged(it)
@@ -177,7 +179,7 @@ fun ShortVideoApp(
                             onActive = viewModel::activateFeedItem,
                             onLoadMore = viewModel::loadMoreFeed,
                             onRetry = viewModel::retryFeed,
-                            onTogglePlayback = viewModel.playback::togglePlayback,
+                            onTogglePlayback = viewModel::togglePlayback,
                             onMuted = viewModel::setMuted,
                             onSeek = viewModel.playback::seekTo,
                             onSeekBy = viewModel.playback::seekBy,

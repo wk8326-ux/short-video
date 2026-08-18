@@ -21,7 +21,7 @@ The application server never proxies or transcodes media bytes. Both Android and
 - Author-first ASMR library with title search and all/video/audio filters
 - Adaptive MP3/direct-video/HLS playback with a persistent bottom mini-player
 - Native Android client with a persistent 1 GiB media cache and stable cache keys
-- ASMR audio/video background playback with lock-screen and notification controls
+- Independent ASMR audio/video background toggles with lock-screen and notification controls
 - Progressive ASMR list rendering, inline sequential audio playback, and remembered list positions
 - ASMR video landscape playback with five-second chrome fade and horizontal seeking
 - Authenticated management view for library rescans and MP4 Fast Start checks
@@ -41,7 +41,7 @@ The native client lives in `android/`, targets Android 8.0 and later, and uses M
 
 Cached media is stored in the app's private storage and capped at 1 GiB with least-recently-used eviction. Short videos up to 96 MiB are prefetched in full; larger short videos cache the first 24 MiB; long video and audio cache the first 12 MiB. Already cached bytes bypass play-URL resolution, and HLS playlists/segments use stable keys without signed query parameters.
 
-Only ASMR media continues when the app is backgrounded or the screen is locked. Short and long feeds pause. Android exposes ASMR playback through a foreground media session with notification and lock-screen play/pause controls, audio focus, headset-disconnect handling, and a network wake lock. On Android 13 or later, allow notifications when prompted to keep the controls visible.
+Short and long feeds pause whenever their page or the app foreground is left. ASMR audio and video each have a separate persisted background toggle in their player controls; enabled media continues through management views, screen lock, and app backgrounding. Android exposes enabled ASMR playback through a foreground media session with notification and lock-screen play/pause controls, audio focus, headset-disconnect handling, and a network wake lock. On Android 13 or later, allow notifications when prompted to keep the controls visible.
 
 Build an installable internal APK:
 
@@ -56,12 +56,12 @@ Android updates are published from `/data/app-update`, which is inside the exist
 
 ```json
 {
-  "versionCode": 130,
-  "versionName": "1.3.0",
-  "apkFile": "short-video-android-v1.3.0-debug.apk",
+  "versionCode": 131,
+  "versionName": "1.3.1",
+  "apkFile": "short-video-android-v1.3.1-debug.apk",
   "sha256": "<64 lowercase hex characters>",
   "size": 21000000,
-  "notes": "应用内更新、下载校验和稳定性改进"
+  "notes": "修复跨页面声音、ASMR 返回闪退和预加载提示，增加音频/视频独立后台播放开关"
 }
 ```
 

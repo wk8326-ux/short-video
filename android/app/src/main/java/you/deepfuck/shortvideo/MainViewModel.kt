@@ -62,6 +62,8 @@ data class AppUiState(
     val asmrQuery: String = "",
     val expandedMedia: MediaEntry? = null,
     val nowPlaying: MediaEntry? = null,
+    val asmrAudioBackgroundPlayback: Boolean = false,
+    val asmrVideoBackgroundPlayback: Boolean = false,
     val showManagement: Boolean = false,
     val adminStatus: AdminStatus? = null,
     val adminLoading: Boolean = false,
@@ -73,6 +75,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = PlaybackPreferences(application)
     private val api = MediaApi(preferences)
     val playback: PlaybackEngine = PlaybackEngineProvider.get(application)
+    private val restoredMedia = playback.currentMedia()
 
     private val mutableState = MutableStateFlow(
         AppUiState(
@@ -84,8 +87,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             surface = preferences.surface,
             mode = preferences.mode,
             muted = preferences.muted,
-            nowPlaying = playback.currentMedia().takeIf {
-                preferences.surface.supportsBackgroundPlayback
+            asmrAudioBackgroundPlayback = preferences.asmrAudioBackgroundPlayback,
+            asmrVideoBackgroundPlayback = preferences.asmrVideoBackgroundPlayback,
+            nowPlaying = restoredMedia.takeIf {
+                shouldKeepPlayingInBackground(
+                    preferences.surface,
+                    it,
+                    preferences.asmrAudioBackgroundPlayback,
+                    preferences.asmrVideoBackgroundPlayback,
+                )
             },
         ),
     )
@@ -104,11 +114,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var audioQueue: List<MediaEntry> = emptyList()
     private var pendingAudioAdvanceId: Long? = null
     private var appUpdateJob: Job? = null
+    private var playbackServiceRunning = false
 
     init {
         playback.setMuted(preferences.muted)
-        playback.setOnPlaybackEndedListener {
-            viewModelScope.launch { advanceAfterPlaybackEnded() }
+        playback.setOnPlaybackEndedListener { endedMediaId ->
+            viewModelScope.launch { advanceAfterPlaybackEnded(endedMediaId) }
         }
         if (api.hasSession()) {
             restoreCurrentSurface()
@@ -167,14 +178,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (surface == mutableState.value.surface) return
         saveCurrentPosition()
         playback.stop()
+        stopPlaybackService()
         if (mutableState.value.surface == MediaSurface.ASMR) {
-            stopPlaybackService()
             asmrAuthorsJob?.cancel()
-            asmrItemJobs.values.forEach { it.cancel() }
+            asmrAuthorsJob = null
+            val itemJobs = asmrItemJobs.values.toList()
             asmrItemJobs.clear()
+            itemJobs.forEach { it.cancel() }
         }
         preferences.surface = surface
         activeFeedItemId = null
+        audioQueueAuthor = null
+        audioQueue = emptyList()
+        pendingAudioAdvanceId = null
         mutableState.value = mutableState.value.copy(
             surface = surface,
             activeIndex = 0,
@@ -209,6 +225,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = mutableState.value.copy(muted = muted)
     }
 
+    fun togglePlayback() {
+        playback.togglePlayback()
+        if (playback.player.playWhenReady && keepCurrentAsmrPlaybackInBackground()) {
+            startPlaybackService()
+        } else if (!playback.player.playWhenReady && mutableState.value.surface == MediaSurface.ASMR) {
+            stopPlaybackService()
+        }
+    }
+
     fun retryFeed() = requestFeed(reset = true)
 
     fun loadMoreFeed() {
@@ -225,7 +250,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.setLastVideo(state.surface, entry.id)
         mutableState.value = state.copy(activeIndex = index, nowPlaying = entry)
         playback.play(entry, preferences.position(entry.id))
-        playback.prefetch(state.surface, state.feedItems.drop(index).take(2))
+        playback.prefetch(state.surface, feedPrefetchCandidates(state.feedItems, index))
         if (index >= state.feedItems.lastIndex - 4) loadMoreFeed()
     }
 
@@ -282,6 +307,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun playAsmr(entry: MediaEntry) {
+        if (mutableState.value.surface != MediaSurface.ASMR) return
         if (entry.isAudio) {
             audioQueueAuthor = entry.author
             audioQueue = mutableState.value.asmrItems.filter {
@@ -297,11 +323,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun startAsmrPlayback(entry: MediaEntry) {
+        if (mutableState.value.surface != MediaSurface.ASMR) return
         saveCurrentPosition()
-        ContextCompat.startForegroundService(
-            getApplication(),
-            Intent(getApplication(), PlaybackService::class.java),
-        )
         preferences.setLastVideo(MediaSurface.ASMR, entry.id)
         mutableState.value = mutableState.value.copy(
             nowPlaying = entry,
@@ -309,6 +332,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         playback.play(entry, preferences.position(entry.id))
         playback.prefetch(MediaSurface.ASMR, listOf(entry))
+        if (backgroundPlaybackEnabled(entry)) startPlaybackService() else stopPlaybackService()
+    }
+
+    fun setAsmrBackgroundPlayback(audio: Boolean, enabled: Boolean) {
+        if (audio) {
+            preferences.asmrAudioBackgroundPlayback = enabled
+            mutableState.value = mutableState.value.copy(asmrAudioBackgroundPlayback = enabled)
+        } else {
+            preferences.asmrVideoBackgroundPlayback = enabled
+            mutableState.value = mutableState.value.copy(asmrVideoBackgroundPlayback = enabled)
+        }
+        val current = mutableState.value.nowPlaying ?: return
+        if (current.isAudio != audio) return
+        if (enabled && playback.player.playWhenReady) startPlaybackService() else stopPlaybackService()
     }
 
     fun expandNowPlaying() {
@@ -332,7 +369,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun showManagement() {
-        playback.pause()
+        if (!keepCurrentAsmrPlaybackInBackground()) {
+            playback.pause()
+            stopPlaybackService()
+        }
         mutableState.value = mutableState.value.copy(showManagement = true)
         loadAdminStatus()
     }
@@ -498,7 +538,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onAppBackgrounded() {
-        if (!mutableState.value.surface.supportsBackgroundPlayback) playback.pause()
+        if (!keepCurrentAsmrPlaybackInBackground()) {
+            playback.pause()
+            stopPlaybackService()
+        }
     }
 
     private fun restoreCurrentSurface() {
@@ -660,8 +703,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun advanceAfterPlaybackEnded() {
+    private fun advanceAfterPlaybackEnded(endedMediaId: Long?) {
         val state = mutableState.value
+        if (
+            !shouldHandlePlaybackEnded(
+                endedMediaId = endedMediaId,
+                engineMediaId = playback.currentMedia()?.id,
+                stateMediaId = state.nowPlaying?.id,
+            )
+        ) return
         if (state.surface == MediaSurface.ASMR) {
             val current = state.nowPlaying?.takeIf(MediaEntry::isAudio) ?: return
             val next = nextAudioEntry(audioQueue, current.id)
@@ -745,10 +795,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun stopPlaybackService() {
-        getApplication<Application>().stopService(
-            Intent(getApplication(), PlaybackService::class.java),
+    private fun backgroundPlaybackEnabled(entry: MediaEntry): Boolean {
+        val state = mutableState.value
+        return if (entry.isAudio) {
+            state.asmrAudioBackgroundPlayback
+        } else {
+            state.asmrVideoBackgroundPlayback
+        }
+    }
+
+    private fun keepCurrentAsmrPlaybackInBackground(): Boolean {
+        val state = mutableState.value
+        return shouldKeepPlayingInBackground(
+            surface = state.surface,
+            media = state.nowPlaying,
+            audioEnabled = state.asmrAudioBackgroundPlayback,
+            videoEnabled = state.asmrVideoBackgroundPlayback,
         )
+    }
+
+    private fun startPlaybackService() {
+        if (playbackServiceRunning) return
+        runCatching {
+            ContextCompat.startForegroundService(
+                getApplication(),
+                Intent(getApplication(), PlaybackService::class.java),
+            )
+        }.onSuccess {
+            playbackServiceRunning = true
+        }
+    }
+
+    private fun stopPlaybackService() {
+        playbackServiceRunning = false
+        runCatching {
+            getApplication<Application>().stopService(
+                Intent(getApplication(), PlaybackService::class.java),
+            )
+        }
     }
 
     override fun onCleared() {

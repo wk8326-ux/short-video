@@ -6,10 +6,6 @@ enum class MediaSurface(val apiValue: String, val label: String) {
     SHORT("short", "短视频"),
     LONG("long", "长视频"),
     ASMR("asmr", "ASMR"),
-
-    ;
-
-    val supportsBackgroundPlayback: Boolean get() = this == ASMR
 }
 
 enum class FeedMode(val apiValue: String, val label: String) {

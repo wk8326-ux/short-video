@@ -25,7 +25,7 @@ import androidx.compose.material.icons.automirrored.outlined.VolumeOff
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.outlined.FastForward
+import androidx.compose.material.icons.outlined.Forward10
 import androidx.compose.material.icons.outlined.Fullscreen
 import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.Refresh
@@ -300,32 +300,44 @@ private fun FeedPage(
             )
         }
 
-        val showCenter = fullscreen && chromeVisible || !fullscreen && !player.isPlaying
-        if (active && showCenter && player.mediaId == entry.id) {
+        val showPortraitPlay = !fullscreen && !player.playWhenReady
+        if (active && showPortraitPlay && player.mediaId == entry.id) {
             OverlayIconControl(
-                label = if (player.isPlaying) "暂停" else "播放",
+                label = "播放",
                 size = 64,
                 modifier = Modifier.align(Alignment.Center),
                 onClick = onTogglePlayback,
             ) {
                 Icon(
-                    if (player.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                    Icons.Filled.PlayArrow,
                     contentDescription = null,
                     modifier = Modifier.size(32.dp),
                 )
             }
         }
 
-        if (fullscreen && chromeVisible) {
+        if (active && fullscreen && chromeVisible && player.mediaId == entry.id) {
             Row(
-                modifier = Modifier.align(Alignment.Center).padding(top = 104.dp),
-                horizontalArrangement = Arrangement.spacedBy(84.dp),
+                modifier = Modifier.align(Alignment.Center),
+                horizontalArrangement = Arrangement.spacedBy(36.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 OverlayIconControl(label = "后退 10 秒", onClick = { onSeekBy(-10_000L) }) {
-                    Icon(Icons.Outlined.Replay10, contentDescription = "后退 10 秒")
+                    Icon(Icons.Outlined.Replay10, contentDescription = null)
+                }
+                OverlayIconControl(
+                    label = if (player.playWhenReady) "暂停" else "播放",
+                    size = 64,
+                    onClick = onTogglePlayback,
+                ) {
+                    Icon(
+                        if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(32.dp),
+                    )
                 }
                 OverlayIconControl(label = "快进 10 秒", onClick = { onSeekBy(10_000L) }) {
-                    Icon(Icons.Outlined.FastForward, contentDescription = "快进 10 秒")
+                    Icon(Icons.Outlined.Forward10, contentDescription = null)
                 }
             }
         }
@@ -341,7 +353,7 @@ private fun FeedPage(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Icon(
-                    if (target >= player.positionMs) Icons.Outlined.FastForward else Icons.Outlined.Replay10,
+                    if (target >= player.positionMs) Icons.Outlined.Forward10 else Icons.Outlined.Replay10,
                     contentDescription = null,
                     tint = Color.White,
                 )

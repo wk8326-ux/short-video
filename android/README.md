@@ -27,7 +27,7 @@ Update APKs must keep the same application ID and signing certificate. The downl
 
 ## Background playback
 
-ASMR audio and video run through `PlaybackService`, a Media3 foreground `MediaSessionService`. Playback continues with the screen locked or the app in the background and remains controllable from the notification and lock screen. Short and long video feeds pause when the activity leaves the foreground.
+ASMR audio and video each expose a persisted background-playback toggle. Enabled media runs through `PlaybackService`, a Media3 foreground `MediaSessionService`, continues with the screen locked or the app in the background, and remains controllable from the notification and lock screen. Disabled ASMR media pauses outside its playback context. Short and long feeds always pause when their page or the activity foreground is left.
 
 Android 13+ asks for notification permission when ASMR playback first starts. Denying the permission does not change the media route, but system playback controls may not remain visible.
 

@@ -29,6 +29,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
@@ -39,6 +40,7 @@ data class PlayerSnapshot(
     val title: String = "",
     val isAudio: Boolean = false,
     val isPlaying: Boolean = false,
+    val playWhenReady: Boolean = false,
     val isBuffering: Boolean = false,
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
@@ -52,7 +54,10 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     private val cacheKeyFactory = StableCacheKeyFactory()
     private var currentEntry: MediaEntry? = null
     private var prefetchJob: Job? = null
-    private var onPlaybackEnded: (() -> Unit)? = null
+    private val prefetchLock = Any()
+    private var prefetchGeneration = 0L
+    private var activeCacheWriter: CacheWriter? = null
+    private var onPlaybackEnded: ((Long?) -> Unit)? = null
 
     private val upstreamFactory = ResolvingDataSource.Factory(
         DefaultHttpDataSource.Factory()
@@ -84,9 +89,13 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     publish()
-                    if (playbackState == Player.STATE_ENDED) onPlaybackEnded?.invoke()
+                    if (playbackState == Player.STATE_ENDED) {
+                        onPlaybackEnded?.invoke(currentEntry?.id)
+                    }
                 }
                 override fun onIsPlayingChanged(isPlaying: Boolean) = publish()
+
+                override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = publish()
 
                 override fun onPlayerError(error: PlaybackException) {
                     publish(error.errorCodeName)
@@ -125,7 +134,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     }
 
     fun togglePlayback() {
-        if (player.isPlaying) player.pause() else player.play()
+        if (player.playWhenReady) player.pause() else player.play()
     }
 
     fun restart() {
@@ -134,7 +143,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         publish()
     }
 
-    fun setOnPlaybackEndedListener(listener: (() -> Unit)?) {
+    fun setOnPlaybackEndedListener(listener: ((Long?) -> Unit)?) {
         onPlaybackEnded = listener
     }
 
@@ -169,9 +178,16 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun prefetch(surface: MediaSurface, entries: List<MediaEntry>) {
         prefetchJob?.cancel()
+        val generation = synchronized(prefetchLock) {
+            prefetchGeneration += 1L
+            activeCacheWriter?.cancel()
+            activeCacheWriter = null
+            prefetchGeneration
+        }
         prefetchJob = scope.launch {
             entries.take(2).filterNot(MediaEntry::isHls).forEach { entry ->
-                runCatching { cacheProgressive(surface, entry) }
+                ensureActive()
+                runCatching { cacheProgressive(surface, entry, generation) }
             }
         }
     }
@@ -185,11 +201,16 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun release() {
         prefetchJob?.cancel()
+        synchronized(prefetchLock) {
+            prefetchGeneration += 1L
+            activeCacheWriter?.cancel()
+            activeCacheWriter = null
+        }
         scope.cancel()
         player.release()
     }
 
-    private fun cacheProgressive(surface: MediaSurface, entry: MediaEntry) {
+    private fun cacheProgressive(surface: MediaSurface, entry: MediaEntry, generation: Long) {
         val target = when {
             surface == MediaSurface.SHORT && entry.size in 1..MAX_FULL_SHORT_BYTES -> entry.size
             surface == MediaSurface.SHORT -> SHORT_PREFIX_BYTES
@@ -201,7 +222,18 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             .setPosition(0L)
             .setLength(target)
             .build()
-        CacheWriter(cacheDataSourceFactory.createDataSource(), dataSpec, null, null).cache()
+        val writer = CacheWriter(cacheDataSourceFactory.createDataSource(), dataSpec, null, null)
+        synchronized(prefetchLock) {
+            if (generation != prefetchGeneration) return
+            activeCacheWriter = writer
+        }
+        try {
+            writer.cache()
+        } finally {
+            synchronized(prefetchLock) {
+                if (activeCacheWriter === writer) activeCacheWriter = null
+            }
+        }
     }
 
     @Throws(IOException::class)
@@ -220,6 +252,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             title = entry?.title.orEmpty(),
             isAudio = entry?.isAudio == true,
             isPlaying = player.isPlaying,
+            playWhenReady = player.playWhenReady,
             isBuffering = player.playbackState == Player.STATE_BUFFERING,
             positionMs = player.currentPosition.coerceAtLeast(0L),
             durationMs = duration,
