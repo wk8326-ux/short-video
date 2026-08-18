@@ -5,23 +5,47 @@
 package you.deepfuck.shortvideo.ui
 
 import android.graphics.Color as AndroidColor
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.util.Locale
+import kotlinx.coroutines.delay
+import you.deepfuck.shortvideo.media.PlayerSnapshot
 
 @Composable
 internal fun PlayerHost(player: ExoPlayer, modifier: Modifier = Modifier) {
@@ -44,21 +68,107 @@ internal fun PlayerHost(player: ExoPlayer, modifier: Modifier = Modifier) {
 
 @Composable
 internal fun BufferSpinner(visible: Boolean, modifier: Modifier = Modifier) {
-    if (!visible) return
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .background(FrostedChromeSurface, CircleShape)
-                .border(1.dp, FrostedChromeOutline, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(24.dp),
-                color = Accent,
-                strokeWidth = 2.dp,
+        DelayedSpinner(visible)
+    }
+}
+
+@Composable
+internal fun DelayedSpinner(visible: Boolean, modifier: Modifier = Modifier) {
+    var delayedVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(visible) {
+        delayedVisible = false
+        if (visible) {
+            delay(220)
+            delayedVisible = true
+        }
+    }
+    if (!delayedVisible) return
+    CircularProgressIndicator(
+        modifier = modifier.size(24.dp),
+        color = Color.White,
+        strokeWidth = 2.dp,
+    )
+}
+
+@Composable
+internal fun FineProgressBar(
+    player: PlayerSnapshot,
+    onSeek: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var dragging by remember { mutableStateOf(false) }
+    var dragFraction by remember { mutableFloatStateOf(0f) }
+    val duration = player.durationMs.coerceAtLeast(1L)
+    val played = if (dragging) {
+        dragFraction
+    } else {
+        (player.positionMs.toFloat() / duration).coerceIn(0f, 1f)
+    }
+    val buffered = (player.bufferedMs.toFloat() / duration).coerceIn(played, 1f)
+    val pulseTransition = rememberInfiniteTransition(label = "progress pulse")
+    val pulse by pulseTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1_200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "progress pulse radius",
+    )
+    val enabled = player.durationMs > 0L
+
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(44.dp)
+            .semantics {
+                contentDescription = "播放进度"
+                progressBarRangeInfo = ProgressBarRangeInfo(played, 0f..1f)
+                setProgress { target ->
+                    if (!enabled) return@setProgress false
+                    onSeek((target.coerceIn(0f, 1f) * duration).toLong())
+                    true
+                }
+            }
+            .pointerInput(duration, enabled) {
+                if (!enabled) return@pointerInput
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    dragging = true
+                    dragFraction = (down.position.x / size.width).coerceIn(0f, 1f)
+                    var pressed = true
+                    while (pressed) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        dragFraction = (change.position.x / size.width).coerceIn(0f, 1f)
+                        pressed = change.pressed
+                        change.consume()
+                    }
+                    onSeek((dragFraction * duration).toLong())
+                    dragging = false
+                }
+            },
+    ) {
+        val inset = 6.dp.toPx()
+        val start = Offset(inset, center.y)
+        val end = Offset(size.width - inset, center.y)
+        val width = (end.x - start.x).coerceAtLeast(1f)
+        val bufferedEnd = Offset(start.x + width * buffered, center.y)
+        val playedEnd = Offset(start.x + width * played, center.y)
+        val trackWidth = 2.dp.toPx()
+
+        drawLine(Color.White.copy(alpha = 0.22f), start, end, trackWidth, StrokeCap.Round)
+        drawLine(Color.White.copy(alpha = 0.38f), start, bufferedEnd, trackWidth, StrokeCap.Round)
+        drawLine(Color.White, start, playedEnd, trackWidth, StrokeCap.Round)
+        if (player.isPlaying && !dragging) {
+            drawCircle(
+                color = Color.White.copy(alpha = (1f - pulse) * 0.18f),
+                radius = (4.5.dp + 4.dp * pulse).toPx(),
+                center = playedEnd,
             )
         }
+        drawCircle(Color.White, radius = 4.5.dp.toPx(), center = playedEnd)
     }
 }
 

@@ -1,8 +1,15 @@
 package you.deepfuck.shortvideo.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,7 +22,9 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -35,7 +44,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -50,6 +58,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -61,7 +72,6 @@ import you.deepfuck.shortvideo.AuthenticationState
 import you.deepfuck.shortvideo.MainViewModel
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.MediaSurface
-import you.deepfuck.shortvideo.media.PlayerSnapshot
 
 @Composable
 fun ShortVideoApp(
@@ -101,7 +111,7 @@ fun ShortVideoApp(
     }
     BackHandler(
         enabled = !fullscreen && !state.showManagement &&
-            state.surface == MediaSurface.ASMR && state.selectedAuthor != null,
+            state.surface == MediaSurface.ASMR && state.selectedAuthor != null && state.expandedMedia == null,
     ) {
         viewModel.leaveAsmrAuthor()
     }
@@ -113,63 +123,95 @@ fun ShortVideoApp(
             error = state.loginError,
             onLogin = viewModel::login,
         )
-        AuthenticationState.SIGNED_IN -> when {
-            state.showManagement -> ManagementScreen(
+        AuthenticationState.SIGNED_IN -> if (state.showManagement) {
+            ManagementScreen(
                 state = state,
                 onBack = viewModel::hideManagement,
                 onRefresh = viewModel::loadAdminStatus,
                 onScan = viewModel::startLibraryScan,
                 onFastStart = viewModel::startFastStartCheck,
             )
-            state.surface == MediaSurface.ASMR -> AsmrScreen(
-                state = state,
-                player = player,
-                exoPlayer = viewModel.playback.player,
-                muted = state.muted,
-                fullscreen = fullscreen,
-                onSurface = viewModel::changeSurface,
-                onAuthor = viewModel::selectAsmrAuthor,
-                onBackAuthor = viewModel::leaveAsmrAuthor,
-                onFilter = viewModel::setAsmrFilter,
-                onQuery = viewModel::setAsmrQuery,
-                onPlay = { entry ->
-                    onBackgroundPlaybackRequested()
-                    viewModel.playAsmr(entry)
-                },
-                onExpand = viewModel::expandNowPlaying,
-                onCollapse = viewModel::collapsePlayer,
-                onClose = viewModel::closeAsmrPlayer,
-                onToggle = viewModel.playback::togglePlayback,
-                onMuted = viewModel::setMuted,
-                onSeek = viewModel.playback::seekTo,
-                onFullscreen = {
-                    fullscreen = it
-                    onFullscreenChanged(it)
-                },
-                onManage = viewModel::showManagement,
-                onLogout = viewModel::logout,
-            )
-            else -> FeedScreen(
-                state = state,
-                player = player,
-                exoPlayer = viewModel.playback.player,
-                fullscreen = fullscreen,
-                onSurface = viewModel::changeSurface,
-                onMode = viewModel::changeMode,
-                onActive = viewModel::activateFeedItem,
-                onLoadMore = viewModel::loadMoreFeed,
-                onRetry = viewModel::retryFeed,
-                onTogglePlayback = viewModel.playback::togglePlayback,
-                onMuted = viewModel::setMuted,
-                onSeek = viewModel.playback::seekTo,
-                onSeekBy = viewModel.playback::seekBy,
-                onFullscreen = {
-                    fullscreen = it
-                    onFullscreenChanged(it)
-                },
-                onManage = viewModel::showManagement,
-                onLogout = viewModel::logout,
-            )
+        } else {
+            Box(Modifier.fillMaxSize()) {
+                AnimatedContent(
+                    targetState = state.surface,
+                    transitionSpec = {
+                        val direction = if (targetState.ordinal > initialState.ordinal) 1 else -1
+                        (
+                            slideInHorizontally(tween(200)) { width -> direction * width / 8 } +
+                                fadeIn(tween(120))
+                            ).togetherWith(
+                            slideOutHorizontally(tween(150)) { width -> -direction * width / 8 } +
+                                fadeOut(tween(100)),
+                        )
+                    },
+                    label = "媒体分类切换",
+                ) { surface ->
+                    if (surface == MediaSurface.ASMR) {
+                        AsmrScreen(
+                            state = state,
+                            player = player,
+                            exoPlayer = viewModel.playback.player,
+                            muted = state.muted,
+                            fullscreen = fullscreen,
+                            onAuthor = viewModel::selectAsmrAuthor,
+                            onBackAuthor = viewModel::leaveAsmrAuthor,
+                            onFilter = viewModel::setAsmrFilter,
+                            onQuery = viewModel::setAsmrQuery,
+                            onPlay = { entry ->
+                                onBackgroundPlaybackRequested()
+                                viewModel.playAsmr(entry)
+                            },
+                            onExpand = viewModel::expandNowPlaying,
+                            onCollapse = viewModel::collapsePlayer,
+                            onClose = viewModel::closeAsmrPlayer,
+                            onToggle = viewModel.playback::togglePlayback,
+                            onMuted = viewModel::setMuted,
+                            onSeek = viewModel.playback::seekTo,
+                            onFullscreen = {
+                                fullscreen = it
+                                onFullscreenChanged(it)
+                            },
+                        )
+                    } else {
+                        FeedScreen(
+                            state = state,
+                            player = player,
+                            exoPlayer = viewModel.playback.player,
+                            fullscreen = fullscreen,
+                            onSurface = viewModel::changeSurface,
+                            onMode = viewModel::changeMode,
+                            onActive = viewModel::activateFeedItem,
+                            onLoadMore = viewModel::loadMoreFeed,
+                            onRetry = viewModel::retryFeed,
+                            onTogglePlayback = viewModel.playback::togglePlayback,
+                            onMuted = viewModel::setMuted,
+                            onSeek = viewModel.playback::seekTo,
+                            onSeekBy = viewModel.playback::seekBy,
+                            onFullscreen = {
+                                fullscreen = it
+                                onFullscreenChanged(it)
+                            },
+                            onManage = viewModel::showManagement,
+                            onLogout = viewModel::logout,
+                        )
+                    }
+                }
+                if (!fullscreen && state.expandedMedia == null) {
+                    AppNavigation(
+                        state = state,
+                        compact = false,
+                        onSurface = viewModel::changeSurface,
+                        onMode = viewModel::changeMode,
+                        onManage = viewModel::showManagement,
+                        onLogout = viewModel::logout,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .statusBarsPadding()
+                            .padding(top = 2.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -257,47 +299,62 @@ internal fun AppNavigation(
     onMode: (FeedMode) -> Unit,
     onManage: () -> Unit,
     onLogout: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    Row(
-        modifier = Modifier
+    val tabWidth = 72.dp
+    val indicatorOffset by animateDpAsState(
+        targetValue = tabWidth * state.surface.ordinal,
+        animationSpec = tween(200),
+        label = "分类指示线",
+    )
+    Box(
+        modifier = modifier
             .fillMaxWidth()
+            .height(48.dp)
             .padding(horizontal = if (compact) 8.dp else 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
+        Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(6.dp))
-                .background(FrostedChromeSurface)
-                .border(1.dp, FrostedChromeOutline, RoundedCornerShape(6.dp))
-                .padding(3.dp),
+                .align(Alignment.Center)
+                .width(tabWidth * MediaSurface.entries.size)
+                .height(48.dp),
         ) {
-            MediaSurface.entries.forEach { surface ->
-                TextButton(
-                    onClick = { onSurface(surface) },
-                    modifier = Modifier.height(40.dp),
-                    colors = ButtonDefaults.textButtonColors(
-                        contentColor = if (state.surface == surface) Accent else FrostedChromeMuted,
-                    ),
-                ) {
-                    Text(
-                        if (compact && surface != MediaSurface.ASMR) surface.label.take(1) else surface.label,
-                        fontWeight = if (state.surface == surface) FontWeight.SemiBold else FontWeight.Normal,
-                    )
+            Row(Modifier.fillMaxSize()) {
+                MediaSurface.entries.forEach { surface ->
+                    val selected = state.surface == surface
+                    TextButton(
+                        onClick = { onSurface(surface) },
+                        modifier = Modifier.width(tabWidth).height(44.dp),
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = Color.White.copy(alpha = if (selected) 1f else 0.66f),
+                        ),
+                    ) {
+                        Text(
+                            if (compact && surface != MediaSurface.ASMR) surface.label.take(1) else surface.label,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                shadow = Shadow(Color.Black.copy(alpha = 0.58f), Offset(0f, 1f), 3f),
+                            ),
+                        )
+                    }
                 }
             }
+            Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    .offset(x = indicatorOffset + 24.dp)
+                    .width(24.dp)
+                    .height(2.dp)
+                    .clip(RoundedCornerShape(1.dp))
+                    .background(Accent),
+            )
         }
-        Spacer(Modifier.weight(1f))
-        Box {
+        Box(Modifier.align(Alignment.CenterEnd)) {
             IconButton(
                 onClick = { menuOpen = true },
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(FrostedChromeSurface)
-                    .border(1.dp, FrostedChromeOutline, CircleShape),
-                colors = IconButtonDefaults.iconButtonColors(contentColor = FrostedChromeContent),
             ) {
-                Icon(Icons.Outlined.MoreVert, contentDescription = "更多")
+                Icon(Icons.Outlined.MoreVert, contentDescription = "更多", tint = Color.White)
             }
             DropdownMenu(
                 expanded = menuOpen,

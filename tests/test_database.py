@@ -146,11 +146,14 @@ def test_asmr_authors_and_kind_filters(tmp_path):
 
     authors = database.asmr_authors()
     audio = database.asmr_items(author="A", kind="audio")
+    second_item = database.asmr_items(author="A", limit=1, offset=1)
 
     assert authors[0]["item_count"] == 2
     assert authors[0]["video_count"] == 1
     assert authors[0]["audio_count"] == 1
     assert [item["name"] for item in audio] == ["voice.mp3"]
+    assert [item["name"] for item in second_item] == ["voice.mp3"]
+    assert database.asmr_item_count(author="A") == 2
 
 
 def test_m3u8_cannot_be_reclassified_as_audio_by_browser_metadata(tmp_path):

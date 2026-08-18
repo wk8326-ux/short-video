@@ -98,12 +98,16 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         )
     }
 
-    fun asmrAuthors(query: String = ""): List<AsmrAuthor> {
+    fun asmrAuthors(query: String = "", limit: Int = ASMR_PAGE_SIZE, offset: Int = 0): AsmrPage<AsmrAuthor> {
         val target = url("/api/asmr/authors").newBuilder().apply {
             if (query.isNotBlank()) addQueryParameter("q", query)
+            addQueryParameter("limit", limit.toString())
+            addQueryParameter("offset", offset.toString())
         }.build()
-        val items = getJson(target.toString()).optJSONArray("items") ?: return emptyList()
-        return buildList {
+        val payload = getJson(target.toString())
+        val items = payload.optJSONArray("items")
+        val parsed = buildList {
+            if (items == null) return@buildList
             for (index in 0 until items.length()) {
                 val item = items.optJSONObject(index) ?: continue
                 add(
@@ -117,22 +121,34 @@ class MediaApi(private val preferences: PlaybackPreferences) {
                 )
             }
         }
+        return AsmrPage(parsed, payload.optInt("total", parsed.size), payload.optIntOrNull("nextOffset"))
     }
 
-    fun asmrItems(author: String, kind: String = "all", query: String = ""): List<MediaEntry> {
+    fun asmrItems(
+        author: String,
+        kind: String = "all",
+        query: String = "",
+        limit: Int = ASMR_PAGE_SIZE,
+        offset: Int = 0,
+    ): AsmrPage<MediaEntry> {
         val target = baseUrl.newBuilder()
             .addPathSegments("api/asmr/authors")
             .addPathSegment(author)
             .addPathSegment("items")
             .addQueryParameter("kind", kind)
+            .addQueryParameter("limit", limit.toString())
+            .addQueryParameter("offset", offset.toString())
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
             .build()
-        val items = getJson(target.toString()).optJSONArray("items") ?: return emptyList()
-        return buildList {
+        val payload = getJson(target.toString())
+        val items = payload.optJSONArray("items")
+        val parsed = buildList {
+            if (items == null) return@buildList
             for (index in 0 until items.length()) {
                 items.optJSONObject(index)?.let { add(MediaEntry.fromJson(it)) }
             }
         }
+        return AsmrPage(parsed, payload.optInt("total", parsed.size), payload.optIntOrNull("nextOffset"))
     }
 
     fun adminStatus(): AdminStatus {
@@ -204,7 +220,11 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         ?: throw IllegalArgumentException("Invalid API path: $path")
 
     private companion object {
+        const val ASMR_PAGE_SIZE = 24
         const val BASE_URL = "https://short.deepfuck.you/"
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
+
+private fun JSONObject.optIntOrNull(name: String): Int? =
+    if (isNull(name) || !has(name)) null else optInt(name)

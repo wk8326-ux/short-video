@@ -52,6 +52,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     private val cacheKeyFactory = StableCacheKeyFactory()
     private var currentEntry: MediaEntry? = null
     private var prefetchJob: Job? = null
+    private var onPlaybackEnded: (() -> Unit)? = null
 
     private val upstreamFactory = ResolvingDataSource.Factory(
         DefaultHttpDataSource.Factory()
@@ -81,7 +82,10 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     init {
         player.addListener(
             object : Player.Listener {
-                override fun onPlaybackStateChanged(playbackState: Int) = publish()
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    publish()
+                    if (playbackState == Player.STATE_ENDED) onPlaybackEnded?.invoke()
+                }
                 override fun onIsPlayingChanged(isPlaying: Boolean) = publish()
 
                 override fun onPlayerError(error: PlaybackException) {
@@ -122,6 +126,16 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun togglePlayback() {
         if (player.isPlaying) player.pause() else player.play()
+    }
+
+    fun restart() {
+        player.seekTo(0L)
+        player.play()
+        publish()
+    }
+
+    fun setOnPlaybackEndedListener(listener: (() -> Unit)?) {
+        onPlaybackEnded = listener
     }
 
     fun pause() {

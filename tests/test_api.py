@@ -67,7 +67,17 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
                     "media_format": "m3u8",
                     # Simulate a stale browser metadata report from an older release.
                     "media_kind": "audio",
-                }
+                },
+                {
+                    "path": "/asmr6/Author/session-2.m3u8",
+                    "name": "session-2.m3u8",
+                    "size": 31,
+                    "modified": "2026-08-17",
+                    "thumb": "",
+                    "author": "Author",
+                    "media_format": "m3u8",
+                    "media_kind": "video",
+                },
             ],
             source="asmr",
         )
@@ -76,6 +86,10 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
         long = client.get("/api/feed?category=long&mode=oldest", headers=headers)
         authors = client.get("/api/asmr/authors", headers=headers)
         items = client.get("/api/asmr/authors/Author/items", headers=headers)
+        item_page = client.get(
+            "/api/asmr/authors/Author/items?limit=1&offset=1",
+            headers=headers,
+        )
         audio_items = client.get("/api/asmr/authors/Author/items?kind=audio", headers=headers)
         play = client.get(
             f"/api/videos/{short.json()['items'][0]['id']}/play",
@@ -85,8 +99,11 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
 
     assert [item["title"] for item in short.json()["items"]] == ["short"]
     assert [item["title"] for item in long.json()["items"]] == ["long"]
+    assert len(item_page.json()["items"]) == 1
+    assert item_page.json()["total"] == 2
+    assert item_page.json()["nextOffset"] is None
     assert authors.json()["items"][0]["name"] == "Author"
-    assert authors.json()["items"][0]["videoCount"] == 1
+    assert authors.json()["items"][0]["videoCount"] == 2
     assert authors.json()["items"][0]["audioCount"] == 0
     assert items.json()["items"][0]["format"] == "m3u8"
     assert items.json()["items"][0]["kind"] == "video"

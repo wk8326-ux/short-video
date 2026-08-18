@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.3"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -526,8 +526,15 @@ async def report_media_metadata(video_id: int, payload: MediaMetadataReport):
 @app.get("/api/asmr/authors")
 async def asmr_authors(
     q: str = Query(default="", max_length=100),
+    limit: int | None = Query(default=None, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
-    rows = await asyncio.to_thread(database.asmr_authors, search=q.strip())
+    search = q.strip()
+    rows, total = await asyncio.gather(
+        asyncio.to_thread(database.asmr_authors, search=search, limit=limit, offset=offset),
+        asyncio.to_thread(database.asmr_author_count, search=search),
+    )
+    next_offset = offset + len(rows) if limit is not None and offset + len(rows) < total else None
     return {
         "items": [
             {
@@ -539,7 +546,8 @@ async def asmr_authors(
             }
             for row in rows
         ],
-        "total": len(rows),
+        "total": total,
+        "nextOffset": next_offset,
         "scan": scan_state["sources"]["asmr"],
     }
 
@@ -549,14 +557,27 @@ async def asmr_author_items(
     author: str,
     kind: str = Query(default="all", pattern="^(all|video|audio)$"),
     q: str = Query(default="", max_length=100),
+    limit: int | None = Query(default=None, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
-    rows = await asyncio.to_thread(
-        database.asmr_items,
-        author=author,
-        kind=kind,
-        search=q.strip(),
+    search = q.strip()
+    rows, total = await asyncio.gather(
+        asyncio.to_thread(
+            database.asmr_items,
+            author=author,
+            kind=kind,
+            search=search,
+            limit=limit,
+            offset=offset,
+        ),
+        asyncio.to_thread(
+            database.asmr_item_count,
+            author=author,
+            kind=kind,
+            search=search,
+        ),
     )
-    if not rows and not await asyncio.to_thread(database.asmr_authors, search=author):
+    if total == 0 and not await asyncio.to_thread(database.asmr_authors, search=author, limit=1):
         raise HTTPException(status_code=404, detail="Author not found")
     if rows:
         spawn_background(
@@ -581,7 +602,8 @@ async def asmr_author_items(
             }
             for row in rows
         ],
-        "total": len(rows),
+        "total": total,
+        "nextOffset": offset + len(rows) if limit is not None and offset + len(rows) < total else None,
     }
 
 

@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.2.3] - 2026-08-18
+
+### Added
+
+- Add paged ASMR author/media API responses and progressively render the first 24 results while later pages load in the background.
+- Play ASMR audio inside the media list and automatically continue through the author's audio items in order.
+- Advance short and long feeds automatically when the active video ends.
+
+### Fixed
+
+- Reuse the same Android `PlayerView` across feed pages, retain the decoded frame, and delay transient buffering feedback to remove short loading flashes.
+- Give expanded ASMR playback exclusive back-gesture priority before author navigation and retain both author-list and media-list scroll positions.
+
+### Improved
+
+- Replace visible circular control shells with transparent touch targets and white overlay icons.
+- Redesign the top media switcher as centered equal-width tabs with an animated active underline and restrained directional content transitions.
+- Replace the default thick slider with a two-pixel progress track, compact circular thumb, buffered range, and subtle playing pulse.
+
 ## [1.2.2] - 2026-08-18
 
 ### Improved

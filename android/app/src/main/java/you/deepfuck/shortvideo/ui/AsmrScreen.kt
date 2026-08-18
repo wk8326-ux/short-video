@@ -1,7 +1,6 @@
 package you.deepfuck.shortvideo.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -17,8 +16,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -42,8 +43,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -52,6 +51,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,9 +67,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.delay
 import you.deepfuck.shortvideo.AppUiState
 import you.deepfuck.shortvideo.data.AsmrAuthor
-import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.MediaEntry
-import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.media.PlayerSnapshot
 
 @Composable
@@ -79,7 +77,6 @@ internal fun AsmrScreen(
     exoPlayer: ExoPlayer,
     muted: Boolean,
     fullscreen: Boolean,
-    onSurface: (MediaSurface) -> Unit,
     onAuthor: (String) -> Unit,
     onBackAuthor: () -> Unit,
     onFilter: (String) -> Unit,
@@ -92,35 +89,30 @@ internal fun AsmrScreen(
     onMuted: (Boolean) -> Unit,
     onSeek: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
-    onManage: () -> Unit,
-    onLogout: () -> Unit,
 ) {
+    val screenStates = rememberSaveableStateHolder()
     Box(Modifier.fillMaxSize().background(Canvas)) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
-            Spacer(Modifier.height(2.dp))
-            AppNavigation(
-                state = state,
-                compact = false,
-                onSurface = onSurface,
-                onMode = {},
-                onManage = onManage,
-                onLogout = onLogout,
-            )
+            Spacer(Modifier.height(52.dp))
             if (state.selectedAuthor == null) {
-                AuthorLibrary(
-                    authors = state.asmrAuthors,
-                    loading = state.asmrLoading,
-                    error = state.asmrError,
-                    onAuthor = onAuthor,
-                )
+                screenStates.SaveableStateProvider("asmr-authors") {
+                    AuthorLibrary(
+                        authors = state.asmrAuthors,
+                        loading = state.asmrLoading,
+                        error = state.asmrError,
+                        onAuthor = onAuthor,
+                    )
+                }
             } else {
-                AuthorMedia(
-                    state = state,
-                    onBack = onBackAuthor,
-                    onFilter = onFilter,
-                    onQuery = onQuery,
-                    onPlay = onPlay,
-                )
+                screenStates.SaveableStateProvider("asmr-author:${state.selectedAuthor}") {
+                    AuthorMedia(
+                        state = state,
+                        onBack = onBackAuthor,
+                        onFilter = onFilter,
+                        onQuery = onQuery,
+                        onPlay = onPlay,
+                    )
+                }
             }
         }
 
@@ -161,6 +153,7 @@ private fun AuthorLibrary(
     onAuthor: (String) -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
     val filtered = remember(authors, query) {
         if (query.isBlank()) authors else authors.filter { it.name.contains(query, ignoreCase = true) }
     }
@@ -182,9 +175,10 @@ private fun AuthorLibrary(
             )
         }
         when {
-            loading && authors.isEmpty() -> CenterLoading()
+            loading && authors.isEmpty() -> ListLoadingPlaceholder()
             error != null && authors.isEmpty() -> CenterMessage(error)
             else -> LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     start = 16.dp,
@@ -225,6 +219,9 @@ private fun AuthorLibrary(
                     }
                     HorizontalDivider(color = Line)
                 }
+                if (loading) {
+                    item(key = "loading-more-authors") { LoadingMoreRow() }
+                }
             }
         }
     }
@@ -238,6 +235,7 @@ private fun AuthorMedia(
     onQuery: (String) -> Unit,
     onPlay: (MediaEntry) -> Unit,
 ) {
+    val listState = rememberLazyListState()
     val filtered = remember(state.asmrItems, state.asmrFilter, state.asmrQuery) {
         state.asmrItems.filter { item ->
             val kindMatches = state.asmrFilter == "all" ||
@@ -261,7 +259,15 @@ private fun AuthorMedia(
                     overflow = TextOverflow.Ellipsis,
                     fontWeight = FontWeight.SemiBold,
                 )
-                Text("${state.asmrItems.size} 个媒体", color = TextFaint, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
+                Text(
+                    if (state.asmrLoading || state.asmrItems.size < state.asmrTotal) {
+                        "已载入 ${state.asmrItems.size} / ${state.asmrTotal}"
+                    } else {
+                        "${state.asmrItems.size} 个媒体"
+                    },
+                    color = TextFaint,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                )
             }
         }
         Row(
@@ -287,9 +293,10 @@ private fun AuthorMedia(
             shape = RoundedCornerShape(6.dp),
         )
         when {
-            state.asmrLoading -> CenterLoading()
-            state.asmrError != null -> CenterMessage(state.asmrError)
+            state.asmrLoading && state.asmrItems.isEmpty() -> ListLoadingPlaceholder()
+            state.asmrError != null && state.asmrItems.isEmpty() -> CenterMessage(state.asmrError)
             else -> LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 16.dp, end = 16.dp, bottom = 94.dp),
             ) {
@@ -317,6 +324,9 @@ private fun AuthorMedia(
                     }
                     HorizontalDivider(color = Line)
                 }
+                if (state.asmrLoading) {
+                    item(key = "loading-more-media") { LoadingMoreRow() }
+                }
             }
         }
     }
@@ -337,7 +347,7 @@ private fun MiniPlayer(
             .background(Color(0xF2111214))
             .navigationBarsPadding()
             .height(72.dp)
-            .clickable(onClick = onExpand)
+            .then(if (entry.isAudio) Modifier else Modifier.clickable(onClick = onExpand))
             .padding(start = 16.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -352,11 +362,13 @@ private fun MiniPlayer(
                 style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
             )
         }
-        if (player.isBuffering) {
-            CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
-        } else {
-            IconButton(onClick = onToggle) {
-                Icon(if (player.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = if (player.isPlaying) "暂停" else "播放")
+        Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+            if (player.isBuffering) {
+                DelayedSpinner(visible = true, modifier = Modifier.size(22.dp))
+            } else {
+                IconButton(onClick = onToggle) {
+                    Icon(if (player.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = if (player.isPlaying) "暂停" else "播放")
+                }
             }
         }
         IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, contentDescription = "关闭播放器") }
@@ -473,21 +485,10 @@ private fun ExpandedAsmrPlayer(
                     IconButton(onClick = onToggle, modifier = Modifier.size(48.dp)) {
                         Icon(if (player.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, contentDescription = if (player.isPlaying) "暂停" else "播放")
                     }
-                    var dragging by remember { mutableStateOf(false) }
-                    var slider by remember { mutableFloatStateOf(0f) }
-                    val duration = player.durationMs.coerceAtLeast(1L)
-                    val shown = if (dragging) slider else (player.positionMs.toFloat() / duration).coerceIn(0f, 1f)
-                    Slider(
-                        value = shown,
-                        onValueChange = { dragging = true; slider = it },
-                        onValueChangeFinished = { onSeek((slider * duration).toLong()); dragging = false },
+                    FineProgressBar(
+                        player = player,
+                        onSeek = onSeek,
                         modifier = Modifier.weight(1f),
-                        enabled = player.durationMs > 0L,
-                        colors = SliderDefaults.colors(
-                            thumbColor = TextPrimary,
-                            activeTrackColor = Accent,
-                            inactiveTrackColor = Color(0x55FFFFFF),
-                        ),
                     )
                     Text(
                         "${formatDuration(player.positionMs)} / ${formatDuration(player.durationMs)}",
@@ -502,14 +503,14 @@ private fun ExpandedAsmrPlayer(
                 modifier = Modifier.align(Alignment.CenterEnd).padding(end = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                CircleControl(
+                OverlayIconControl(
                     label = if (muted) "打开声音" else "静音",
                     onClick = { onMuted(!muted) },
                 ) {
                     Icon(if (muted) Icons.AutoMirrored.Outlined.VolumeOff else Icons.AutoMirrored.Outlined.VolumeUp, contentDescription = null)
                 }
                 if (fullscreen) {
-                    CircleControl(label = "退出横屏", onClick = { onFullscreen(false) }) {
+                    OverlayIconControl(label = "退出横屏", onClick = { onFullscreen(false) }) {
                         Icon(Icons.Outlined.FullscreenExit, contentDescription = null)
                     }
                 }
@@ -517,7 +518,7 @@ private fun ExpandedAsmrPlayer(
         }
 
         if (fullscreen && controlsVisible) {
-            CircleControl(
+            OverlayIconControl(
                 label = if (player.isPlaying) "暂停" else "播放",
                 size = 64,
                 modifier = Modifier.align(Alignment.Center),
@@ -537,19 +538,48 @@ private fun ExpandedAsmrPlayer(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .clip(RoundedCornerShape(6.dp))
-                    .background(FrostedChromeSurface)
-                    .border(1.dp, FrostedChromeOutline, RoundedCornerShape(6.dp))
+                    .background(Color(0x72000000))
                     .padding(14.dp),
-                color = FrostedChromeContent,
+                color = Color.White,
             )
         }
     }
 }
 
 @Composable
-private fun CenterLoading() {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        CircularProgressIndicator(Modifier.size(28.dp), color = TextSecondary, strokeWidth = 2.dp)
+private fun ListLoadingPlaceholder() {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        repeat(6) { index ->
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(
+                    Modifier
+                        .width(if (index % 2 == 0) 210.dp else 156.dp)
+                        .height(14.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color.White.copy(alpha = 0.10f)),
+                )
+                Box(
+                    Modifier
+                        .width(116.dp)
+                        .height(9.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color.White.copy(alpha = 0.06f)),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LoadingMoreRow() {
+    Box(
+        modifier = Modifier.fillMaxWidth().height(52.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        CircularProgressIndicator(Modifier.size(18.dp), color = TextSecondary, strokeWidth = 2.dp)
     }
 }
 

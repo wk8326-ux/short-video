@@ -22,6 +22,7 @@ The application server never proxies or transcodes media bytes. Both Android and
 - Adaptive MP3/direct-video/HLS playback with a persistent bottom mini-player
 - Native Android client with a persistent 1 GiB media cache and stable cache keys
 - ASMR audio/video background playback with lock-screen and notification controls
+- Progressive ASMR list rendering, inline sequential audio playback, and remembered list positions
 - ASMR video landscape playback with five-second chrome fade and horizontal seeking
 - Authenticated management view for library rescans and MP4 Fast Start checks
 

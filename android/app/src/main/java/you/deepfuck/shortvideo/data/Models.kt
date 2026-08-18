@@ -76,6 +76,12 @@ data class AsmrAuthor(
     val modified: String?,
 )
 
+data class AsmrPage<T>(
+    val items: List<T>,
+    val total: Int,
+    val nextOffset: Int?,
+)
+
 data class AdminStatus(
     val totalItems: Int,
     val totalBytes: Long,

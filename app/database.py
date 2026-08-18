@@ -366,13 +366,24 @@ class LibraryDatabase:
                 params,
             )
 
-    def asmr_authors(self, *, search: str = "") -> list[dict[str, Any]]:
+    def asmr_authors(
+        self,
+        *,
+        search: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         conditions = ["active = 1", "source = 'asmr'", "author IS NOT NULL"]
         params: list[Any] = []
         if search:
             conditions.append("author LIKE ? ESCAPE '\\'")
             params.append(f"%{self._escape_like(search)}%")
         with self._lock, self._connect() as connection:
+            pagination = ""
+            query_params = list(params)
+            if limit is not None:
+                pagination = " LIMIT ? OFFSET ?"
+                query_params.extend([limit, offset])
             rows = connection.execute(
                 f"""
                 SELECT author,
@@ -389,11 +400,24 @@ class LibraryDatabase:
                 FROM videos
                 WHERE {' AND '.join(conditions)}
                 GROUP BY author
-                ORDER BY author COLLATE NOCASE
+                ORDER BY author COLLATE NOCASE{pagination}
                 """,
-                params,
+                query_params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def asmr_author_count(self, *, search: str = "") -> int:
+        conditions = ["active = 1", "source = 'asmr'", "author IS NOT NULL"]
+        params: list[Any] = []
+        if search:
+            conditions.append("author LIKE ? ESCAPE '\\'")
+            params.append(f"%{self._escape_like(search)}%")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(DISTINCT author) FROM videos WHERE {' AND '.join(conditions)}",
+                params,
+            ).fetchone()
+        return int(row[0] or 0)
 
     def asmr_items(
         self,
@@ -401,6 +425,8 @@ class LibraryDatabase:
         author: str,
         kind: str = "all",
         search: str = "",
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         conditions = ["active = 1", "source = 'asmr'", "author = ?"]
         params: list[Any] = [author]
@@ -416,16 +442,48 @@ class LibraryDatabase:
             conditions.append("name LIKE ? ESCAPE '\\'")
             params.append(f"%{self._escape_like(search)}%")
         with self._lock, self._connect() as connection:
+            pagination = ""
+            query_params = list(params)
+            if limit is not None:
+                pagination = " LIMIT ? OFFSET ?"
+                query_params.extend([limit, offset])
             rows = connection.execute(
                 f"""
                 SELECT *
                 FROM videos
                 WHERE {' AND '.join(conditions)}
-                ORDER BY name COLLATE NOCASE, id
+                ORDER BY name COLLATE NOCASE, id{pagination}
                 """,
-                params,
+                query_params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def asmr_item_count(
+        self,
+        *,
+        author: str,
+        kind: str = "all",
+        search: str = "",
+    ) -> int:
+        conditions = ["active = 1", "source = 'asmr'", "author = ?"]
+        params: list[Any] = [author]
+        if kind == "video":
+            conditions.append(
+                "(LOWER(COALESCE(media_format, '')) = 'm3u8' OR media_kind = 'video')"
+            )
+        elif kind == "audio":
+            conditions.append(
+                "LOWER(COALESCE(media_format, '')) != 'm3u8' AND media_kind = 'audio'"
+            )
+        if search:
+            conditions.append("name LIKE ? ESCAPE '\\'")
+            params.append(f"%{self._escape_like(search)}%")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) FROM videos WHERE {' AND '.join(conditions)}",
+                params,
+            ).fetchone()
+        return int(row[0] or 0)
 
     @staticmethod
     def _escape_like(value: str) -> str:

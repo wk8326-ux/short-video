@@ -1,7 +1,6 @@
 package you.deepfuck.shortvideo.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -20,7 +19,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.VolumeOff
@@ -36,8 +34,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -46,6 +42,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -95,6 +92,9 @@ internal fun FeedScreen(
         pageCount = { state.feedItems.size },
     )
     var fullscreenChromeVisible by remember(fullscreen) { mutableStateOf(true) }
+    val movablePlayerHost = remember(exoPlayer) {
+        movableContentOf { PlayerHost(exoPlayer, Modifier.fillMaxSize()) }
+    }
 
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.currentPage }
@@ -122,7 +122,7 @@ internal fun FeedScreen(
                 total = state.feedTotal,
                 active = index == pagerState.currentPage,
                 player = player,
-                exoPlayer = exoPlayer,
+                playerHost = movablePlayerHost,
                 muted = state.muted,
                 fullscreen = fullscreen,
                 onTogglePlayback = onTogglePlayback,
@@ -135,7 +135,7 @@ internal fun FeedScreen(
                 },
             )
         }
-        if (!fullscreen || fullscreenChromeVisible) {
+        if (fullscreen && fullscreenChromeVisible) {
             Box(Modifier.statusBarsPadding().padding(top = 2.dp)) {
                 AppNavigation(
                     state = state,
@@ -164,7 +164,7 @@ private fun FeedPage(
     total: Int,
     active: Boolean,
     player: PlayerSnapshot,
-    exoPlayer: ExoPlayer,
+    playerHost: @Composable () -> Unit,
     muted: Boolean,
     fullscreen: Boolean,
     onTogglePlayback: () -> Unit,
@@ -234,7 +234,7 @@ private fun FeedPage(
                 },
             ),
     ) {
-        if (active) PlayerHost(exoPlayer, Modifier.fillMaxSize())
+        if (active) playerHost()
         BufferSpinner(active && player.isBuffering && player.mediaId == entry.id)
 
         val controlsVisible = !fullscreen || chromeVisible
@@ -277,13 +277,13 @@ private fun FeedPage(
                     .padding(end = 12.dp, bottom = 38.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                CircleControl(
+                OverlayIconControl(
                     label = if (muted) "打开声音" else "静音",
                     onClick = { onMuted(!muted) },
                 ) {
                     Icon(if (muted) Icons.AutoMirrored.Outlined.VolumeOff else Icons.AutoMirrored.Outlined.VolumeUp, contentDescription = null)
                 }
-                CircleControl(
+                OverlayIconControl(
                     label = if (fullscreen) "退出横屏" else "横屏",
                     onClick = { onFullscreen(!fullscreen) },
                 ) {
@@ -299,7 +299,7 @@ private fun FeedPage(
 
         val showCenter = fullscreen && chromeVisible || !fullscreen && !player.isPlaying
         if (active && showCenter && player.mediaId == entry.id) {
-            CircleControl(
+            OverlayIconControl(
                 label = if (player.isPlaying) "暂停" else "播放",
                 size = 64,
                 modifier = Modifier.align(Alignment.Center),
@@ -318,10 +318,10 @@ private fun FeedPage(
                 modifier = Modifier.align(Alignment.Center).padding(top = 104.dp),
                 horizontalArrangement = Arrangement.spacedBy(84.dp),
             ) {
-                CircleControl(label = "后退 10 秒", onClick = { onSeekBy(-10_000L) }) {
+                OverlayIconControl(label = "后退 10 秒", onClick = { onSeekBy(-10_000L) }) {
                     Icon(Icons.Outlined.Replay10, contentDescription = "后退 10 秒")
                 }
-                CircleControl(label = "快进 10 秒", onClick = { onSeekBy(10_000L) }) {
+                OverlayIconControl(label = "快进 10 秒", onClick = { onSeekBy(10_000L) }) {
                     Icon(Icons.Outlined.FastForward, contentDescription = "快进 10 秒")
                 }
             }
@@ -332,8 +332,7 @@ private fun FeedPage(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .clip(RoundedCornerShape(6.dp))
-                    .background(FrostedChromeSurface)
-                    .border(1.dp, FrostedChromeOutline, RoundedCornerShape(6.dp))
+                    .background(Color(0x72000000))
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -341,11 +340,11 @@ private fun FeedPage(
                 Icon(
                     if (target >= player.positionMs) Icons.Outlined.FastForward else Icons.Outlined.Replay10,
                     contentDescription = null,
-                    tint = FrostedChromeContent,
+                    tint = Color.White,
                 )
                 Text(
                     "${formatDuration(target)} / ${formatDuration(player.durationMs)}",
-                    color = FrostedChromeContent,
+                    color = Color.White,
                 )
             }
         }
@@ -358,34 +357,15 @@ private fun ProgressControl(
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var dragging by remember { mutableStateOf(false) }
-    var value by remember { mutableFloatStateOf(0f) }
-    val duration = player.durationMs.coerceAtLeast(1L)
-    val shown = if (dragging) value else (player.positionMs.toFloat() / duration).coerceIn(0f, 1f)
-    Row(
-        modifier = modifier.fillMaxWidth().height(38.dp).padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Slider(
-            value = shown,
-            onValueChange = { dragging = true; value = it },
-            onValueChangeFinished = {
-                onSeek((value * duration).toLong())
-                dragging = false
-            },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = player.durationMs > 0L,
-            colors = SliderDefaults.colors(
-                thumbColor = TextPrimary,
-                activeTrackColor = Accent,
-                inactiveTrackColor = Color(0x55FFFFFF),
-            ),
-        )
-    }
+    FineProgressBar(
+        player = player,
+        onSeek = onSeek,
+        modifier = modifier.padding(horizontal = 8.dp),
+    )
 }
 
 @Composable
-internal fun CircleControl(
+internal fun OverlayIconControl(
     label: String,
     modifier: Modifier = Modifier,
     size: Int = 48,
@@ -396,11 +376,8 @@ internal fun CircleControl(
         onClick = onClick,
         modifier = modifier
             .size(size.dp)
-            .clip(CircleShape)
-            .background(FrostedChromeSurface)
-            .border(1.dp, FrostedChromeOutline, CircleShape)
             .semantics { contentDescription = label },
-        colors = IconButtonDefaults.iconButtonColors(contentColor = FrostedChromeContent),
+        colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
     ) {
         content()
     }
