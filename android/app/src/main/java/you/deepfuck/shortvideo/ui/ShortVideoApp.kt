@@ -55,6 +55,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.platform.LocalFocusManager
@@ -363,7 +364,7 @@ internal fun AppNavigation(
             Box(
                 Modifier
                     .align(Alignment.BottomStart)
-                    .offset(x = indicatorOffset + 24.dp)
+                    .offset { IntOffset(x = (indicatorOffset + 24.dp).roundToPx(), y = 0) }
                     .width(24.dp)
                     .height(2.dp)
                     .clip(RoundedCornerShape(1.dp))

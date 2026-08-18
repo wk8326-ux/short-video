@@ -3,6 +3,7 @@ package you.deepfuck.shortvideo
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.AsmrAuthor
+import you.deepfuck.shortvideo.data.AsmrFilter
 import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.media.PlaybackEndedEvent
 
@@ -98,6 +99,41 @@ internal fun stableAsmrAuthors(authors: List<AsmrAuthor>): List<AsmrAuthor> =
 
 internal fun stableAsmrEntries(entries: List<MediaEntry>): List<MediaEntry> =
     entries.distinctBy { it.id }
+
+internal fun filterAsmrAuthors(
+    authors: List<AsmrAuthor>,
+    filter: AsmrFilter,
+    query: String,
+): List<AsmrAuthor> {
+    val normalizedQuery = query.trim()
+    return stableAsmrAuthors(authors).filter { author ->
+        val kindMatches = when (filter) {
+            AsmrFilter.ALL -> true
+            AsmrFilter.VIDEO -> author.videoCount > 0
+            AsmrFilter.AUDIO -> author.audioCount > 0
+        }
+        kindMatches && (normalizedQuery.isEmpty() || author.name.contains(normalizedQuery, ignoreCase = true))
+    }
+}
+
+internal fun filterAsmrEntries(
+    entries: List<MediaEntry>,
+    filter: AsmrFilter,
+    query: String,
+): List<MediaEntry> {
+    val normalizedQuery = query.trim()
+    return stableAsmrEntries(entries).filter { entry ->
+        val kindMatches = when (filter) {
+            AsmrFilter.ALL -> true
+            AsmrFilter.VIDEO -> !entry.isAudio
+            AsmrFilter.AUDIO -> entry.isAudio
+        }
+        kindMatches && (normalizedQuery.isEmpty() || entry.title.contains(normalizedQuery, ignoreCase = true))
+    }
+}
+
+internal fun reconcileFeedTotal(remoteTotal: Int, currentTotal: Int, loadedCount: Int): Int =
+    maxOf(remoteTotal, currentTotal, loadedCount)
 
 internal fun shouldHandlePlaybackEnded(
     event: PlaybackEndedEvent,

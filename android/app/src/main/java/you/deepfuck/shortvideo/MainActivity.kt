@@ -14,6 +14,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.Surface
+import androidx.compose.ui.Modifier
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -21,6 +24,8 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import you.deepfuck.shortvideo.ui.ShortVideoApp
 import you.deepfuck.shortvideo.ui.ShortVideoTheme
+import you.deepfuck.shortvideo.ui.Canvas
+import you.deepfuck.shortvideo.ui.TextPrimary
 import you.deepfuck.shortvideo.logging.AppLogStore
 
 class MainActivity : ComponentActivity() {
@@ -46,13 +51,19 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent {
             ShortVideoTheme {
-                ShortVideoApp(
-                    viewModel = viewModel,
-                    onFullscreenChanged = ::setPlayerFullscreen,
-                    onBackgroundPlaybackRequested = ::requestMediaNotificationPermission,
-                    onInstallAppUpdate = ::installAppUpdate,
-                    onExportLogs = ::exportRuntimeLogs,
-                )
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = Canvas,
+                    contentColor = TextPrimary,
+                ) {
+                    ShortVideoApp(
+                        viewModel = viewModel,
+                        onFullscreenChanged = ::setPlayerFullscreen,
+                        onBackgroundPlaybackRequested = ::requestMediaNotificationPermission,
+                        onInstallAppUpdate = ::installAppUpdate,
+                        onExportLogs = ::exportRuntimeLogs,
+                    )
+                }
             }
         }
     }

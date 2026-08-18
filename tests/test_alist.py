@@ -223,3 +223,36 @@ async def test_rate_limited_api_request_is_retried():
     assert await client.list_directory("/asmr6") == []
     assert calls == 2
     await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_database_connection_exhaustion_is_retried_with_backoff(monkeypatch):
+    calls = 0
+    delays: list[float] = []
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx.Response(
+                200,
+                json={"code": 500, "message": "failed get search items count: Error 1040: Too many connections"},
+            )
+        return httpx.Response(
+            200,
+            json={"code": 200, "data": {"content": [], "total": 0}},
+        )
+
+    async def record_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr("app.alist.asyncio.sleep", record_sleep)
+    http_client = httpx.AsyncClient(
+        base_url="https://asmr.example", transport=httpx.MockTransport(handler)
+    )
+    client = AListClient(_settings(), http_client)
+
+    assert await client.list_directory("/asmr6") == []
+    assert calls == 3
+    assert delays == [1.0, 2.0]
+    await http_client.aclose()

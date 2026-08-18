@@ -14,6 +14,12 @@ enum class FeedMode(val apiValue: String, val label: String) {
     OLDEST("oldest", "最早优先"),
 }
 
+enum class AsmrFilter(val apiValue: String, val label: String) {
+    ALL("all", "全部"),
+    VIDEO("video", "视频"),
+    AUDIO("audio", "音频"),
+}
+
 data class MediaEntry(
     val id: Long,
     val title: String,

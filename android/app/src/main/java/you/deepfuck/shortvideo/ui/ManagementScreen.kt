@@ -31,6 +31,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -63,16 +64,23 @@ internal fun ManagementScreen(
             modifier = Modifier.fillMaxWidth().height(68.dp).padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回") }
+            IconButton(
+                onClick = onBack,
+                colors = IconButtonDefaults.iconButtonColors(contentColor = TextPrimary),
+            ) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回") }
             Column(Modifier.weight(1f)) {
-                Text("媒体库管理", fontWeight = FontWeight.SemiBold)
+                Text("媒体库管理", fontWeight = FontWeight.SemiBold, color = TextPrimary)
                 Text(
                     state.adminStatus?.scanLastSuccess?.let(::formatTimestamp) ?: "尚未完成扫描",
                     color = TextFaint,
                     style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 )
             }
-            IconButton(onClick = onRefresh, enabled = !state.adminLoading) {
+            IconButton(
+                onClick = onRefresh,
+                enabled = !state.adminLoading,
+                colors = IconButtonDefaults.iconButtonColors(contentColor = TextPrimary),
+            ) {
                 Icon(Icons.Outlined.Refresh, contentDescription = "刷新状态")
             }
         }
@@ -254,7 +262,12 @@ private fun RuntimeLogDialog(
 private fun SectionTitle(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
         Icon(icon, contentDescription = null, tint = TextFaint)
-        Text(label, fontWeight = FontWeight.SemiBold, style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+        Text(
+            label,
+            fontWeight = FontWeight.SemiBold,
+            color = TextPrimary,
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+        )
     }
 }
 
@@ -265,7 +278,12 @@ private fun Facts(values: List<Pair<String, String>>) {
             Column(Modifier.weight(1f)) {
                 Text(label, color = TextFaint, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
                 Spacer(Modifier.height(5.dp))
-                Text(value, fontWeight = FontWeight.SemiBold, style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                Text(
+                    value,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary,
+                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                )
             }
         }
     }

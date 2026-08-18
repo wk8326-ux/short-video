@@ -101,6 +101,15 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         )
     }
 
+    fun feedTotal(surface: MediaSurface): Int {
+        val target = url("/api/feed").newBuilder()
+            .addQueryParameter("limit", "1")
+            .addQueryParameter("mode", FeedMode.NEWEST.apiValue)
+            .addQueryParameter("category", surface.apiValue)
+            .build()
+        return getJson(target.toString()).optInt("total")
+    }
+
     fun asmrAuthors(query: String = "", limit: Int? = null, offset: Int = 0): AsmrPage<AsmrAuthor> {
         val target = url("/api/asmr/authors").newBuilder().apply {
             if (query.isNotBlank()) addQueryParameter("q", query)

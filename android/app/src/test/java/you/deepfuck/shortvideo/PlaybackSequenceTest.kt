@@ -7,6 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.AsmrAuthorIndex
+import you.deepfuck.shortvideo.data.AsmrFilter
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
@@ -27,6 +28,35 @@ class PlaybackSequenceTest {
         assertFalse(shouldRefreshAsmrAuthorIndex(cached, now))
         assertTrue(shouldRefreshAsmrAuthorIndex(cached.copy(savedAtMs = now - 86_400_000L), now))
         assertTrue(shouldRefreshAsmrAuthorIndex(null, now))
+    }
+
+    @Test
+    fun `ASMR library filter applies to authors and their media`() {
+        val authors = listOf(
+            AsmrAuthor("Both", itemCount = 5, videoCount = 2, audioCount = 3, modified = null),
+            AsmrAuthor("Video only", itemCount = 2, videoCount = 2, audioCount = 0, modified = null),
+            AsmrAuthor("Audio only", itemCount = 3, videoCount = 0, audioCount = 3, modified = null),
+        )
+        val entries = listOf(media(1L, "video"), media(2L, "audio"))
+
+        assertEquals(
+            listOf("Both", "Video only"),
+            filterAsmrAuthors(authors, AsmrFilter.VIDEO, query = "").map(AsmrAuthor::name),
+        )
+        assertEquals(
+            listOf("Both", "Audio only"),
+            filterAsmrAuthors(authors, AsmrFilter.AUDIO, query = "").map(AsmrAuthor::name),
+        )
+        assertEquals(listOf(1L), filterAsmrEntries(entries, AsmrFilter.VIDEO, query = "").map(MediaEntry::id))
+        assertEquals(listOf(2L), filterAsmrEntries(entries, AsmrFilter.AUDIO, query = "").map(MediaEntry::id))
+        assertEquals(listOf("Video only"), filterAsmrAuthors(authors, AsmrFilter.ALL, "video").map(AsmrAuthor::name))
+    }
+
+    @Test
+    fun `server feed total replaces a stale one-page random total`() {
+        assertEquals(762, reconcileFeedTotal(remoteTotal = 762, currentTotal = 18, loadedCount = 18))
+        assertEquals(18, reconcileFeedTotal(remoteTotal = 0, currentTotal = 18, loadedCount = 18))
+        assertEquals(24, reconcileFeedTotal(remoteTotal = 12, currentTotal = 18, loadedCount = 24))
     }
 
     @Test

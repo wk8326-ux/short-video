@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.5] - 2026-08-19
+
+### Added
+
+- Add all/video/audio filtering to the ASMR author index and carry the selected type into each author's paginated media library.
+- Add a seekable buffered progress line and elapsed/total time to the persistent ASMR audio and collapsed-video player.
+
+### Fixed
+
+- Register the shared Media3 session with `MediaSessionService` and let Media3 own notification foreground promotion, eliminating the foreground-service timeout behind all 12 captured ASMR crashes.
+- Isolate ASMR item caches, pagination jobs, and audio queues by author and media type so playback, filtering, navigation, and background controls cannot overwrite each other's state.
+- Retry temporary upstream AList `Error 1040: Too many connections` responses with bounded exponential backoff during ASMR library scans.
+- Refresh the authoritative short/long library total without replacing or activating the restored shuffle queue, correcting stale `1 / 18` counters.
+- Provide a high-contrast foreground at the Compose root and explicit operational text colors so ASMR and management content cannot render black on the dark canvas.
+
 ## [1.3.4] - 2026-08-18
 
 ### Added

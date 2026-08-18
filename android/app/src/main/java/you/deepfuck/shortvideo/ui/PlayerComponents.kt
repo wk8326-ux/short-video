@@ -117,6 +117,7 @@ internal fun FineProgressBar(
     player: PlayerSnapshot,
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
 ) {
     var dragging by remember { mutableStateOf(false) }
     var dragFraction by remember { mutableFloatStateOf(0f) }
@@ -142,7 +143,7 @@ internal fun FineProgressBar(
     Canvas(
         modifier = modifier
             .fillMaxWidth()
-            .height(44.dp)
+            .height(if (compact) 24.dp else 44.dp)
             .semantics {
                 contentDescription = "播放进度"
                 progressBarRangeInfo = ProgressBarRangeInfo(played, 0f..1f)
@@ -171,7 +172,7 @@ internal fun FineProgressBar(
                 }
             },
     ) {
-        val inset = 6.dp.toPx()
+        val inset = if (compact) 0f else 6.dp.toPx()
         val start = Offset(inset, center.y)
         val end = Offset(size.width - inset, center.y)
         val width = (end.x - start.x).coerceAtLeast(1f)
@@ -182,14 +183,14 @@ internal fun FineProgressBar(
         drawLine(Color.White.copy(alpha = 0.22f), start, end, trackWidth, StrokeCap.Round)
         drawLine(Color.White.copy(alpha = 0.38f), start, bufferedEnd, trackWidth, StrokeCap.Round)
         drawLine(Color.White, start, playedEnd, trackWidth, StrokeCap.Round)
-        if (player.isPlaying && !dragging) {
+        if (player.isPlaying && !dragging && !compact) {
             drawCircle(
                 color = Color.White.copy(alpha = (1f - pulse) * 0.18f),
                 radius = (4.5.dp + 4.dp * pulse).toPx(),
                 center = playedEnd,
             )
         }
-        drawCircle(Color.White, radius = 4.5.dp.toPx(), center = playedEnd)
+        drawCircle(Color.White, radius = (if (compact) 3.dp else 4.5.dp).toPx(), center = playedEnd)
     }
 }
 

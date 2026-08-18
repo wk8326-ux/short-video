@@ -16,6 +16,7 @@ USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
 )
+TRANSIENT_DATABASE_RETRIES = 4
 
 
 class AListError(RuntimeError):
@@ -80,6 +81,7 @@ class AListClient:
         body: dict[str, Any],
         retry: bool = True,
         rate_limit_retries: int = 3,
+        transient_database_retries: int = TRANSIENT_DATABASE_RETRIES,
     ) -> dict[str, Any]:
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         if self._token:
@@ -103,8 +105,26 @@ class AListClient:
 
         if response.status_code == 429 and rate_limit_retries > 0:
             await asyncio.sleep(self._retry_after(response, rate_limit_retries))
-            return await self._post(endpoint, body, retry, rate_limit_retries - 1)
-        payload = self._payload(response)
+            return await self._post(
+                endpoint,
+                body,
+                retry=retry,
+                rate_limit_retries=rate_limit_retries - 1,
+                transient_database_retries=transient_database_retries,
+            )
+        try:
+            payload = self._payload(response)
+        except AListError as exc:
+            if transient_database_retries > 0 and self._is_database_connection_exhaustion(str(exc)):
+                await asyncio.sleep(self._database_retry_delay(transient_database_retries))
+                return await self._post(
+                    endpoint,
+                    body,
+                    retry=retry,
+                    rate_limit_retries=rate_limit_retries,
+                    transient_database_retries=transient_database_retries - 1,
+                )
+            raise
         code = int(payload.get("code", response.status_code))
         if code == 401 and retry and self._username:
             await self._login()
@@ -113,12 +133,29 @@ class AListClient:
                 body,
                 retry=False,
                 rate_limit_retries=rate_limit_retries,
+                transient_database_retries=transient_database_retries,
             )
         if code == 429 and rate_limit_retries > 0:
             await asyncio.sleep(self._retry_after(response, rate_limit_retries))
-            return await self._post(endpoint, body, retry, rate_limit_retries - 1)
+            return await self._post(
+                endpoint,
+                body,
+                retry=retry,
+                rate_limit_retries=rate_limit_retries - 1,
+                transient_database_retries=transient_database_retries,
+            )
         if code not in (0, 200):
-            raise AListError(str(payload.get("message") or f"AList error {code}"))
+            message = str(payload.get("message") or f"AList error {code}")
+            if transient_database_retries > 0 and self._is_database_connection_exhaustion(message):
+                await asyncio.sleep(self._database_retry_delay(transient_database_retries))
+                return await self._post(
+                    endpoint,
+                    body,
+                    retry=retry,
+                    rate_limit_retries=rate_limit_retries,
+                    transient_database_retries=transient_database_retries - 1,
+                )
+            raise AListError(message)
         return payload
 
     @staticmethod
@@ -127,6 +164,16 @@ class AListClient:
             return min(5.0, max(0.0, float(response.headers.get("Retry-After", ""))))
         except ValueError:
             return 0.5 * (4 - remaining_retries)
+
+    @staticmethod
+    def _is_database_connection_exhaustion(message: str) -> bool:
+        normalized = message.casefold()
+        return "error 1040" in normalized or "too many connections" in normalized
+
+    @staticmethod
+    def _database_retry_delay(remaining_retries: int) -> float:
+        attempt = TRANSIENT_DATABASE_RETRIES - remaining_retries
+        return min(8.0, float(2**attempt))
 
     @staticmethod
     def _payload(response: httpx.Response) -> dict[str, Any]:
