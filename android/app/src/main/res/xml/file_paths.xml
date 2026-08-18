@@ -3,4 +3,7 @@
     <cache-path
         name="app_updates"
         path="app-updates/" />
+    <files-path
+        name="runtime_logs"
+        path="runtime-logs/" />
 </paths>

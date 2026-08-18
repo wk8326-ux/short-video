@@ -26,6 +26,7 @@ The application server never proxies or transcodes media bytes. Both Android and
 - ASMR video landscape playback with five-second chrome fade and horizontal seeking
 - Authenticated management view for library rescans and MP4 Fast Start checks
 - Authenticated Android in-app updates with download progress and SHA-256 verification
+- Redacted on-device runtime logs with management-page view, clear, and export actions
 
 Fast Start checks are manual and read at most the first 256 KiB of each MP4-family file. They do not rewrite or transcode media.
 
@@ -56,12 +57,12 @@ Android updates are published from `/data/app-update`, which is inside the exist
 
 ```json
 {
-  "versionCode": 132,
-  "versionName": "1.3.2",
-  "apkFile": "short-video-android-v1.3.2-debug.apk",
+  "versionCode": 133,
+  "versionName": "1.3.3",
+  "apkFile": "short-video-android-v1.3.3-debug.apk",
   "sha256": "<64 lowercase hex characters>",
-  "size": 21000000,
-  "notes": "修复切换 ASMR 误触发下一条和后台播放闪退，增加完整作者搜索与动态播放标识"
+  "size": 22320649,
+  "notes": "保存短视频、长视频和 ASMR 播放状态，修复跨页面播放与 ASMR 闪退，并增加可导出的运行日志。"
 }
 ```
 

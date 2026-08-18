@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -55,14 +54,15 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -84,7 +84,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlin.math.PI
 import kotlin.math.sin
 import you.deepfuck.shortvideo.AppUiState
+import you.deepfuck.shortvideo.ListPosition
 import you.deepfuck.shortvideo.shouldLoadMore
+import you.deepfuck.shortvideo.stableAsmrAuthors
+import you.deepfuck.shortvideo.stableAsmrEntries
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.media.PlayerSnapshot
@@ -96,6 +99,8 @@ internal fun AsmrScreen(
     exoPlayer: ExoPlayer,
     muted: Boolean,
     fullscreen: Boolean,
+    authorListPosition: ListPosition,
+    mediaListPosition: ListPosition,
     onAuthor: (String) -> Unit,
     onBackAuthor: () -> Unit,
     onLoadMoreItems: () -> Unit,
@@ -111,29 +116,30 @@ internal fun AsmrScreen(
     onSeekBy: (Long) -> Unit,
     onVideoBackgroundPlayback: (Boolean) -> Unit,
     onFullscreen: (Boolean) -> Unit,
+    onAuthorListPosition: (ListPosition) -> Unit,
+    onMediaListPosition: (String, ListPosition) -> Unit,
 ) {
-    val screenStates = rememberSaveableStateHolder()
     Box(Modifier.fillMaxSize().background(Canvas)) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             Spacer(Modifier.height(52.dp))
             val selectedAuthor = state.selectedAuthor
             if (selectedAuthor == null) {
-                screenStates.SaveableStateProvider("asmr-authors") {
-                    AuthorLibrary(
-                        authors = state.asmrAuthors,
-                        total = state.asmrAuthorsTotal,
-                        loading = state.asmrLoading,
-                        error = state.asmrError,
-                        listState = rememberLazyListState(),
-                        onAuthor = onAuthor,
-                    )
-                }
+                AuthorLibrary(
+                    authors = state.asmrAuthors,
+                    total = state.asmrAuthorsTotal,
+                    loading = state.asmrLoading,
+                    error = state.asmrError,
+                    initialPosition = authorListPosition,
+                    onPosition = onAuthorListPosition,
+                    onAuthor = onAuthor,
+                )
             } else {
-                screenStates.SaveableStateProvider("asmr-author:$selectedAuthor") {
+                key(selectedAuthor) {
                     AuthorMedia(
                         state = state,
                         player = player,
-                        listState = rememberLazyListState(),
+                        initialPosition = mediaListPosition,
+                        onPosition = { onMediaListPosition(selectedAuthor, it) },
                         onBack = onBackAuthor,
                         onLoadMore = onLoadMoreItems,
                         onFilter = onFilter,
@@ -182,12 +188,29 @@ private fun AuthorLibrary(
     total: Int,
     loading: Boolean,
     error: String?,
-    listState: LazyListState,
+    initialPosition: ListPosition,
+    onPosition: (ListPosition) -> Unit,
     onAuthor: (String) -> Unit,
 ) {
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = initialPosition.index.coerceAtLeast(0),
+        initialFirstVisibleItemScrollOffset = initialPosition.offset.coerceAtLeast(0),
+    )
+    DisposableEffect(listState) {
+        onDispose {
+            onPosition(ListPosition(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset))
+        }
+    }
     var query by remember { mutableStateOf("") }
-    val filtered = remember(authors, query) {
-        if (query.isBlank()) authors else authors.filter { it.name.contains(query, ignoreCase = true) }
+    val uniqueAuthors = remember(authors) { stableAsmrAuthors(authors) }
+    val filtered = remember(uniqueAuthors, query) {
+        if (query.isBlank()) uniqueAuthors else uniqueAuthors.filter { it.name.contains(query, ignoreCase = true) }
+    }
+    LaunchedEffect(filtered.size) {
+        if (filtered.isEmpty()) return@LaunchedEffect
+        val current = ListPosition(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+        val safe = current.clamp(filtered.size)
+        if (safe != current) listState.scrollToItem(safe.index, safe.offset)
     }
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 18.dp)) {
@@ -271,20 +294,37 @@ private fun AuthorLibrary(
 private fun AuthorMedia(
     state: AppUiState,
     player: PlayerSnapshot,
-    listState: LazyListState,
+    initialPosition: ListPosition,
+    onPosition: (ListPosition) -> Unit,
     onBack: () -> Unit,
     onLoadMore: () -> Unit,
     onFilter: (String) -> Unit,
     onQuery: (String) -> Unit,
     onPlay: (MediaEntry) -> Unit,
 ) {
-    val filtered = remember(state.asmrItems, state.asmrFilter, state.asmrQuery) {
-        state.asmrItems.filter { item ->
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = initialPosition.index.coerceAtLeast(0),
+        initialFirstVisibleItemScrollOffset = initialPosition.offset.coerceAtLeast(0),
+    )
+    DisposableEffect(listState) {
+        onDispose {
+            onPosition(ListPosition(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset))
+        }
+    }
+    val uniqueItems = remember(state.asmrItems) { stableAsmrEntries(state.asmrItems) }
+    val filtered = remember(uniqueItems, state.asmrFilter, state.asmrQuery) {
+        uniqueItems.filter { item ->
             val kindMatches = state.asmrFilter == "all" ||
                 state.asmrFilter == "video" && !item.isAudio ||
                 state.asmrFilter == "audio" && item.isAudio
             kindMatches && (state.asmrQuery.isBlank() || item.title.contains(state.asmrQuery, ignoreCase = true))
         }
+    }
+    LaunchedEffect(filtered.size) {
+        if (filtered.isEmpty()) return@LaunchedEffect
+        val current = ListPosition(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+        val safe = current.clamp(filtered.size)
+        if (safe != current) listState.scrollToItem(safe.index, safe.offset)
     }
     LaunchedEffect(listState, filtered.size, state.asmrLoading, state.asmrItemsHasMore, state.asmrQuery) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }

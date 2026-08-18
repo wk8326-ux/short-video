@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.3] - 2026-08-18
+
+### Added
+
+- Add rotating on-device runtime logs for uncaught exceptions, Media3 failures, playback-service lifecycle, and surface/navigation transitions, with management controls to view, clear, and export a redacted report.
+- Replace the Android launcher and themed icons with the supplied application artwork.
+
+### Fixed
+
+- Keep independent short- and long-video sessions, including their original sequence, active item, pagination cursor, play state, and resume position, so switching surfaces no longer starts a new shuffle or loses swipe-back history.
+- Reject stale feed responses and playback-end callbacks after a surface or playback-generation change, preventing an old short/long item from advancing while ASMR is open.
+- Remove the second feed-loading indicator near the progress control so buffering feedback appears only over the video.
+- Clamp restored ASMR list positions, remove duplicate lazy-list keys, reject stale author-media callbacks, and make player/session operations failure-safe to reduce navigation and playback crashes.
+
+### Changed
+
+- Persist the selected ASMR author, current audio/video item, play state, expanded state, queue position, and media progress across page and process changes.
+- Cache the complete ASMR author index on-device for 24 hours, allowing immediate full-author search without repeatedly loading the directory.
+
 ## [1.3.2] - 2026-08-18
 
 ### Fixed

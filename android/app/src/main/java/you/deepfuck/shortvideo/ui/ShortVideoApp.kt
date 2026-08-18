@@ -76,6 +76,7 @@ fun ShortVideoApp(
     onFullscreenChanged: (Boolean) -> Unit,
     onBackgroundPlaybackRequested: () -> Unit,
     onInstallAppUpdate: (String) -> Unit,
+    onExportLogs: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val player by viewModel.playback.snapshot.collectAsStateWithLifecycle()
@@ -134,6 +135,10 @@ fun ShortVideoApp(
                 onRefresh = viewModel::loadAdminStatus,
                 onScan = viewModel::startLibraryScan,
                 onFastStart = viewModel::startFastStartCheck,
+                onShowLogs = viewModel::showRuntimeLogs,
+                onDismissLogs = viewModel::dismissRuntimeLogs,
+                onClearLogs = viewModel::clearRuntimeLogs,
+                onExportLogs = onExportLogs,
             )
         } else {
             Box(Modifier.fillMaxSize()) {
@@ -145,6 +150,10 @@ fun ShortVideoApp(
                             exoPlayer = viewModel.playback.player,
                             muted = state.muted,
                             fullscreen = fullscreen,
+                            authorListPosition = viewModel.asmrAuthorListPosition(),
+                            mediaListPosition = state.selectedAuthor
+                                ?.let(viewModel::asmrMediaListPosition)
+                                ?: you.deepfuck.shortvideo.ListPosition(),
                             onAuthor = viewModel::selectAsmrAuthor,
                             onBackAuthor = viewModel::leaveAsmrAuthor,
                             onLoadMoreItems = viewModel::loadMoreAsmrItems,
@@ -169,6 +178,8 @@ fun ShortVideoApp(
                                 fullscreen = it
                                 onFullscreenChanged(it)
                             },
+                            onAuthorListPosition = viewModel::saveAsmrAuthorListPosition,
+                            onMediaListPosition = viewModel::saveAsmrMediaListPosition,
                         )
                     } else {
                         FeedScreen(

@@ -70,7 +70,24 @@ data class AsmrAuthor(
     val videoCount: Int,
     val audioCount: Int,
     val modified: String?,
-)
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("name", name)
+        .put("itemCount", itemCount)
+        .put("videoCount", videoCount)
+        .put("audioCount", audioCount)
+        .put("modified", modified)
+
+    companion object {
+        fun fromJson(value: JSONObject): AsmrAuthor = AsmrAuthor(
+            name = value.optString("name"),
+            itemCount = value.optInt("itemCount"),
+            videoCount = value.optInt("videoCount"),
+            audioCount = value.optInt("audioCount"),
+            modified = value.optNullableString("modified"),
+        )
+    }
+}
 
 data class AsmrPage<T>(
     val items: List<T>,

@@ -59,6 +59,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import you.deepfuck.shortvideo.AppUiState
+import you.deepfuck.shortvideo.shouldShowInitialFeedLoading
 import you.deepfuck.shortvideo.shouldAttachFeedPlayer
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.MediaEntry
@@ -86,7 +87,11 @@ internal fun FeedScreen(
     onLogout: () -> Unit,
 ) {
     if (state.feedItems.isEmpty()) {
-        FeedState(state.feedLoading, state.feedError, onRetry)
+        FeedState(
+            shouldShowInitialFeedLoading(state.feedItems.size, state.feedLoading),
+            state.feedError,
+            onRetry,
+        )
         return
     }
     val pagerState = rememberPagerState(
@@ -149,13 +154,6 @@ internal fun FeedScreen(
                     onLogout = onLogout,
                 )
             }
-        }
-        if (state.feedLoading && state.feedItems.isNotEmpty()) {
-            CircularProgressIndicator(
-                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(18.dp).size(20.dp),
-                color = TextSecondary,
-                strokeWidth = 2.dp,
-            )
         }
     }
 }

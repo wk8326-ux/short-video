@@ -11,15 +11,21 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -27,10 +33,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.unit.dp
 import java.time.Instant
 import java.time.ZoneId
@@ -44,6 +53,10 @@ internal fun ManagementScreen(
     onRefresh: () -> Unit,
     onScan: () -> Unit,
     onFastStart: () -> Unit,
+    onShowLogs: () -> Unit,
+    onDismissLogs: () -> Unit,
+    onClearLogs: () -> Unit,
+    onExportLogs: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().background(Canvas).safeDrawingPadding()) {
         Row(
@@ -145,6 +158,29 @@ internal fun ManagementScreen(
                         }
                         SectionDivider()
                     }
+                    item {
+                        SectionTitle("运行日志", Icons.Outlined.BugReport)
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "记录最近的闪退、播放错误和关键页面切换，仅保存在本机。",
+                            color = TextFaint,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            OutlinedButton(onClick = onShowLogs) {
+                                Icon(Icons.Outlined.BugReport, contentDescription = null)
+                                Spacer(Modifier.size(8.dp))
+                                Text("查看日志")
+                            }
+                            TextButton(onClick = onExportLogs) {
+                                Icon(Icons.Outlined.IosShare, contentDescription = null)
+                                Spacer(Modifier.size(6.dp))
+                                Text("导出")
+                            }
+                        }
+                        SectionDivider()
+                    }
                     state.adminError?.let { error ->
                         item {
                             Row(
@@ -161,6 +197,57 @@ internal fun ManagementScreen(
             }
         }
     }
+    if (state.showRuntimeLogs) {
+        RuntimeLogDialog(
+            text = state.runtimeLogText,
+            onDismiss = onDismissLogs,
+            onClear = onClearLogs,
+            onExport = onExportLogs,
+        )
+    }
+}
+
+@Composable
+private fun RuntimeLogDialog(
+    text: String,
+    onDismiss: () -> Unit,
+    onClear: () -> Unit,
+    onExport: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("运行日志", fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column {
+                SelectionContainer {
+                    Text(
+                        text.ifBlank { "暂无运行日志" },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(360.dp)
+                            .verticalScroll(rememberScrollState()),
+                        color = TextSecondary,
+                        fontFamily = FontFamily.Monospace,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                    )
+                }
+                TextButton(onClick = onClear) {
+                    Icon(Icons.Outlined.DeleteOutline, contentDescription = null)
+                    Spacer(Modifier.size(6.dp))
+                    Text("清空日志")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onExport) {
+                Icon(Icons.Outlined.IosShare, contentDescription = null)
+                Spacer(Modifier.size(6.dp))
+                Text("导出")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+        containerColor = Raised,
+    )
 }
 
 @Composable

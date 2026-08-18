@@ -29,10 +29,12 @@ import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.data.PlaybackPreferences
+import you.deepfuck.shortvideo.data.shouldRefreshAsmrAuthorIndex
 import you.deepfuck.shortvideo.media.PlaybackEngine
 import you.deepfuck.shortvideo.media.PlaybackEndedEvent
 import you.deepfuck.shortvideo.media.PlaybackEngineProvider
 import you.deepfuck.shortvideo.media.PlaybackService
+import you.deepfuck.shortvideo.logging.AppLogStore
 import you.deepfuck.shortvideo.update.isUpdateAvailable
 import you.deepfuck.shortvideo.update.sha256Matches
 
@@ -68,11 +70,14 @@ data class AppUiState(
     val adminLoading: Boolean = false,
     val adminError: String? = null,
     val appUpdate: AppUpdateUiState = AppUpdateUiState(),
+    val showRuntimeLogs: Boolean = false,
+    val runtimeLogText: String = "",
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = PlaybackPreferences(application)
     private val api = MediaApi(preferences)
+    private val logs = AppLogStore.get(application)
     val playback: PlaybackEngine = PlaybackEngineProvider.get(application)
     private val restoredMedia = playback.currentMedia()
 
@@ -87,6 +92,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             mode = preferences.mode,
             muted = preferences.muted,
             asmrVideoBackgroundPlayback = preferences.asmrVideoBackgroundPlayback,
+            selectedAuthor = preferences.selectedAsmrAuthor,
             nowPlaying = restoredMedia.takeIf {
                 shouldKeepPlayingInBackground(
                     preferences.surface,
@@ -100,9 +106,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var feedCursor: String? = null
     private var feedJob: Job? = null
+    private var feedRequestGeneration = 0L
+    private val feedSessions = FeedSessionRegistry()
     private var asmrAuthorsJob: Job? = null
     private var asmrAuthorsLoaded = false
+    private var asmrAuthorIndexRestored = false
     private val asmrItemJobs = mutableMapOf<String, Job>()
+    private val asmrItemGenerations = mutableMapOf<String, Long>()
     private var activeFeedItemId: Long? = null
     private val asmrItemsCache = mutableMapOf<String, List<MediaEntry>>()
     private val asmrItemsNextOffsets = mutableMapOf<String, Int?>()
@@ -174,11 +184,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun changeSurface(surface: MediaSurface) {
         val previousSurface = mutableState.value.surface
         if (surface == previousSurface) return
+        logs.info("surface_change", "from=$previousSurface to=$surface media=${playback.snapshot.value.mediaId}")
         saveCurrentPosition()
         if (previousSurface == MediaSurface.ASMR) {
-            val itemJobs = asmrItemJobs.values.toList()
+            persistAsmrPlaybackState()
+        } else {
+            persistCurrentFeedSession()
+        }
+        feedJob?.cancel()
+        feedJob = null
+        feedRequestGeneration += 1L
+        if (previousSurface == MediaSurface.ASMR) {
+            val itemJobs = asmrItemJobs.toList()
             asmrItemJobs.clear()
-            itemJobs.forEach { it.cancel() }
+            itemJobs.forEach { (author, job) ->
+                asmrItemGenerations[author] = (asmrItemGenerations[author] ?: 0L) + 1L
+                job.cancel()
+            }
         }
         preferences.surface = surface
         activeFeedItemId = null
@@ -187,6 +209,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pendingAudioAdvanceId = null
         mutableState.value = mutableState.value.copy(
             surface = surface,
+            feedItems = if (surface == MediaSurface.ASMR) emptyList() else mutableState.value.feedItems,
             activeIndex = 0,
             expandedMedia = null,
             nowPlaying = null,
@@ -197,11 +220,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         playback.stop()
         stopPlaybackService()
         if (surface == MediaSurface.ASMR) {
-            val author = mutableState.value.selectedAuthor
-            when {
-                author == null -> loadAsmrAuthors()
-                !asmrItemsCache.containsKey(author) -> loadAsmrItems(author, reset = true)
-            }
+            restoreAsmrSurface()
         } else {
             restoreFeed(surface)
         }
@@ -209,6 +228,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun changeMode(mode: FeedMode) {
         if (mode == mutableState.value.mode) return
+        saveCurrentPosition()
+        persistCurrentFeedSession()
         preferences.mode = mode
         activeFeedItemId = null
         mutableState.value = mutableState.value.copy(mode = mode, activeIndex = 0)
@@ -223,6 +244,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlayback() {
         playback.togglePlayback()
+        if (mutableState.value.surface == MediaSurface.ASMR) {
+            persistAsmrPlaybackState()
+        } else {
+            persistCurrentFeedSession()
+        }
         if (playback.player.playWhenReady && keepCurrentAsmrPlaybackInBackground()) {
             startPlaybackService()
         }
@@ -234,22 +260,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (feedCursor != null && !mutableState.value.feedLoading) requestFeed(reset = false)
     }
 
-    fun activateFeedItem(index: Int) {
+    fun activateFeedItem(index: Int) = activateFeedItem(index, autoPlay = true)
+
+    private fun activateFeedItem(index: Int, autoPlay: Boolean) {
         val state = mutableState.value
         if (!shouldActivateFeedItem(state.surface)) return
         val entry = state.feedItems.getOrNull(index) ?: return
-        if (activeFeedItemId == entry.id) return
+        if (activeFeedItemId == entry.id) {
+            if (autoPlay && !playback.player.playWhenReady) playback.player.play()
+            return
+        }
         saveCurrentPosition()
         activeFeedItemId = entry.id
         preferences.setLastVideo(state.surface, entry.id)
+        logs.info("feed_activate", "surface=${state.surface} index=$index media=${entry.id} autoPlay=$autoPlay")
         mutableState.value = state.copy(activeIndex = index, nowPlaying = entry)
-        playback.play(entry, preferences.position(entry.id))
+        if (!playback.play(entry, preferences.position(entry.id), autoPlay = autoPlay)) {
+            mutableState.value = mutableState.value.copy(feedError = "无法准备该视频")
+            return
+        }
         playback.prefetch(state.surface, feedPrefetchCandidates(state.feedItems, index))
+        persistCurrentFeedSession(playWhenReady = autoPlay)
         if (index >= state.feedItems.lastIndex - 4) loadMoreFeed()
     }
 
     fun selectAsmrAuthor(author: String) {
+        logs.info("asmr_author_open", "authorHash=${author.hashCode()}")
         asmrAuthorsJob?.cancel()
+        preferences.selectedAsmrAuthor = author
         val cached = asmrItemsCache[author].orEmpty()
         val cachedKnown = asmrItemsCache.containsKey(author)
         val nextOffset = if (cachedKnown) asmrItemsNextOffsets[author] else 0
@@ -268,6 +306,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun leaveAsmrAuthor() {
         val author = mutableState.value.selectedAuthor
+        logs.info("asmr_author_close", "authorHash=${author?.hashCode()}")
+        preferences.selectedAsmrAuthor = null
         if (audioQueueAuthor != author) author?.let { asmrItemJobs.remove(it)?.cancel() }
         mutableState.value = mutableState.value.copy(
             selectedAuthor = null,
@@ -295,6 +335,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun playAsmr(entry: MediaEntry) {
         if (mutableState.value.surface != MediaSurface.ASMR) return
+        logs.info("asmr_play", "media=${entry.id} kind=${if (entry.isAudio) "audio" else "video"}")
         if (entry.isAudio) {
             audioQueueAuthor = entry.author
             audioQueue = mutableState.value.asmrItems.filter {
@@ -317,27 +358,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             nowPlaying = entry,
             expandedMedia = entry.takeUnless(MediaEntry::isAudio),
         )
-        playback.play(entry, preferences.position(entry.id))
+        if (!playback.play(entry, preferences.position(entry.id))) {
+            preferences.saveAsmrPlaybackState(null)
+            mutableState.value = mutableState.value.copy(
+                asmrError = "无法准备该媒体",
+                nowPlaying = null,
+                expandedMedia = null,
+            )
+            return
+        }
         playback.prefetch(MediaSurface.ASMR, listOf(entry))
+        persistAsmrPlaybackState()
         if (backgroundPlaybackEnabled(entry)) startPlaybackService() else stopPlaybackService()
     }
 
     fun setAsmrVideoBackgroundPlayback(enabled: Boolean) {
+        if (mutableState.value.asmrVideoBackgroundPlayback == enabled) return
+        logs.info("asmr_video_background", "enabled=$enabled media=${mutableState.value.nowPlaying?.id}")
         preferences.asmrVideoBackgroundPlayback = enabled
         mutableState.value = mutableState.value.copy(asmrVideoBackgroundPlayback = enabled)
         val current = mutableState.value.nowPlaying ?: return
         if (current.isAudio) return
-        if (enabled && playback.player.playWhenReady) startPlaybackService()
+        if (enabled && playback.player.playWhenReady) startPlaybackService() else stopPlaybackService()
+        persistAsmrPlaybackState()
     }
 
     fun expandNowPlaying() {
         mutableState.value.nowPlaying?.takeUnless(MediaEntry::isAudio)?.let {
             mutableState.value = mutableState.value.copy(expandedMedia = it)
+            persistAsmrPlaybackState()
         }
     }
 
     fun collapsePlayer() {
         mutableState.value = mutableState.value.copy(expandedMedia = null)
+        persistAsmrPlaybackState()
     }
 
     fun closeAsmrPlayer() {
@@ -347,20 +402,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         audioQueueAuthor = null
         audioQueue = emptyList()
         pendingAudioAdvanceId = null
+        preferences.saveAsmrPlaybackState(null)
         mutableState.value = mutableState.value.copy(expandedMedia = null, nowPlaying = null)
     }
 
     fun showManagement() {
+        logs.info("management_open", "surface=${mutableState.value.surface} media=${mutableState.value.nowPlaying?.id}")
         if (!keepCurrentAsmrPlaybackInBackground()) {
             playback.pause()
             stopPlaybackService()
         }
-        mutableState.value = mutableState.value.copy(showManagement = true)
+        mutableState.value = mutableState.value.copy(
+            showManagement = true,
+            runtimeLogText = logs.readText(),
+        )
         loadAdminStatus()
     }
 
     fun hideManagement() {
+        logs.info("management_close", "surface=${mutableState.value.surface}")
         mutableState.value = mutableState.value.copy(showManagement = false)
+    }
+
+    fun showRuntimeLogs() {
+        mutableState.value = mutableState.value.copy(
+            showRuntimeLogs = true,
+            runtimeLogText = logs.readText(),
+        )
+    }
+
+    fun dismissRuntimeLogs() {
+        mutableState.value = mutableState.value.copy(showRuntimeLogs = false)
+    }
+
+    fun clearRuntimeLogs() {
+        logs.clear()
+        logs.info("logs_cleared")
+        mutableState.value = mutableState.value.copy(runtimeLogText = logs.readText())
     }
 
     fun loadAdminStatus() {
@@ -519,6 +597,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    internal fun asmrAuthorListPosition(): ListPosition = preferences.asmrAuthorListPosition()
+
+    internal fun asmrMediaListPosition(author: String): ListPosition =
+        preferences.asmrMediaListPosition(author)
+
+    internal fun saveAsmrAuthorListPosition(position: ListPosition) {
+        preferences.saveAsmrAuthorListPosition(position)
+    }
+
+    internal fun saveAsmrMediaListPosition(author: String, position: ListPosition) {
+        preferences.saveAsmrMediaListPosition(author, position)
+    }
+
+    private fun persistCurrentFeedSession(
+        playWhenReady: Boolean = playback.snapshot.value.playWhenReady,
+    ) {
+        val state = mutableState.value
+        if (state.surface == MediaSurface.ASMR || state.feedItems.isEmpty()) return
+        val activeId = state.feedItems.getOrNull(state.activeIndex)?.id ?: state.nowPlaying?.id
+        val session = FeedSessionState(
+            items = state.feedItems,
+            activeMediaId = activeId,
+            nextCursor = feedCursor,
+            total = state.feedTotal,
+            playWhenReady = playWhenReady,
+        )
+        feedSessions.save(state.surface, state.mode, session)
+        preferences.saveFeedSession(state.surface, state.mode, session)
+    }
+
+    private fun persistAsmrPlaybackState() {
+        val state = mutableState.value
+        val entry = state.nowPlaying ?: return
+        preferences.saveAsmrPlaybackState(
+            AsmrPlaybackState(
+                entry = entry,
+                playWhenReady = playback.snapshot.value.playWhenReady,
+                expanded = state.expandedMedia?.id == entry.id,
+            ),
+        )
+    }
+
     fun onAppBackgrounded() {
         if (!keepCurrentAsmrPlaybackInBackground()) {
             playback.pause()
@@ -527,24 +647,78 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun restoreCurrentSurface() {
-        if (mutableState.value.surface == MediaSurface.ASMR) loadAsmrAuthors()
+        if (mutableState.value.surface == MediaSurface.ASMR) restoreAsmrSurface()
         else restoreFeed(mutableState.value.surface)
+    }
+
+    private fun restoreAsmrSurface() {
+        loadAsmrAuthors()
+        val author = mutableState.value.selectedAuthor
+        if (author != null) {
+            val cached = asmrItemsCache[author].orEmpty()
+            mutableState.value = mutableState.value.copy(
+                asmrItems = cached,
+                asmrTotal = asmrItemsTotals[author] ?: cached.size,
+                asmrItemsHasMore = asmrItemsNextOffsets[author] != null,
+            )
+            if (!asmrItemsCache.containsKey(author)) loadAsmrItems(author, reset = true)
+        }
+        val resume = preferences.asmrPlaybackState() ?: return
+        if (resume.entry.isAudio) {
+            val resumeAuthor = resume.entry.author
+            audioQueueAuthor = resumeAuthor
+            audioQueue = resumeAuthor?.let { authorName ->
+                asmrItemsCache[authorName].orEmpty().filter(MediaEntry::isAudio)
+            }.orEmpty()
+            if (resumeAuthor != null && !asmrItemsCache.containsKey(resumeAuthor)) {
+                loadAsmrItems(resumeAuthor, reset = true)
+            }
+        } else {
+            audioQueueAuthor = null
+            audioQueue = emptyList()
+        }
+        mutableState.value = mutableState.value.copy(
+            nowPlaying = resume.entry,
+            expandedMedia = resume.entry.takeIf { !it.isAudio && resume.expanded },
+        )
+        val restored = playback.play(
+            resume.entry,
+            preferences.position(resume.entry.id),
+            autoPlay = resume.playWhenReady,
+        )
+        if (!restored) {
+            preferences.saveAsmrPlaybackState(null)
+            mutableState.value = mutableState.value.copy(
+                asmrError = "无法恢复上次播放",
+                nowPlaying = null,
+                expandedMedia = null,
+            )
+            return
+        }
+        if (resume.playWhenReady && backgroundPlaybackEnabled(resume.entry)) startPlaybackService()
     }
 
     private fun restoreFeed(surface: MediaSurface) {
         feedJob?.cancel()
-        feedCursor = null
-        val cached = preferences.cachedFeed(surface, mutableState.value.mode)
-        val lastId = preferences.lastVideoId(surface)
-        val ordered = if (lastId == null) cached else cached.sortedBy { if (it.id == lastId) 0 else 1 }
+        feedRequestGeneration += 1L
+        val mode = mutableState.value.mode
+        val session = feedSessions.restore(surface, mode)
+            ?: preferences.feedSession(surface, mode)?.also { feedSessions.save(surface, mode, it) }
+        val items = session?.items.orEmpty()
+        val activeIndex = session?.activeIndex()?.coerceIn(0, items.lastIndex.coerceAtLeast(0)) ?: 0
+        feedCursor = session?.nextCursor
         mutableState.value = mutableState.value.copy(
-            feedItems = ordered,
-            activeIndex = 0,
-            feedLoading = ordered.isEmpty(),
+            feedItems = items,
+            activeIndex = activeIndex,
+            feedTotal = session?.total ?: 0,
+            feedLoading = items.isEmpty(),
             feedError = null,
         )
-        if (ordered.isNotEmpty()) activateFeedItem(0)
-        requestFeed(reset = true)
+        if (items.isNotEmpty()) {
+            activateFeedItem(activeIndex, autoPlay = session?.playWhenReady ?: true)
+        } else {
+            requestFeed(reset = true)
+        }
     }
 
     private fun requestFeed(reset: Boolean) {
@@ -552,6 +726,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (requestedSurface == MediaSurface.ASMR) return
         val requestedMode = mutableState.value.mode
         if (reset) feedJob?.cancel() else if (mutableState.value.feedLoading) return
+        val requestGeneration = ++feedRequestGeneration
         mutableState.value = mutableState.value.copy(feedLoading = true, feedError = null)
         feedJob = viewModelScope.launch {
             val cursor = if (reset) null else feedCursor
@@ -563,7 +738,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val start = if (reset) preferences.lastVideoId(requestedSurface) else null
             runApi { api.feed(requestedSurface, requestedMode, cursor, recent, start) }
                 .onSuccess { page ->
-                    if (mutableState.value.surface != requestedSurface || mutableState.value.mode != requestedMode) return@onSuccess
+                    if (
+                        !shouldApplyFeedResponse(
+                            requestGeneration = requestGeneration,
+                            currentGeneration = feedRequestGeneration,
+                            requestedSurface = requestedSurface,
+                            currentSurface = mutableState.value.surface,
+                            requestedMode = requestedMode,
+                            currentMode = mutableState.value.mode,
+                        )
+                    ) return@onSuccess
                     feedCursor = page.nextCursor
                     val current = mutableState.value.feedItems
                     val merged = if (reset) {
@@ -577,12 +761,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         feedTotal = page.total,
                         feedLoading = false,
                     )
-                    if (reset && page.items.isNotEmpty()) {
-                        preferences.saveFeed(requestedSurface, requestedMode, page.items)
+                    if (page.items.isNotEmpty()) {
                         val activeId = activeFeedItemId
-                        val index = page.items.indexOfFirst { it.id == activeId }.takeIf { it >= 0 } ?: 0
+                        val index = merged.indexOfFirst { it.id == activeId }.takeIf { it >= 0 }
+                            ?: mutableState.value.activeIndex.coerceIn(0, merged.lastIndex)
                         mutableState.value = mutableState.value.copy(activeIndex = index)
-                        activateFeedItem(index)
+                        if (reset || activeFeedItemId == null) activateFeedItem(index)
+                        persistCurrentFeedSession()
                     } else if (merged.isNotEmpty() && activeFeedItemId == null) {
                         activateFeedItem(0)
                     }
@@ -592,6 +777,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
+                    if (
+                        !shouldApplyFeedResponse(
+                            requestGeneration = requestGeneration,
+                            currentGeneration = feedRequestGeneration,
+                            requestedSurface = requestedSurface,
+                            currentSurface = mutableState.value.surface,
+                            requestedMode = requestedMode,
+                            currentMode = mutableState.value.mode,
+                        )
+                    ) return@onFailure
                     if (!handleUnauthorized(error)) {
                         mutableState.value = mutableState.value.copy(
                             feedLoading = false,
@@ -603,14 +798,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadAsmrAuthors() {
+        if (!asmrAuthorIndexRestored) {
+            asmrAuthorIndexRestored = true
+            preferences.asmrAuthorIndex()?.let { cached ->
+                mutableState.value = mutableState.value.copy(
+                    asmrAuthors = cached.items,
+                    asmrAuthorsTotal = cached.total,
+                    asmrLoading = false,
+                    asmrError = null,
+                )
+                if (!shouldRefreshAsmrAuthorIndex(cached)) {
+                    asmrAuthorsLoaded = true
+                    return
+                }
+            }
+        }
         if (asmrAuthorsLoaded || asmrAuthorsJob?.isActive == true) return
-        mutableState.value = mutableState.value.copy(asmrLoading = true, asmrError = null)
+        mutableState.value = mutableState.value.copy(
+            asmrLoading = mutableState.value.asmrAuthors.isEmpty(),
+            asmrError = null,
+        )
         asmrAuthorsJob = viewModelScope.launch {
             val page = runApi { api.asmrAuthors() }.getOrElse {
-                handleAsmrError(it, "无法载入 ASMR 目录")
+                if (mutableState.value.asmrAuthors.isEmpty()) {
+                    handleAsmrError(it, "无法载入 ASMR 目录")
+                } else {
+                    logs.error("asmr_authors_refresh_failed", error = it)
+                    mutableState.value = mutableState.value.copy(asmrLoading = false)
+                }
                 return@launch
             }
             asmrAuthorsLoaded = true
+            preferences.saveAsmrAuthorIndex(page.items, page.total)
             mutableState.value = mutableState.value.copy(
                 asmrAuthors = page.items,
                 asmrAuthorsTotal = page.total,
@@ -621,6 +840,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadAsmrItems(author: String, reset: Boolean) {
+        val generation = if (reset) {
+            (asmrItemGenerations[author] ?: 0L) + 1L
+        } else {
+            asmrItemGenerations[author] ?: 1L
+        }
+        asmrItemGenerations[author] = generation
         if (reset) {
             asmrItemJobs.remove(author)?.cancel()
             asmrItemsNextOffsets[author] = 0
@@ -639,12 +864,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 return@launch
             }
+            if (asmrItemGenerations[author] != generation) return@launch
             val ids = existing.mapTo(mutableSetOf()) { it.id }
             val merged = existing + page.items.filter { ids.add(it.id) }
             asmrItemsCache[author] = merged
             asmrItemsNextOffsets[author] = page.nextOffset
             asmrItemsTotals[author] = page.total
-            if (mutableState.value.selectedAuthor == author) {
+            if (
+                mutableState.value.surface == MediaSurface.ASMR &&
+                mutableState.value.selectedAuthor == author
+            ) {
                 mutableState.value = mutableState.value.copy(
                     asmrItems = merged,
                     asmrTotal = page.total,
@@ -706,6 +935,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun handleAsmrError(error: Throwable, message: String) {
+        logs.error("asmr_error", "message=$message authorHash=${mutableState.value.selectedAuthor?.hashCode()}", error)
         if (!handleUnauthorized(error)) {
             mutableState.value = mutableState.value.copy(asmrLoading = false, asmrError = message)
         }
@@ -794,6 +1024,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }.onSuccess {
             playbackServiceRunning = true
+            logs.info("playback_service_start", "media=${playback.snapshot.value.mediaId}")
+        }.onFailure { error ->
+            logs.error("playback_service_start_failed", error = error)
         }
     }
 
@@ -803,6 +1036,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             getApplication<Application>().stopService(
                 Intent(getApplication(), PlaybackService::class.java),
             )
+        }.onSuccess {
+            logs.info("playback_service_stop", "media=${playback.snapshot.value.mediaId}")
+        }.onFailure { error ->
+            logs.error("playback_service_stop_failed", error = error)
         }
     }
 

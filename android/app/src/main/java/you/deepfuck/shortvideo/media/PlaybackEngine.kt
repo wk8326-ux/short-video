@@ -34,6 +34,7 @@ import kotlinx.coroutines.launch
 import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
+import you.deepfuck.shortvideo.logging.AppLogStore
 
 data class PlayerSnapshot(
     val mediaId: Long? = null,
@@ -76,6 +77,7 @@ internal class PlaybackIdentity {
 
 class PlaybackEngine(context: Context, private val api: MediaApi) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val logs = AppLogStore.get(context)
     private val cache = MediaCacheStore.get(context)
     private val cacheKeyFactory = StableCacheKeyFactory()
     private var currentEntry: MediaEntry? = null
@@ -125,44 +127,66 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = publish()
 
                 override fun onPlayerError(error: PlaybackException) {
+                    logs.error(
+                        "player_error",
+                        "media=${currentEntry?.id} code=${error.errorCodeName}",
+                        error,
+                    )
                     publish(error.errorCodeName)
                 }
             },
         )
     }
 
-    fun play(entry: MediaEntry, resumePositionMs: Long, autoPlay: Boolean = true) {
+    fun play(entry: MediaEntry, resumePositionMs: Long, autoPlay: Boolean = true): Boolean {
         if (currentEntry?.id == entry.id) {
-            if (autoPlay) player.play()
-            return
+            return runCatching {
+                if (autoPlay) player.play() else player.pause()
+                publish()
+            }.onFailure {
+                logs.error("player_resume_failed", "media=${entry.id}", it)
+            }.isSuccess
         }
-        playbackIdentity.activate(entry.id)
-        currentEntry = entry
-        val media = MediaItem.Builder()
-            .setMediaId(entry.id.toString())
-            .setUri(api.absoluteUrl(entry.playUrl))
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(entry.title)
-                    .setArtist(entry.author)
-                    .build(),
+        return runCatching {
+            playbackIdentity.activate(entry.id)
+            currentEntry = entry
+            val media = MediaItem.Builder()
+                .setMediaId(entry.id.toString())
+                .setUri(api.absoluteUrl(entry.playUrl))
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle(entry.title)
+                        .setArtist(entry.author)
+                        .build(),
+                )
+                .setMimeType(
+                    when {
+                        entry.isHls -> MimeTypes.APPLICATION_M3U8
+                        entry.isAudio -> MimeTypes.AUDIO_MPEG
+                        else -> null
+                    },
+                )
+                .build()
+            player.setMediaItem(media, resumePositionMs.coerceAtLeast(0L))
+            player.prepare()
+            player.playWhenReady = autoPlay
+            publish()
+            logs.info(
+                "player_prepare",
+                "media=${entry.id} kind=${if (entry.isAudio) "audio" else "video"} resumeMs=$resumePositionMs autoPlay=$autoPlay",
             )
-            .setMimeType(
-                when {
-                    entry.isHls -> MimeTypes.APPLICATION_M3U8
-                    entry.isAudio -> MimeTypes.AUDIO_MPEG
-                    else -> null
-                },
-            )
-            .build()
-        player.setMediaItem(media, resumePositionMs.coerceAtLeast(0L))
-        player.prepare()
-        player.playWhenReady = autoPlay
-        publish()
+        }.onFailure { error ->
+            currentEntry = null
+            playbackIdentity.invalidateThen { runCatching { player.clearMediaItems() } }
+            publish(error.javaClass.simpleName)
+            logs.error("player_prepare_failed", "media=${entry.id}", error)
+        }.isSuccess
     }
 
     fun togglePlayback() {
-        if (player.playWhenReady) player.pause() else player.play()
+        runCatching {
+            if (player.playWhenReady) player.pause() else player.play()
+        }.onFailure { logs.error("player_toggle_failed", "media=${currentEntry?.id}", it) }
     }
 
     fun restart() {
@@ -188,8 +212,10 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun seekTo(positionMs: Long) {
         val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L }
-        player.seekTo(positionMs.coerceIn(0L, duration ?: Long.MAX_VALUE))
-        publish()
+        runCatching {
+            player.seekTo(positionMs.coerceIn(0L, duration ?: Long.MAX_VALUE))
+            publish()
+        }.onFailure { logs.error("player_seek_failed", "media=${currentEntry?.id}", it) }
     }
 
     fun seekBy(deltaMs: Long) {

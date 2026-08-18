@@ -21,6 +21,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import you.deepfuck.shortvideo.ui.ShortVideoApp
 import you.deepfuck.shortvideo.ui.ShortVideoTheme
+import you.deepfuck.shortvideo.logging.AppLogStore
 
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
@@ -50,6 +51,7 @@ class MainActivity : ComponentActivity() {
                     onFullscreenChanged = ::setPlayerFullscreen,
                     onBackgroundPlaybackRequested = ::requestMediaNotificationPermission,
                     onInstallAppUpdate = ::installAppUpdate,
+                    onExportLogs = ::exportRuntimeLogs,
                 )
             }
         }
@@ -126,5 +128,21 @@ class MainActivity : ComponentActivity() {
             .onFailure {
                 viewModel.reportAppUpdateInstallError("无法打开系统安装器")
             }
+    }
+
+    private fun exportRuntimeLogs() {
+        val file = AppLogStore.get(this).exportFile()
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            clipData = ClipData.newRawUri("运行日志", uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching {
+            startActivity(Intent.createChooser(shareIntent, "导出运行日志"))
+        }.onFailure { error ->
+            AppLogStore.get(this).error("log_export_failed", error = error)
+        }
     }
 }

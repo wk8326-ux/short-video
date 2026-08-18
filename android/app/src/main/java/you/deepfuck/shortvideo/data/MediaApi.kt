@@ -114,15 +114,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             if (items == null) return@buildList
             for (index in 0 until items.length()) {
                 val item = items.optJSONObject(index) ?: continue
-                add(
-                    AsmrAuthor(
-                        name = item.optString("name"),
-                        itemCount = item.optInt("itemCount"),
-                        videoCount = item.optInt("videoCount"),
-                        audioCount = item.optInt("audioCount"),
-                        modified = item.optNullableString("modified"),
-                    ),
-                )
+                add(AsmrAuthor.fromJson(item))
             }
         }
         return AsmrPage(parsed, payload.optInt("total", parsed.size), payload.optIntOrNull("nextOffset"))
