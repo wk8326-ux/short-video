@@ -114,6 +114,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val state: StateFlow<AppUiState> = mutableState.asStateFlow()
 
     private var feedCursor: String? = null
+    private var feedExcludedIds: List<Long> = emptyList()
+    private var feedStartId: Long? = null
     private var feedJob: Job? = null
     private var feedTotalJob: Job? = null
     private var feedRequestGeneration = 0L
@@ -270,7 +272,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun retryFeed() = requestFeed(reset = true)
 
     fun loadMoreFeed() {
-        if (feedCursor != null && !mutableState.value.feedLoading) requestFeed(reset = false)
+        val state = mutableState.value
+        if (shouldRequestMoreFeed(feedCursor, state.feedItems.size, state.feedTotal, state.feedLoading)) {
+            requestFeed(reset = false)
+        }
     }
 
     fun activateFeedItem(index: Int) = activateFeedItem(index, autoPlay = true)
@@ -765,6 +770,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             nextCursor = feedCursor,
             total = state.feedTotal,
             playWhenReady = playWhenReady,
+            excludedIds = feedExcludedIds,
+            startId = feedStartId,
         )
         feedSessions.save(state.surface, state.mode, session)
         preferences.saveFeedSession(state.surface, state.mode, session)
@@ -851,6 +858,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val items = session?.items.orEmpty()
         val activeIndex = session?.activeIndex()?.coerceIn(0, items.lastIndex.coerceAtLeast(0)) ?: 0
         feedCursor = session?.nextCursor
+        feedExcludedIds = session?.excludedIds.orEmpty()
+        feedStartId = session?.startId
         mutableState.value = mutableState.value.copy(
             feedItems = items,
             activeIndex = activeIndex,
@@ -871,17 +880,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (requestedSurface == MediaSurface.ASMR) return
         val requestedMode = mutableState.value.mode
         if (reset) feedJob?.cancel() else if (mutableState.value.feedLoading) return
+        val currentItems = mutableState.value.feedItems
+        if (reset) {
+            feedExcludedIds = if (requestedMode == FeedMode.SHUFFLE) preferences.recentVideoIds() else emptyList()
+            feedStartId = preferences.lastVideoId(requestedSurface)
+        } else if (feedCursor == null) {
+            feedExcludedIds = if (requestedMode == FeedMode.SHUFFLE) {
+                (currentItems.map(MediaEntry::id) + preferences.recentVideoIds()).distinct().take(100)
+            } else {
+                emptyList()
+            }
+            feedStartId = null
+        }
+        val requestedExcludedIds = feedExcludedIds
+        val requestedStartId = feedStartId
         val requestGeneration = ++feedRequestGeneration
         mutableState.value = mutableState.value.copy(feedLoading = true, feedError = null)
         feedJob = viewModelScope.launch {
             val cursor = if (reset) null else feedCursor
-            val recent = if (reset && requestedMode == FeedMode.SHUFFLE) {
-                preferences.recentVideoIds()
-            } else {
-                emptyList()
+            runApi {
+                api.feed(requestedSurface, requestedMode, cursor, requestedExcludedIds, requestedStartId)
             }
-            val start = if (reset) preferences.lastVideoId(requestedSurface) else null
-            runApi { api.feed(requestedSurface, requestedMode, cursor, recent, start) }
                 .onSuccess { page ->
                     if (
                         !shouldApplyFeedResponse(
@@ -959,6 +978,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         mutableState.value = state.copy(feedTotal = total)
                         persistCurrentFeedSession()
                     }
+                    if (feedCursor == null && state.feedItems.size < total) loadMoreFeed()
                 }
                 .onFailure { error ->
                     logs.error("feed_total_refresh_failed", "surface=$surface", error)

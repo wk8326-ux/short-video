@@ -13,6 +13,8 @@ internal data class FeedSessionState(
     val nextCursor: String? = null,
     val total: Int = items.size,
     val playWhenReady: Boolean = true,
+    val excludedIds: List<Long> = emptyList(),
+    val startId: Long? = null,
 ) {
     fun activeIndex(): Int = items.indexOfFirst { it.id == activeMediaId }
         .takeIf { it >= 0 }
@@ -134,6 +136,13 @@ internal fun filterAsmrEntries(
 
 internal fun reconcileFeedTotal(remoteTotal: Int, currentTotal: Int, loadedCount: Int): Int =
     maxOf(remoteTotal, currentTotal, loadedCount)
+
+internal fun shouldRequestMoreFeed(
+    nextCursor: String?,
+    loadedCount: Int,
+    total: Int,
+    loading: Boolean,
+): Boolean = !loading && (nextCursor != null || loadedCount < total)
 
 internal fun shouldHandlePlaybackEnded(
     event: PlaybackEndedEvent,

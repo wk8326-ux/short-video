@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.6] - 2026-08-19
+
+### Fixed
+
+- Recover pagination for legacy 18-item shuffle sessions whose cached cursor is missing while the authoritative library total still has unseen videos.
+- Persist the shuffle exclusion set and resume item across process restarts so every page continues the same randomized sequence instead of silently resetting it.
+
 ## [1.3.5] - 2026-08-19
 
 ### Added

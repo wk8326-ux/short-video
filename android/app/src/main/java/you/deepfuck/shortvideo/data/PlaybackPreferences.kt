@@ -108,6 +108,12 @@ class PlaybackPreferences(context: Context) {
                 itemsJson.optJSONObject(index)?.let { add(MediaEntry.fromJson(it)) }
             }
         }
+        val excludedJson = payload.optJSONArray("excludedIds")
+        val excludedIds = buildList {
+            if (excludedJson != null) for (index in 0 until excludedJson.length()) {
+                excludedJson.optLong(index).takeIf { it > 0L }?.let(::add)
+            }
+        }
         FeedSessionState(
             items = items,
             activeMediaId = payload.optLong("activeMediaId", -1L).takeIf { it > 0L }
@@ -115,6 +121,8 @@ class PlaybackPreferences(context: Context) {
             nextCursor = payload.optNullableString("nextCursor"),
             total = payload.optInt("total", items.size),
             playWhenReady = payload.optBoolean("playWhenReady", true),
+            excludedIds = excludedIds,
+            startId = payload.optLong("startId", -1L).takeIf { it > 0L },
         )
     }.getOrNull()
 
@@ -127,6 +135,8 @@ class PlaybackPreferences(context: Context) {
             .put("nextCursor", stored.nextCursor)
             .put("total", stored.total)
             .put("playWhenReady", stored.playWhenReady)
+            .put("excludedIds", JSONArray(stored.excludedIds))
+            .put("startId", stored.startId)
         preferences.edit().putString(feedKey(surface, mode), payload.toString()).apply()
     }
 

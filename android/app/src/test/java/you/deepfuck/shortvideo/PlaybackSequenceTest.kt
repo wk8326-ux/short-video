@@ -60,6 +60,14 @@ class PlaybackSequenceTest {
     }
 
     @Test
+    fun `stale random session without a cursor still requests the remaining library`() {
+        assertTrue(shouldRequestMoreFeed(nextCursor = null, loadedCount = 18, total = 762, loading = false))
+        assertTrue(shouldRequestMoreFeed(nextCursor = "next", loadedCount = 18, total = 18, loading = false))
+        assertFalse(shouldRequestMoreFeed(nextCursor = null, loadedCount = 18, total = 18, loading = false))
+        assertFalse(shouldRequestMoreFeed(nextCursor = null, loadedCount = 18, total = 762, loading = true))
+    }
+
+    @Test
     fun feedAdvancesAndWrapsAtTheEnd() {
         assertEquals(1, nextFeedIndex(currentIndex = 0, itemCount = 3))
         assertEquals(0, nextFeedIndex(currentIndex = 2, itemCount = 3))
@@ -171,11 +179,15 @@ class PlaybackSequenceTest {
             nextCursor = "cursor-2",
             total = 20,
             playWhenReady = true,
+            excludedIds = listOf(9L, 10L),
+            startId = 3L,
         )
 
         assertEquals(items, session.items)
         assertEquals(2, session.activeIndex())
         assertEquals("cursor-2", session.nextCursor)
+        assertEquals(listOf(9L, 10L), session.excludedIds)
+        assertEquals(3L, session.startId)
     }
 
     @Test
