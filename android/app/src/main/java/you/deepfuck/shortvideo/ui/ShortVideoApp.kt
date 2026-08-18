@@ -31,6 +31,7 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Shuffle
+import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -66,6 +67,7 @@ import you.deepfuck.shortvideo.AppUiState
 import you.deepfuck.shortvideo.AuthenticationState
 import you.deepfuck.shortvideo.MainViewModel
 import you.deepfuck.shortvideo.data.FeedMode
+import you.deepfuck.shortvideo.data.AppUpdatePhase
 import you.deepfuck.shortvideo.data.MediaSurface
 
 @Composable
@@ -73,6 +75,7 @@ fun ShortVideoApp(
     viewModel: MainViewModel,
     onFullscreenChanged: (Boolean) -> Unit,
     onBackgroundPlaybackRequested: () -> Unit,
+    onInstallAppUpdate: (String) -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val player by viewModel.playback.snapshot.collectAsStateWithLifecycle()
@@ -83,11 +86,17 @@ fun ShortVideoApp(
         state.surface,
         state.showManagement,
         state.expandedMedia?.id,
+        state.appUpdate.phase,
     ) {
         val fullscreenContentClosed = state.surface == MediaSurface.ASMR && state.expandedMedia == null
         if (
             fullscreen &&
-            (state.authentication != AuthenticationState.SIGNED_IN || state.showManagement || fullscreenContentClosed)
+            (
+                state.authentication != AuthenticationState.SIGNED_IN ||
+                    state.showManagement ||
+                    fullscreenContentClosed ||
+                    state.appUpdate.phase != AppUpdatePhase.IDLE
+            )
         ) {
             fullscreen = false
             onFullscreenChanged(false)
@@ -177,6 +186,7 @@ fun ShortVideoApp(
                                 onFullscreenChanged(it)
                             },
                             onManage = viewModel::showManagement,
+                            onCheckUpdate = viewModel::checkForAppUpdate,
                             onLogout = viewModel::logout,
                         )
                     }
@@ -188,6 +198,7 @@ fun ShortVideoApp(
                         onSurface = viewModel::changeSurface,
                         onMode = viewModel::changeMode,
                         onManage = viewModel::showManagement,
+                        onCheckUpdate = viewModel::checkForAppUpdate,
                         onLogout = viewModel::logout,
                         modifier = Modifier
                             .align(Alignment.TopCenter)
@@ -197,6 +208,15 @@ fun ShortVideoApp(
                 }
             }
         }
+    }
+    if (state.authentication == AuthenticationState.SIGNED_IN) {
+        AppUpdateDialog(
+            state = state.appUpdate,
+            onDismiss = viewModel::dismissAppUpdate,
+            onCheck = viewModel::checkForAppUpdate,
+            onDownload = viewModel::downloadAppUpdate,
+            onInstall = onInstallAppUpdate,
+        )
     }
 }
 
@@ -282,6 +302,7 @@ internal fun AppNavigation(
     onSurface: (MediaSurface) -> Unit,
     onMode: (FeedMode) -> Unit,
     onManage: () -> Unit,
+    onCheckUpdate: () -> Unit,
     onLogout: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -366,6 +387,11 @@ internal fun AppNavigation(
                     text = { Text("管理") },
                     leadingIcon = { Icon(Icons.Outlined.AdminPanelSettings, contentDescription = null) },
                     onClick = { menuOpen = false; onManage() },
+                )
+                DropdownMenuItem(
+                    text = { Text("检查更新") },
+                    leadingIcon = { Icon(Icons.Outlined.SystemUpdate, contentDescription = null) },
+                    onClick = { menuOpen = false; onCheckUpdate() },
                 )
                 DropdownMenuItem(
                     text = { Text("退出登录") },

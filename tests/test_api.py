@@ -1,4 +1,6 @@
+import hashlib
 import importlib
+import json
 
 from fastapi.testclient import TestClient
 
@@ -97,6 +99,46 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
             follow_redirects=False,
         )
 
+        update_without_auth = client.get("/api/app/update")
+        missing_update = client.get("/api/app/update", headers=headers)
+        update_directory = tmp_path / "app-update"
+        update_directory.mkdir()
+        (update_directory / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "versionCode": 130,
+                    "versionName": "1.3.0",
+                    "apkFile": "../outside.apk",
+                    "sha256": "0" * 64,
+                    "size": 1,
+                    "notes": "invalid",
+                }
+            ),
+            encoding="utf-8",
+        )
+        invalid_update = client.get("/api/app/update", headers=headers)
+
+        apk = update_directory / "short-video-android-v1.3.0-debug.apk"
+        apk.write_bytes(b"signed-apk")
+        sha256 = hashlib.sha256(apk.read_bytes()).hexdigest()
+        (update_directory / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "versionCode": 130,
+                    "versionName": "1.3.0",
+                    "apkFile": apk.name,
+                    "sha256": sha256,
+                    "size": apk.stat().st_size,
+                    "notes": "应用内更新",
+                }
+            ),
+            encoding="utf-8",
+        )
+        update = client.get("/api/app/update", headers=headers)
+        update_head = client.head(update.json()["downloadUrl"], headers=headers)
+        update_apk = client.get(update.json()["downloadUrl"], headers=headers)
+        stale_update = client.get("/api/app/update/apk?versionCode=131", headers=headers)
+
     assert [item["title"] for item in short.json()["items"]] == ["short"]
     assert [item["title"] for item in long.json()["items"]] == ["long"]
     assert len(item_page.json()["items"]) == 1
@@ -112,4 +154,17 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     assert play.headers["location"] == "https://media.example/video.mp4"
     assert play.headers["cache-control"] == "private, max-age=300"
     assert play.headers["vary"] == "Cookie"
+    assert update_without_auth.status_code == 401
+    assert missing_update.status_code == 404
+    assert invalid_update.status_code == 503
+    assert update.status_code == 200
+    assert update.json()["versionCode"] == 130
+    assert update.json()["sha256"] == sha256
+    assert update_head.status_code == 200
+    assert update_head.content == b""
+    assert update_head.headers["content-length"] == str(apk.stat().st_size)
+    assert update_apk.content == b"signed-apk"
+    assert update_apk.headers["content-type"] == "application/vnd.android.package-archive"
+    assert update_apk.headers["x-apk-sha256"] == sha256
+    assert stale_update.status_code == 409
     assert any(name.startswith("prewarm-asmr-play-") for name in spawned_names)

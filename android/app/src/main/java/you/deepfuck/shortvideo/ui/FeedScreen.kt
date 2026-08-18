@@ -82,6 +82,7 @@ internal fun FeedScreen(
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
     onManage: () -> Unit,
+    onCheckUpdate: () -> Unit,
     onLogout: () -> Unit,
 ) {
     if (state.feedItems.isEmpty()) {
@@ -144,6 +145,7 @@ internal fun FeedScreen(
                     onSurface = onSurface,
                     onMode = onMode,
                     onManage = onManage,
+                    onCheckUpdate = onCheckUpdate,
                     onLogout = onLogout,
                 )
             }

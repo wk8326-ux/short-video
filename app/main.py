@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.alist import AListClient, AListError
+from app.app_update import AppUpdateStore, InvalidUpdateManifest, UpdateNotPublished
 from app.auth import LoginRateLimiter, SESSION_COOKIE, SessionManager, verify_password
 from app.database import LibraryDatabase
 from app.direct_urls import DirectUrlCache
@@ -24,10 +25,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.3.0"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
+app_update_store = AppUpdateStore(Path(settings.database_path).resolve().parent / "app-update")
 alist = AListClient(settings)
 asmr_alist = AListClient(
     settings,
@@ -369,6 +371,38 @@ async def health() -> dict[str, Any]:
         "library": stats,
         "scan": scan_state,
     }
+
+
+def _current_app_update():
+    try:
+        return app_update_store.load()
+    except UpdateNotPublished as exc:
+        raise HTTPException(status_code=404, detail="No app update is published") from exc
+    except InvalidUpdateManifest as exc:
+        logger.warning("Invalid app update manifest: %s", exc)
+        raise HTTPException(status_code=503, detail="App update is unavailable") from exc
+
+
+@app.get("/api/app/update")
+async def app_update() -> dict[str, Any]:
+    manifest, _ = _current_app_update()
+    return manifest.api_payload()
+
+
+@app.api_route("/api/app/update/apk", methods=["GET", "HEAD"])
+async def app_update_apk(versionCode: int | None = Query(default=None, ge=1)):
+    manifest, artifact = _current_app_update()
+    if versionCode is not None and versionCode != manifest.version_code:
+        raise HTTPException(status_code=409, detail="App update version changed; check again")
+    return FileResponse(
+        artifact,
+        filename=manifest.apk_file,
+        media_type="application/vnd.android.package-archive",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-APK-SHA256": manifest.sha256,
+        },
+    )
 
 
 @app.get("/api/admin/status")

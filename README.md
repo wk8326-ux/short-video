@@ -25,6 +25,7 @@ The application server never proxies or transcodes media bytes. Both Android and
 - Progressive ASMR list rendering, inline sequential audio playback, and remembered list positions
 - ASMR video landscape playback with five-second chrome fade and horizontal seeking
 - Authenticated management view for library rescans and MP4 Fast Start checks
+- Authenticated Android in-app updates with download progress and SHA-256 verification
 
 Fast Start checks are manual and read at most the first 256 KiB of each MP4-family file. They do not rewrite or transcode media.
 
@@ -50,6 +51,21 @@ cd android
 ```
 
 The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. The checked-in Gradle configuration uses Tencent mirrors first so builds do not depend on direct access to GitHub or Maven Central.
+
+Android updates are published from `/data/app-update`, which is inside the existing bind-mounted data directory. The API reads `manifest.json` for every check and serves the referenced APK only to an authenticated session. A private GitHub token is never bundled into the client.
+
+```json
+{
+  "versionCode": 130,
+  "versionName": "1.3.0",
+  "apkFile": "short-video-android-v1.3.0-debug.apk",
+  "sha256": "<64 lowercase hex characters>",
+  "size": 21000000,
+  "notes": "应用内更新、下载校验和稳定性改进"
+}
+```
+
+The first updater-enabled build still needs one manual installation. From later versions, use `更多 -> 检查更新`; Android asks once for permission to install unknown apps, then the system installer completes each upgrade.
 
 ## Local development
 
