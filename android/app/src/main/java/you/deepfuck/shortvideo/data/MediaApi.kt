@@ -127,7 +127,12 @@ class MediaApi(private val preferences: PlaybackPreferences) {
                 add(AsmrAuthor.fromJson(item))
             }
         }
-        return AsmrPage(parsed, payload.optInt("total", parsed.size), payload.optIntOrNull("nextOffset"))
+        return AsmrPage(
+            parsed,
+            payload.optInt("total", parsed.size),
+            payload.optIntOrNull("nextOffset"),
+            scanRunning = payload.optJSONObject("scan")?.optBoolean("running") == true,
+        )
     }
 
     fun asmrItems(
@@ -184,7 +189,8 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         )
     }
 
-    fun startScan(sourceId: String) = post("/api/admin/sources/$sourceId/scan")
+    fun startScan(sourceId: String): Boolean =
+        post("/api/admin/sources/$sourceId/scan").optBoolean("started")
 
     fun saveMediaSource(sourceId: String?, draft: MediaSourceDraft) {
         val body = JSONObject()
@@ -258,14 +264,13 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     fun absoluteUrl(path: String): String =
         if (path.startsWith("http://") || path.startsWith("https://")) path else url(path).toString()
 
-    private fun post(path: String) {
+    private fun post(path: String): JSONObject =
         executeJson(
             Request.Builder()
                 .url(url(path))
                 .post(ByteArray(0).toRequestBody(null))
                 .build(),
         )
-    }
 
     private fun getJson(pathOrUrl: String): JSONObject {
         val target = if (pathOrUrl.startsWith("http")) pathOrUrl.toHttpUrl() else url(pathOrUrl)

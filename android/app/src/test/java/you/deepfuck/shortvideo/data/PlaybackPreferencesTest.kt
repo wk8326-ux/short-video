@@ -2,6 +2,7 @@ package you.deepfuck.shortvideo.data
 
 import android.content.Context
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -33,6 +34,21 @@ class PlaybackPreferencesTest {
         assertEquals(762, restored?.total)
         assertEquals(listOf(40L, 41L), restored?.excludedIds)
         assertEquals(2L, restored?.startId)
+    }
+
+    @Test
+    fun asmrAuthorIndexCanBeInvalidatedAfterLibraryScan() {
+        val context = RuntimeEnvironment.getApplication()
+        context.getSharedPreferences("short_video", Context.MODE_PRIVATE).edit().clear().commit()
+        val preferences = PlaybackPreferences(context)
+        preferences.saveAsmrAuthorIndex(
+            listOf(AsmrAuthor("old-author", 2, 1, 1, null)),
+            total = 1,
+        )
+
+        preferences.clearAsmrAuthorIndex()
+
+        assertNull(PlaybackPreferences(context).asmrAuthorIndex())
     }
 
     private fun media(id: Long) = MediaEntry(

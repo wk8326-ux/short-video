@@ -19,10 +19,6 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     sys.modules.pop("app.main", None)
     main = importlib.import_module("app.main")
 
-    async def idle_scan(stop):
-        await stop.wait()
-
-    monkeypatch.setattr(main, "scan_loop", idle_scan)
     spawned_names: list[str] = []
 
     def record_background(coroutine, *, name: str) -> None:

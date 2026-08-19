@@ -1,13 +1,22 @@
 package you.deepfuck.shortvideo.update
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import androidx.core.app.NotificationCompat
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.Data
+import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import java.io.File
@@ -16,6 +25,8 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import you.deepfuck.shortvideo.MainActivity
+import you.deepfuck.shortvideo.R
 import you.deepfuck.shortvideo.data.ApiException
 import you.deepfuck.shortvideo.data.AppUpdateInfo
 import you.deepfuck.shortvideo.data.MediaApi
@@ -52,6 +63,7 @@ internal object AppUpdateWork {
                     .build(),
             )
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.SECONDS)
+            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .addTag(uniqueName(update.versionCode))
             .build()
 
@@ -77,6 +89,58 @@ internal object AppUpdateWork {
     }.getOrNull()
 }
 
+internal object AppUpdateForeground {
+    private const val CHANNEL_ID = "app_update_download"
+    private const val NOTIFICATION_ID = 4_201
+
+    @SuppressLint("InlinedApi")
+    fun info(
+        context: Context,
+        update: AppUpdateInfo,
+        downloadedBytes: Long,
+    ): ForegroundInfo {
+        createChannel(context)
+        val percent = ((downloadedBytes.coerceIn(0L, update.size) * 100L) / update.size)
+            .toInt()
+        val openApp = PendingIntent.getActivity(
+            context,
+            update.versionCode,
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_launcher_monochrome)
+            .setContentTitle("正在下载更新 ${update.versionName}")
+            .setContentText("已下载 $percent%")
+            .setContentIntent(openApp)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setProgress(100, percent, false)
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .build()
+        return ForegroundInfo(
+            NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
+    }
+
+    private fun createChannel(context: Context) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ID,
+                "应用更新下载",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "显示应用更新安装包的后台下载进度"
+                setShowBadge(false)
+            },
+        )
+    }
+}
+
 internal class AppUpdateDownloadWorker(
     appContext: Context,
     params: WorkerParameters,
@@ -84,11 +148,19 @@ internal class AppUpdateDownloadWorker(
     override suspend fun doWork(): Result {
         val update = AppUpdateWork.fromInputData(inputData)
             ?: return Result.failure(workDataOf(AppUpdateWork.KEY_ERROR to "更新信息无效，请重新检查"))
+        val partial = AppUpdateWork.partialFile(applicationContext, update)
+        setForeground(
+            AppUpdateForeground.info(
+                context = applicationContext,
+                update = update,
+                downloadedBytes = partial.length(),
+            ),
+        )
         val logs = AppLogStore.get(applicationContext)
         val target = AppUpdateWork.targetFile(applicationContext, update)
         logs.info(
             "app_update_download_start",
-            "version=${update.versionCode} attempt=$runAttemptCount retained=${AppUpdateWork.partialFile(applicationContext, update).length()}",
+            "version=${update.versionCode} attempt=$runAttemptCount retained=${partial.length()}",
         )
 
         return try {
@@ -102,6 +174,13 @@ internal class AppUpdateDownloadWorker(
                             workDataOf(
                                 AppUpdateWork.KEY_DOWNLOADED_BYTES to downloaded,
                                 AppUpdateWork.KEY_TOTAL_BYTES to total,
+                            ),
+                        )
+                        setForegroundAsync(
+                            AppUpdateForeground.info(
+                                context = applicationContext,
+                                update = update,
+                                downloadedBytes = downloaded,
                             ),
                         )
                     }
@@ -145,6 +224,6 @@ internal class AppUpdateDownloadWorker(
     }
 
     private companion object {
-        const val MAX_RETRIES = 5
+        const val MAX_RETRIES = 10
     }
 }

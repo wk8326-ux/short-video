@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.4.2] - 2026-08-19
+
+### Changed
+
+- Run APK downloads as expedited Android `dataSync` foreground work with a persistent progress notification, additional retry capacity, and retained HTTP range-resume data so downloads continue reliably after lock screen.
+- Make all AList/OpenList scans explicitly manual and per-source; application and container startup no longer scans any library or starts a periodic scan loop.
+
+### Fixed
+
+- Follow each manually started source scan through its real terminal state before refreshing the affected library.
+- Invalidate Android ASMR author and media caches after an ASMR source scan, refresh the current list immediately, and remove authors that no longer contain active media.
+- While an ASMR scan is running, let Android and PWA author views poll the existing index endpoint until the completed scan is visible, including scans started from another client.
+
 ## [1.4.1] - 2026-08-19
 
 ### Fixed

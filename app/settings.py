@@ -50,7 +50,6 @@ class Settings:
     alist_password: str
     database_path: str
     static_dir: str
-    scan_interval_seconds: int
     direct_url_cache_seconds: int
     video_extensions: frozenset[str]
     auth_password_hash: str
@@ -95,7 +94,6 @@ class Settings:
             alist_password=os.getenv("ALIST_PASSWORD", ""),
             database_path=os.getenv("DATABASE_PATH", "/data/library.db"),
             static_dir=os.getenv("STATIC_DIR", "/app/static"),
-            scan_interval_seconds=_positive_int("SCAN_INTERVAL_SECONDS", 1800, 60),
             direct_url_cache_seconds=_positive_int("DIRECT_URL_CACHE_SECONDS", 600, 0),
             video_extensions=frozenset(extensions),
             auth_password_hash=os.getenv("AUTH_PASSWORD_HASH", "").strip(),

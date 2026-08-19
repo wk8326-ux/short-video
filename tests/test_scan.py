@@ -1,7 +1,35 @@
+import asyncio
 import importlib
 import sys
 
 import pytest
+
+
+@pytest.mark.asyncio
+async def test_app_startup_does_not_scan_media_sources(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALIST_BASE_URL", "https://guangya.example")
+    monkeypatch.setenv("ALIST_MEDIA_PATH", "/guangya")
+    monkeypatch.setenv("ASMR_BASE_URL", "https://asmr.example")
+    monkeypatch.setenv("ASMR_MEDIA_PATH", "/asmr6")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "library.db"))
+    monkeypatch.setenv("STATIC_DIR", str(tmp_path / "static"))
+    monkeypatch.setenv("AUTH_PASSWORD_HASH", "scrypt:test")
+    monkeypatch.setenv(
+        "SESSION_SECRET",
+        "test-session-secret-with-at-least-32-characters",
+    )
+    sys.modules.pop("app.main", None)
+    main = importlib.import_module("app.main")
+    scan_calls: list[tuple[str, ...] | None] = []
+
+    async def record_scan(sources=None):
+        scan_calls.append(sources)
+
+    monkeypatch.setattr(main, "scan_library", record_scan)
+
+    async with main.lifespan(main.app):
+        await asyncio.sleep(0)
+        assert scan_calls == []
 
 
 @pytest.mark.asyncio

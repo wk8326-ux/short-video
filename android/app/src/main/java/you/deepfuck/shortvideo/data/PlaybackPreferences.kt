@@ -13,14 +13,6 @@ internal data class AsmrAuthorIndex(
     val savedAtMs: Long,
 )
 
-internal fun shouldRefreshAsmrAuthorIndex(
-    index: AsmrAuthorIndex?,
-    nowMs: Long = System.currentTimeMillis(),
-): Boolean = index == null ||
-    index.savedAtMs <= 0L ||
-    nowMs < index.savedAtMs ||
-    nowMs - index.savedAtMs >= ASMR_AUTHOR_INDEX_MAX_AGE_MS
-
 class PlaybackPreferences(context: Context) {
     private val preferences = context.getSharedPreferences("short_video", Context.MODE_PRIVATE)
 
@@ -186,12 +178,29 @@ class PlaybackPreferences(context: Context) {
     }.getOrNull()
 
     internal fun saveAsmrAuthorIndex(items: List<AsmrAuthor>, total: Int) {
-        if (items.isEmpty()) return
+        if (items.isEmpty()) {
+            clearAsmrAuthorIndex()
+            return
+        }
         val payload = JSONObject()
             .put("savedAt", System.currentTimeMillis())
             .put("total", total.coerceAtLeast(items.size))
             .put("items", JSONArray(items.map(AsmrAuthor::toJson)))
         preferences.edit().putString(KEY_ASMR_AUTHOR_INDEX, payload.toString()).apply()
+    }
+
+    internal fun clearAsmrAuthorIndex() {
+        preferences.edit().remove(KEY_ASMR_AUTHOR_INDEX).apply()
+    }
+
+    internal fun clearFeedSessions() {
+        preferences.edit().apply {
+            MediaSurface.entries
+                .filterNot { it == MediaSurface.ASMR }
+                .forEach { surface ->
+                    FeedMode.entries.forEach { mode -> remove(feedKey(surface, mode)) }
+                }
+        }.apply()
     }
 
     internal fun asmrAuthorListPosition(): ListPosition =
@@ -242,5 +251,3 @@ class PlaybackPreferences(context: Context) {
         const val FEED_CACHE_ITEM_LIMIT = 180
     }
 }
-
-private const val ASMR_AUTHOR_INDEX_MAX_AGE_MS = 24L * 60 * 60 * 1_000

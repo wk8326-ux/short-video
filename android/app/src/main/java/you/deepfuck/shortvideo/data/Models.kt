@@ -104,6 +104,7 @@ data class AsmrPage<T>(
     val items: List<T>,
     val total: Int,
     val nextOffset: Int?,
+    val scanRunning: Boolean = false,
 )
 
 data class AdminStatus(

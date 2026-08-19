@@ -27,12 +27,13 @@ import you.deepfuck.shortvideo.data.AppUpdateUiState
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.AsmrFilter
 import you.deepfuck.shortvideo.data.FeedMode
+import you.deepfuck.shortvideo.data.LibraryScanStatus
+import you.deepfuck.shortvideo.data.LibrarySection
 import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.data.MediaSourceDraft
 import you.deepfuck.shortvideo.data.PlaybackPreferences
-import you.deepfuck.shortvideo.data.shouldRefreshAsmrAuthorIndex
 import you.deepfuck.shortvideo.media.PlaybackEngine
 import you.deepfuck.shortvideo.media.PlaybackEndedEvent
 import you.deepfuck.shortvideo.media.PlaybackEngineProvider
@@ -501,8 +502,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun startLibraryScan(sourceId: String) = runAdminAction("scan-$sourceId") {
-        api.startScan(sourceId)
+    fun startLibraryScan(sourceId: String) {
+        val action = "scan-$sourceId"
+        if (action in mutableState.value.adminActions) return
+        val previous = mutableState.value.adminStatus
+            ?.sources
+            ?.firstOrNull { it.id == sourceId }
+            ?.scan
+        mutableState.update {
+            it.copy(adminActions = it.adminActions + action, adminError = null)
+        }
+        viewModelScope.launch {
+            val start = runApi { api.startScan(sourceId) }
+            if (start.isFailure) {
+                finishScanAction(action, start.exceptionOrNull())
+                return@launch
+            }
+            monitorSourceScan(
+                action = action,
+                sourceId = sourceId,
+                previous = previous,
+                scanWasAccepted = start.getOrDefault(false),
+            )
+        }
     }
 
     fun saveMediaSource(sourceId: String?, draft: MediaSourceDraft) =
@@ -1001,10 +1023,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     asmrLoading = false,
                     asmrError = null,
                 )
-                if (!shouldRefreshAsmrAuthorIndex(cached)) {
-                    asmrAuthorsLoaded = true
-                    return
-                }
             }
         }
         if (asmrAuthorsLoaded || asmrAuthorsJob?.isActive == true) return
@@ -1024,13 +1042,133 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             asmrAuthorsLoaded = true
             preferences.saveAsmrAuthorIndex(page.items, page.total)
+            val selectedAuthor = mutableState.value.selectedAuthor
+            val selectedStillExists = selectedAuthor == null || page.items.any { it.name == selectedAuthor }
+            if (!selectedStillExists) preferences.selectedAsmrAuthor = null
             mutableState.value = mutableState.value.copy(
                 asmrAuthors = page.items,
                 asmrAuthorsTotal = page.total,
+                selectedAuthor = selectedAuthor.takeIf { selectedStillExists },
+                asmrItems = if (selectedStillExists) mutableState.value.asmrItems else emptyList(),
+                asmrTotal = if (selectedStillExists) mutableState.value.asmrTotal else 0,
+                asmrItemsHasMore = selectedStillExists && mutableState.value.asmrItemsHasMore,
                 asmrLoading = false,
                 asmrError = null,
             )
+            if (page.scanRunning) {
+                asmrAuthorsLoaded = false
+                delay(1_500)
+                asmrAuthorsJob = null
+                loadAsmrAuthors()
+            }
         }
+    }
+
+    private suspend fun monitorSourceScan(
+        action: String,
+        sourceId: String,
+        previous: LibraryScanStatus?,
+        scanWasAccepted: Boolean,
+    ) {
+        var runningWasObserved = previous?.running == true
+        while (viewModelScope.isActive) {
+            delay(750)
+            val statusResult = runApi { api.adminStatus() }
+            if (statusResult.isFailure) {
+                val error = statusResult.exceptionOrNull()
+                if (error != null && handleUnauthorized(error)) return
+                logs.warning("source_scan_status_failed", "source=$sourceId")
+                delay(1_500)
+                continue
+            }
+            val status = statusResult.getOrThrow()
+            mutableState.update {
+                it.copy(adminStatus = status, adminLoading = false)
+            }
+            val source = status.sources.firstOrNull { it.id == sourceId }
+            if (source == null) {
+                finishScanAction(action, IllegalStateException("媒体源已不存在"))
+                return
+            }
+            when (
+                sourceScanOutcome(
+                    previous = previous,
+                    current = source.scan,
+                    scanWasAccepted = scanWasAccepted,
+                    runningWasObserved = runningWasObserved,
+                )
+            ) {
+                SourceScanOutcome.WAITING -> Unit
+                SourceScanOutcome.RUNNING -> runningWasObserved = true
+                SourceScanOutcome.SUCCEEDED -> {
+                    mutableState.update { it.copy(adminActions = it.adminActions - action) }
+                    refreshLibraryAfterScan(source.section)
+                    return
+                }
+                SourceScanOutcome.FAILED -> {
+                    finishScanAction(
+                        action,
+                        IllegalStateException(source.scan.lastError ?: "扫描失败"),
+                    )
+                    return
+                }
+            }
+        }
+    }
+
+    private fun finishScanAction(action: String, error: Throwable?) {
+        if (error != null && handleUnauthorized(error)) return
+        error?.let { logs.error("source_scan_failed", "action=$action", it) }
+        mutableState.update {
+            it.copy(
+                adminActions = it.adminActions - action,
+                adminError = error?.message ?: "扫描失败，请稍后重试",
+            )
+        }
+    }
+
+    private fun refreshLibraryAfterScan(section: LibrarySection) {
+        when (section) {
+            LibrarySection.FEED -> {
+                feedSessions.clear()
+                preferences.clearFeedSessions()
+                if (mutableState.value.surface != MediaSurface.ASMR) {
+                    activeFeedItemId = null
+                    requestFeed(reset = true)
+                }
+            }
+            LibrarySection.ASMR -> refreshAsmrLibrary()
+        }
+    }
+
+    private fun refreshAsmrLibrary() {
+        asmrAuthorsJob?.cancel()
+        asmrAuthorsJob = null
+        asmrAuthorsLoaded = false
+        asmrAuthorIndexRestored = false
+        preferences.clearAsmrAuthorIndex()
+
+        asmrItemJobs.forEach { (key, job) ->
+            asmrItemGenerations[key] = (asmrItemGenerations[key] ?: 0L) + 1L
+            job.cancel()
+        }
+        asmrItemJobs.clear()
+        asmrItemsCache.clear()
+        asmrItemsNextOffsets.clear()
+        asmrItemsTotals.clear()
+
+        val selectedAuthor = mutableState.value.selectedAuthor
+        mutableState.value = mutableState.value.copy(
+            asmrAuthors = emptyList(),
+            asmrAuthorsTotal = 0,
+            asmrItems = emptyList(),
+            asmrTotal = 0,
+            asmrItemsHasMore = false,
+            asmrLoading = mutableState.value.surface == MediaSurface.ASMR,
+            asmrError = null,
+        )
+        loadAsmrAuthors()
+        selectedAuthor?.let { loadAsmrItems(AsmrItemsKey(it, mutableState.value.asmrFilter), reset = true) }
     }
 
     private fun loadAsmrItems(key: AsmrItemsKey, reset: Boolean) {

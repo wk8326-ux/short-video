@@ -76,6 +76,7 @@ fun ShortVideoApp(
     viewModel: MainViewModel,
     onFullscreenChanged: (Boolean) -> Unit,
     onBackgroundPlaybackRequested: () -> Unit,
+    onDownloadAppUpdate: () -> Unit,
     onInstallAppUpdate: (String) -> Unit,
     onExportLogs: () -> Unit,
 ) {
@@ -231,7 +232,7 @@ fun ShortVideoApp(
             state = state.appUpdate,
             onDismiss = viewModel::dismissAppUpdate,
             onCheck = viewModel::checkForAppUpdate,
-            onDownload = viewModel::downloadAppUpdate,
+            onDownload = onDownloadAppUpdate,
             onInstall = onInstallAppUpdate,
         )
     }

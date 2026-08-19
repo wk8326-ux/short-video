@@ -57,12 +57,12 @@ Android updates are published from `/data/app-update`, which is inside the exist
 
 ```json
 {
-  "versionCode": 141,
-  "versionName": "1.4.1",
-  "apkFile": "short-video-android-v1.4.1-debug.apk",
-  "sha256": "2e22f55afe468f3d1139f1bdbeaf5f18948bae319b6c1f947f4b2e007360d1b5",
-  "size": 22674676,
-  "notes": "修复 ASMR 系统上一条/下一条控制，并支持视频按作者作品顺序自动续播。"
+  "versionCode": 142,
+  "versionName": "1.4.2",
+  "apkFile": "short-video-android-v1.4.2-debug.apk",
+  "sha256": "086fe5bbe7da6dda33e91a3662d07726c3e6d204b3a365a6883029f1311ac0e9",
+  "size": 22692112,
+  "notes": "强化锁屏后台更新与断点续传；媒体库仅手工逐源扫描，并在扫描完成后刷新 ASMR 作者与作品缓存。"
 }
 ```
 

@@ -4,6 +4,7 @@ import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.AsmrFilter
+import you.deepfuck.shortvideo.data.LibraryScanStatus
 import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.media.PlaybackEndedEvent
 
@@ -47,6 +48,25 @@ internal class FeedSessionRegistry {
 
     fun restore(surface: MediaSurface, mode: FeedMode): FeedSessionState? =
         sessions[Key(surface, mode)]
+
+    fun clear() = sessions.clear()
+}
+
+internal enum class SourceScanOutcome { WAITING, RUNNING, SUCCEEDED, FAILED }
+
+internal fun sourceScanOutcome(
+    previous: LibraryScanStatus?,
+    current: LibraryScanStatus,
+    scanWasAccepted: Boolean,
+    runningWasObserved: Boolean,
+): SourceScanOutcome {
+    if (current.running) return SourceScanOutcome.RUNNING
+    val completed = scanWasAccepted ||
+        runningWasObserved ||
+        current.lastSuccess != previous?.lastSuccess ||
+        current.lastError != previous?.lastError
+    if (!completed) return SourceScanOutcome.WAITING
+    return if (current.lastError == null) SourceScanOutcome.SUCCEEDED else SourceScanOutcome.FAILED
 }
 
 internal data class ListPosition(

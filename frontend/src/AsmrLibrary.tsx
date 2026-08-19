@@ -91,6 +91,7 @@ export default function AsmrLibrary({
   const [current, setCurrent] = useState<AsmrItem | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [scanRunning, setScanRunning] = useState(false);
   const [error, setError] = useState("");
   const playerHistoryRef = useRef<string | null>(null);
   const playerHistoryClosingRef = useRef(false);
@@ -105,8 +106,12 @@ export default function AsmrLibrary({
         return;
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json() as { items: AsmrAuthor[] };
+      const data = await response.json() as {
+        items: AsmrAuthor[];
+        scan?: { running?: boolean };
+      };
       setAuthors(data.items);
+      setScanRunning(data.scan?.running === true);
     } catch {
       setError("无法载入 ASMR 作者列表");
     } finally {
@@ -117,6 +122,12 @@ export default function AsmrLibrary({
   useEffect(() => {
     void loadAuthors();
   }, [loadAuthors]);
+
+  useEffect(() => {
+    if (!scanRunning) return;
+    const timer = window.setTimeout(() => void loadAuthors(), 1500);
+    return () => window.clearTimeout(timer);
+  }, [loadAuthors, scanRunning]);
 
   useEffect(() => {
     if (!selectedAuthor) return;

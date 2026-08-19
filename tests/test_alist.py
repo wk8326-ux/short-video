@@ -14,7 +14,6 @@ def _settings() -> Settings:
         alist_password="",
         database_path=":memory:",
         static_dir="/tmp/static",
-        scan_interval_seconds=1800,
         direct_url_cache_seconds=90,
         video_extensions=frozenset({".mp4"}),
         auth_password_hash="scrypt:test",

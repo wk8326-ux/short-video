@@ -6,28 +6,51 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import you.deepfuck.shortvideo.data.AsmrAuthor
-import you.deepfuck.shortvideo.data.AsmrAuthorIndex
 import you.deepfuck.shortvideo.data.AsmrFilter
 import you.deepfuck.shortvideo.data.FeedMode
+import you.deepfuck.shortvideo.data.LibraryScanStatus
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
-import you.deepfuck.shortvideo.data.shouldRefreshAsmrAuthorIndex
 import you.deepfuck.shortvideo.media.PlaybackEndedEvent
 import you.deepfuck.shortvideo.media.PlaybackIdentity
 
 class PlaybackSequenceTest {
     @Test
-    fun `ASMR author index is reused for one day`() {
-        val now = 2_000_000_000L
-        val cached = AsmrAuthorIndex(
-            items = listOf(AsmrAuthor("author", 1, 1, 0, null)),
-            total = 1,
-            savedAtMs = now - 60_000L,
+    fun `accepted source scan is tracked until its terminal state`() {
+        val previous = LibraryScanStatus(
+            running = false,
+            lastSuccess = 10L,
+            lastError = null,
+            directories = 3,
         )
 
-        assertFalse(shouldRefreshAsmrAuthorIndex(cached, now))
-        assertTrue(shouldRefreshAsmrAuthorIndex(cached.copy(savedAtMs = now - 86_400_000L), now))
-        assertTrue(shouldRefreshAsmrAuthorIndex(null, now))
+        assertEquals(
+            SourceScanOutcome.RUNNING,
+            sourceScanOutcome(
+                previous,
+                previous.copy(running = true),
+                scanWasAccepted = true,
+                runningWasObserved = false,
+            ),
+        )
+        assertEquals(
+            SourceScanOutcome.SUCCEEDED,
+            sourceScanOutcome(
+                previous,
+                previous.copy(lastSuccess = 11L, directories = 8),
+                scanWasAccepted = true,
+                runningWasObserved = true,
+            ),
+        )
+        assertEquals(
+            SourceScanOutcome.FAILED,
+            sourceScanOutcome(
+                previous,
+                previous.copy(lastError = "AList unavailable"),
+                scanWasAccepted = true,
+                runningWasObserved = true,
+            ),
+        )
     }
 
     @Test

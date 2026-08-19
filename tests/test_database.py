@@ -112,6 +112,7 @@ def test_incremental_scan_deactivates_only_missing_source_rows(tmp_path):
 
     database.replace_scan([], source="asmr")
     assert database.stats(source="asmr")["videos"] == 0
+    assert database.asmr_authors() == []
     assert database.stats(source="guangya")["videos"] == 2
 
 

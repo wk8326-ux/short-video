@@ -60,6 +60,7 @@ class MainActivity : ComponentActivity() {
                         viewModel = viewModel,
                         onFullscreenChanged = ::setPlayerFullscreen,
                         onBackgroundPlaybackRequested = ::requestMediaNotificationPermission,
+                        onDownloadAppUpdate = ::downloadAppUpdate,
                         onInstallAppUpdate = ::installAppUpdate,
                         onExportLogs = ::exportRuntimeLogs,
                     )
@@ -98,6 +99,11 @@ class MainActivity : ComponentActivity() {
         ) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    private fun downloadAppUpdate() {
+        requestMediaNotificationPermission()
+        viewModel.downloadAppUpdate()
     }
 
     private fun installAppUpdate(apkPath: String) {

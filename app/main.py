@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -199,15 +199,6 @@ async def scan_library(sources: tuple[str, ...] | None = None) -> None:
         await scan_source(source)
 
 
-async def scan_loop(stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        await scan_library()
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=settings.scan_interval_seconds)
-        except TimeoutError:
-            continue
-
-
 async def check_fast_start(*, force: bool) -> None:
     if fast_start_lock.locked():
         return
@@ -331,16 +322,13 @@ async def lifespan(_: FastAPI):
     await asyncio.to_thread(database.initialize)
     await source_registry.initialize()
     await asyncio.to_thread(refresh_source_states)
-    stop = asyncio.Event()
-    worker = asyncio.create_task(scan_loop(stop), name="library-scan")
-    yield
-    stop.set()
-    worker.cancel()
-    await asyncio.gather(worker, return_exceptions=True)
-    for task in list(background_tasks):
-        task.cancel()
-    await asyncio.gather(*background_tasks, return_exceptions=True)
-    await source_registry.close()
+    try:
+        yield
+    finally:
+        for task in list(background_tasks):
+            task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
+        await source_registry.close()
 
 
 app = FastAPI(
