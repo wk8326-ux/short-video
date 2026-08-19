@@ -1,6 +1,17 @@
 from app.database import LibraryDatabase
 
 
+class TracedLibraryDatabase(LibraryDatabase):
+    def __init__(self, path: str):
+        super().__init__(path)
+        self.statements: list[str] = []
+
+    def _connect(self):
+        connection = super()._connect()
+        connection.set_trace_callback(self.statements.append)
+        return connection
+
+
 def _records() -> list[dict]:
     return [
         {
@@ -41,6 +52,65 @@ def test_sort_modes_and_removed_files(tmp_path):
     assert newest[0]["name"] == "video-7.mp4"
     assert oldest[0]["name"] == "video-1.mp4"
     assert database.stats()["videos"] == 2
+
+
+def test_incremental_scan_deactivates_only_missing_source_rows(tmp_path):
+    database = TracedLibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    guangya = _records()[:2]
+    asmr = [
+        {
+            "path": f"/asmr6/author/track-{index}.mp3",
+            "name": f"track-{index}.mp3",
+            "size": index * 10,
+            "modified": "2026-08-19T00:00:00Z",
+            "thumb": "",
+            "author": "author",
+            "media_format": "mp3",
+            "media_kind": "audio",
+        }
+        for index in range(1, 101)
+    ]
+    database.replace_scan(guangya)
+    database.replace_scan(asmr, source="asmr")
+    stable_path = "/asmr6/author/track-1.mp3"
+    stable_id = {
+        item["path"]: item["id"]
+        for item in database.asmr_items(author="author", limit=200)
+    }[stable_path]
+
+    database.statements.clear()
+    replacement = asmr[:-1] + [
+        {
+            **asmr[-1],
+            "path": "/asmr6/author/new-track.mp3",
+            "name": "new-track.mp3",
+        }
+    ]
+    assert database.replace_scan(replacement, source="asmr") == 100
+
+    statements = [" ".join(statement.split()).lower() for statement in database.statements]
+    cleanup = [
+        statement
+        for statement in statements
+        if statement.startswith("update videos set active = 0")
+    ]
+    assert len(cleanup) == 1
+    assert "last_seen !=" in cleanup[0]
+    current_ids = {
+        item["path"]: item["id"]
+        for item in database.asmr_items(author="author", limit=200)
+    }
+    assert current_ids[stable_path] == stable_id
+    assert "/asmr6/author/track-100.mp3" not in current_ids
+    assert "/asmr6/author/new-track.mp3" in current_ids
+    assert database.stats(source="asmr")["videos"] == 100
+    assert database.stats(source="guangya")["videos"] == 2
+    assert database.get_video(stable_id)["active"] == 1
+
+    database.replace_scan([], source="asmr")
+    assert database.stats(source="asmr")["videos"] == 0
+    assert database.stats(source="guangya")["videos"] == 2
 
 
 def test_shuffle_excludes_recent_videos_and_keeps_resume_first(tmp_path):

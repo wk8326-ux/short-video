@@ -86,6 +86,7 @@ class LibraryDatabase:
 
     def replace_scan(self, videos: Iterable[dict[str, Any]], *, source: str = "guangya") -> int:
         count = 0
+        scan_marker = secrets.token_hex(16)
 
         def records():
             nonlocal count
@@ -98,11 +99,11 @@ class LibraryDatabase:
                     "duration_seconds": video.get("duration_seconds"),
                     "media_format": video.get("media_format"),
                     "media_kind": video.get("media_kind") or "video",
+                    "scan_marker": scan_marker,
                 }
 
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("UPDATE videos SET active = 0 WHERE source = ?", (source,))
             connection.executemany(
                 """
                 INSERT INTO videos(
@@ -111,7 +112,7 @@ class LibraryDatabase:
                 )
                 VALUES(
                     :path, :name, :size, :modified, :thumb, :source, :author,
-                    :duration_seconds, :media_format, :media_kind, 1, CURRENT_TIMESTAMP
+                    :duration_seconds, :media_format, :media_kind, 1, :scan_marker
                 )
                 ON CONFLICT(path) DO UPDATE SET
                     name = excluded.name,
@@ -128,9 +129,17 @@ class LibraryDatabase:
                         ELSE excluded.media_kind
                     END,
                     active = 1,
-                    last_seen = CURRENT_TIMESTAMP
+                    last_seen = excluded.last_seen
                 """,
                 records(),
+            )
+            connection.execute(
+                """
+                UPDATE videos
+                SET active = 0
+                WHERE source = ? AND active = 1 AND last_seen != ?
+                """,
+                (source, scan_marker),
             )
             connection.commit()
         return count

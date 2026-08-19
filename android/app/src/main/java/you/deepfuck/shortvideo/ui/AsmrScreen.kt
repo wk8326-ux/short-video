@@ -71,6 +71,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -78,6 +79,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -161,7 +163,7 @@ internal fun AsmrScreen(
                 onToggle = onToggle,
                 onClose = onClose,
                 onSeek = onSeek,
-                modifier = Modifier.align(Alignment.BottomCenter),
+                modifier = Modifier.align(Alignment.BottomCenter).zIndex(1f),
             )
         }
 
@@ -495,7 +497,17 @@ private fun MiniPlayer(
         modifier = modifier
             .fillMaxWidth()
             .background(Color(0xF2111214))
-            .navigationBarsPadding(),
+            .navigationBarsPadding()
+            .pointerInput(Unit) {
+                // Keep unhandled touches on the player plane instead of the media list below it.
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent(PointerEventPass.Final).changes.forEach { change ->
+                            if (!change.isConsumed) change.consume()
+                        }
+                    }
+                }
+            },
     ) {
         FineProgressBar(
             player = player,

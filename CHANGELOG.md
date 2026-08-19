@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.7] - 2026-08-19
+
+### Changed
+
+- Replace the Android launcher artwork with the supplied red-and-white player icon.
+- Mark each library scan with a unique token and deactivate only media missing from that scan instead of rewriting every active ASMR row up front.
+- Increase the container's temporary filesystem from 16 MB to 64 MB for large SQLite scan operations.
+
+### Fixed
+
+- Prevent `database or disk is full` during large ASMR scans while preserving stable media IDs, source isolation, and removed-file detection.
+- Give the collapsed ASMR player an explicit foreground input plane so taps on its empty area cannot activate media rows underneath it.
+
 ## [1.3.6] - 2026-08-19
 
 ### Fixed
