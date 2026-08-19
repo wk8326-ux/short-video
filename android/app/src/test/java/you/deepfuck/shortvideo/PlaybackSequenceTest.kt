@@ -75,14 +75,14 @@ class PlaybackSequenceTest {
     }
 
     @Test
-    fun audioSequenceSkipsVideosAndStopsAfterTheLastAudio() {
+    fun audioQueueSkipsVideosAndStopsAfterTheLastAudio() {
         val first = media(id = 1, kind = "audio")
         val video = media(id = 2, kind = "video")
         val second = media(id = 3, kind = "audio")
-        val items = listOf(first, video, second)
+        val queue = asmrPlaybackQueue(listOf(first, video, second), first)
 
-        assertEquals(second, nextAudioEntry(items, afterId = first.id))
-        assertNull(nextAudioEntry(items, afterId = second.id))
+        assertEquals(second, nextAsmrEntry(queue, afterId = first.id))
+        assertNull(nextAsmrEntry(queue, afterId = second.id))
     }
 
     @Test
@@ -299,7 +299,38 @@ class PlaybackSequenceTest {
         assertFalse(shouldKeepPlayingInBackground(MediaSurface.ASMR, null, videoEnabled = true))
     }
 
-    private fun media(id: Long, kind: String) = MediaEntry(
+    @Test
+    fun asmrPlaybackQueueKeepsAuthorOrderAndMediaKind() {
+        val authorAudio1 = media(id = 1L, kind = "audio", author = "author-a")
+        val authorVideo1 = media(id = 2L, kind = "video", author = "author-a")
+        val otherVideo = media(id = 3L, kind = "video", author = "author-b")
+        val authorVideo2 = media(id = 4L, kind = "video", author = "author-a")
+        val authorAudio2 = media(id = 5L, kind = "audio", author = "author-a")
+
+        assertEquals(
+            listOf(authorVideo1, authorVideo2),
+            asmrPlaybackQueue(
+                listOf(authorAudio1, authorVideo1, otherVideo, authorVideo2, authorAudio2),
+                authorVideo1,
+            ),
+        )
+        assertEquals(
+            listOf(authorAudio1, authorAudio2),
+            asmrPlaybackQueue(
+                listOf(authorAudio1, authorVideo1, otherVideo, authorVideo2, authorAudio2),
+                authorAudio1,
+            ),
+        )
+        assertEquals(authorVideo2, nextAsmrEntry(listOf(authorVideo1, authorVideo2), authorVideo1.id))
+
+        val restoredVideo = media(id = 6L, kind = "video", author = "author-a")
+        assertEquals(
+            listOf(restoredVideo, authorVideo1, authorVideo2),
+            asmrPlaybackQueue(listOf(authorVideo1, otherVideo, authorVideo2), restoredVideo),
+        )
+    }
+
+    private fun media(id: Long, kind: String, author: String = "Author") = MediaEntry(
         id = id,
         title = "media-$id",
         size = 1L,
@@ -307,7 +338,7 @@ class PlaybackSequenceTest {
         durationSeconds = null,
         playUrl = "/api/videos/$id/play",
         posterUrl = null,
-        author = "Author",
+        author = author,
         format = if (kind == "audio") "mp3" else "mp4",
         kind = kind,
     )

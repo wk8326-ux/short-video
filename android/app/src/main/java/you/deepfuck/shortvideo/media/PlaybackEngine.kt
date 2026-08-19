@@ -81,12 +81,14 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     private val cache = MediaCacheStore.get(context)
     private val cacheKeyFactory = StableCacheKeyFactory()
     private var currentEntry: MediaEntry? = null
+    private val queueEntries = linkedMapOf<Long, MediaEntry>()
     private var prefetchJob: Job? = null
     private val prefetchLock = Any()
     private var prefetchGeneration = 0L
     private var activeCacheWriter: CacheWriter? = null
     private val playbackIdentity = PlaybackIdentity()
     private var onPlaybackEnded: ((PlaybackEndedEvent) -> Unit)? = null
+    private var onMediaTransition: ((MediaEntry) -> Unit)? = null
 
     private val upstreamFactory = ResolvingDataSource.Factory(
         DefaultHttpDataSource.Factory()
@@ -104,6 +106,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     val player: ExoPlayer = ExoPlayer.Builder(context)
         .setMediaSourceFactory(DefaultMediaSourceFactory(cacheDataSourceFactory))
         .setWakeMode(C.WAKE_MODE_NETWORK)
+        .setMaxSeekToPreviousPositionMs(Long.MAX_VALUE)
         .build()
         .apply {
             setAudioAttributes(AudioAttributes.DEFAULT, true)
@@ -126,6 +129,23 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
                 override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = publish()
 
+                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    val entry = mediaItem
+                        ?.mediaId
+                        ?.toLongOrNull()
+                        ?.let(queueEntries::get)
+                        ?: return
+                    if (currentEntry?.id == entry.id) {
+                        publish()
+                        return
+                    }
+                    playbackIdentity.activate(entry.id)
+                    currentEntry = entry
+                    publish()
+                    logs.info("player_transition", "media=${entry.id} reason=$reason")
+                    onMediaTransition?.invoke(entry)
+                }
+
                 override fun onPlayerError(error: PlaybackException) {
                     logs.error(
                         "player_error",
@@ -138,9 +158,25 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         )
     }
 
-    fun play(entry: MediaEntry, resumePositionMs: Long, autoPlay: Boolean = true): Boolean {
-        if (currentEntry?.id == entry.id) {
+    fun play(
+        entry: MediaEntry,
+        resumePositionMs: Long,
+        autoPlay: Boolean = true,
+        queue: List<MediaEntry> = listOf(entry),
+    ): Boolean {
+        val normalizedQueue = normalizeQueue(entry, queue)
+        val queueIds = normalizedQueue.map(MediaEntry::id)
+        val existingQueueIds = queueEntries.keys.toList()
+        if (queueIds == existingQueueIds && player.mediaItemCount == queueIds.size) {
             return runCatching {
+                val targetIndex = normalizedQueue.indexOfFirst { it.id == entry.id }
+                val changed = currentEntry?.id != entry.id || player.currentMediaItemIndex != targetIndex
+                if (changed) {
+                    playbackIdentity.activate(entry.id)
+                    currentEntry = entry
+                    player.seekTo(targetIndex, resumePositionMs.coerceAtLeast(0L))
+                    onMediaTransition?.invoke(entry)
+                }
                 if (autoPlay) player.play() else player.pause()
                 publish()
             }.onFailure {
@@ -150,33 +186,24 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         return runCatching {
             playbackIdentity.activate(entry.id)
             currentEntry = entry
-            val media = MediaItem.Builder()
-                .setMediaId(entry.id.toString())
-                .setUri(api.absoluteUrl(entry.playUrl))
-                .setMediaMetadata(
-                    MediaMetadata.Builder()
-                        .setTitle(entry.title)
-                        .setArtist(entry.author)
-                        .build(),
-                )
-                .setMimeType(
-                    when {
-                        entry.isHls -> MimeTypes.APPLICATION_M3U8
-                        entry.isAudio -> MimeTypes.AUDIO_MPEG
-                        else -> null
-                    },
-                )
-                .build()
-            player.setMediaItem(media, resumePositionMs.coerceAtLeast(0L))
+            queueEntries.clear()
+            normalizedQueue.forEach { queueEntries[it.id] = it }
+            val startIndex = normalizedQueue.indexOfFirst { it.id == entry.id }
+            player.setMediaItems(
+                normalizedQueue.map(::mediaItem),
+                startIndex,
+                resumePositionMs.coerceAtLeast(0L),
+            )
             player.prepare()
             player.playWhenReady = autoPlay
             publish()
             logs.info(
                 "player_prepare",
-                "media=${entry.id} kind=${if (entry.isAudio) "audio" else "video"} resumeMs=$resumePositionMs autoPlay=$autoPlay",
+                "media=${entry.id} kind=${if (entry.isAudio) "audio" else "video"} queue=${normalizedQueue.size} resumeMs=$resumePositionMs autoPlay=$autoPlay",
             )
         }.onFailure { error ->
             currentEntry = null
+            queueEntries.clear()
             playbackIdentity.invalidateThen { runCatching { player.clearMediaItems() } }
             publish(error.javaClass.simpleName)
             logs.error("player_prepare_failed", "media=${entry.id}", error)
@@ -198,6 +225,24 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun setOnPlaybackEndedListener(listener: ((PlaybackEndedEvent) -> Unit)?) {
         onPlaybackEnded = listener
+    }
+
+    fun setOnMediaTransitionListener(listener: ((MediaEntry) -> Unit)?) {
+        onMediaTransition = listener
+    }
+
+    fun appendQueue(entries: List<MediaEntry>): Int {
+        val additions = entries.distinctBy(MediaEntry::id).filterNot { queueEntries.containsKey(it.id) }
+        if (additions.isEmpty()) return 0
+        return runCatching {
+            additions.forEach { queueEntries[it.id] = it }
+            player.addMediaItems(additions.map(::mediaItem))
+            logs.info("player_queue_append", "added=${additions.size} total=${queueEntries.size}")
+            additions.size
+        }.onFailure { error ->
+            additions.forEach { queueEntries.remove(it.id) }
+            logs.error("player_queue_append_failed", "added=${additions.size}", error)
+        }.getOrDefault(0)
     }
 
     fun pause() {
@@ -224,6 +269,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun stop() {
         currentEntry = null
+        queueEntries.clear()
         playbackIdentity.invalidateThen {
             player.pause()
             player.clearMediaItems()
@@ -260,6 +306,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun release() {
         currentEntry = null
+        queueEntries.clear()
         prefetchJob?.cancel()
         synchronized(prefetchLock) {
             prefetchGeneration += 1L
@@ -303,6 +350,29 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         if (!uri.path.orEmpty().matches(PLAY_PATH)) return dataSpec
         return dataSpec.withUri(Uri.parse(api.resolvePlayUrl(uri.toString())))
     }
+
+    private fun normalizeQueue(entry: MediaEntry, queue: List<MediaEntry>): List<MediaEntry> {
+        val distinct = queue.distinctBy(MediaEntry::id)
+        return if (distinct.any { it.id == entry.id }) distinct else listOf(entry) + distinct
+    }
+
+    private fun mediaItem(entry: MediaEntry): MediaItem = MediaItem.Builder()
+        .setMediaId(entry.id.toString())
+        .setUri(api.absoluteUrl(entry.playUrl))
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(entry.title)
+                .setArtist(entry.author)
+                .build(),
+        )
+        .setMimeType(
+            when {
+                entry.isHls -> MimeTypes.APPLICATION_M3U8
+                entry.isAudio -> MimeTypes.AUDIO_MPEG
+                else -> null
+            },
+        )
+        .build()
 
     private fun publish(error: String? = null) {
         val entry = currentEntry

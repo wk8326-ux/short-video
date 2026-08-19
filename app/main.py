@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)

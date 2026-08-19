@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.4.1] - 2026-08-19
+
+### Fixed
+
+- Publish each ASMR author's same-type media queue to Android MediaSession so lock-screen and notification controls expose working previous and next actions.
+- Automatically continue ASMR videos in author order, including appending later API pages without reloading the current item.
+- Keep the in-app now-playing state, expanded video surface, persistence, prefetching, and background service synchronized after system media controls change items.
+
 ## [1.4.0] - 2026-08-19
 
 ### Added

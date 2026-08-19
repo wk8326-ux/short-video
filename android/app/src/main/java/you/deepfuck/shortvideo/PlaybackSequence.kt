@@ -71,10 +71,18 @@ internal fun nextFeedIndex(currentIndex: Int, itemCount: Int): Int? {
     return (currentIndex + 1).mod(itemCount)
 }
 
-internal fun nextAudioEntry(items: List<MediaEntry>, afterId: Long): MediaEntry? {
+internal fun asmrPlaybackQueue(items: List<MediaEntry>, current: MediaEntry): List<MediaEntry> {
+    val author = current.author ?: return listOf(current)
+    val queue = stableAsmrEntries(items).filter { entry ->
+        entry.author == author && entry.isAudio == current.isAudio
+    }
+    return if (queue.any { it.id == current.id }) queue else listOf(current) + queue
+}
+
+internal fun nextAsmrEntry(items: List<MediaEntry>, afterId: Long): MediaEntry? {
     val currentIndex = items.indexOfFirst { it.id == afterId }
     if (currentIndex < 0) return null
-    return items.drop(currentIndex + 1).firstOrNull(MediaEntry::isAudio)
+    return items.getOrNull(currentIndex + 1)
 }
 
 internal fun shouldAttachFeedPlayer(active: Boolean, entryId: Long, mediaId: Long?): Boolean =
