@@ -18,7 +18,9 @@ import {
   Maximize2,
   Minimize2,
   Pause,
+  Pencil,
   Play,
+  Plus,
   RefreshCw,
   Rewind,
   ScanSearch,
@@ -73,14 +75,55 @@ type FastStartSummary = {
   pending: number;
 };
 
-type AdminStatus = {
-  library: { videos: number; bytes: number };
+type LibrarySection = "feed" | "asmr";
+
+type MediaLibrarySource = {
+  id: string;
+  name: string;
+  provider: "alist" | "openlist";
+  baseUrl: string;
+  rootPath: string;
+  section: LibrarySection;
+  scanMode: "tree" | "authors" | "authors_recursive";
+  anonymous: boolean;
+  usernameConfigured: boolean;
+  tokenConfigured: boolean;
+  enabled: boolean;
+  videos: number;
+  bytes: number;
   scan: {
     running: boolean;
     lastSuccess: number | null;
     lastError: string | null;
     directories: number;
   };
+};
+
+type MediaSourceDraft = Omit<
+  MediaLibrarySource,
+  "id" | "usernameConfigured" | "tokenConfigured" | "videos" | "bytes" | "scan"
+> & { username: string; password: string; token: string };
+
+type AdminStatus = {
+  library: {
+    videos: number;
+    bytes: number;
+    guangya: { videos: number; bytes: number };
+    asmr: { videos: number; bytes: number };
+  };
+  scan: {
+    running: boolean;
+    lastSuccess: number | null;
+    lastError: string | null;
+    directories: number;
+    sources: Record<string, {
+      running: boolean;
+      lastSuccess: number | null;
+      lastError: string | null;
+      directories: number;
+    }>;
+  };
+  sources: MediaLibrarySource[];
   fastStart: {
     running: boolean;
     checked: number;
@@ -97,6 +140,8 @@ type AdminStatus = {
     fast_start_detail: string;
   }>;
 };
+
+type AdminAction = `scan-${string}` | `source-${string}` | "fast-start";
 
 const MODES: Array<{ value: FeedMode; label: string; icon: typeof Shuffle }> = [
   { value: "shuffle", label: "随机播放", icon: Shuffle },
@@ -778,7 +823,10 @@ type ManagementViewProps = {
 function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
   const [status, setStatus] = useState<AdminStatus | null>(null);
   const [error, setError] = useState("");
-  const [action, setAction] = useState<"scan" | "fast-start" | null>(null);
+  const [actions, setActions] = useState<Set<AdminAction>>(() => new Set());
+  const [editingSource, setEditingSource] = useState<MediaLibrarySource | null | undefined>();
+  const sourceDialogTrigger = useRef<HTMLElement | null>(null);
+  const closeSourceDialog = useCallback(() => setEditingSource(undefined), []);
 
   const refresh = useCallback(async () => {
     try {
@@ -801,14 +849,14 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  const runAction = async (kind: "scan" | "fast-start") => {
-    if (action) return;
-    setAction(kind);
+  const runAction = async (kind: AdminAction) => {
+    if (actions.has(kind)) return;
+    setActions((current) => new Set(current).add(kind));
     setError("");
     const force = kind === "fast-start" && status?.fastStart.summary.pending === 0;
-    const endpoint = kind === "scan"
-      ? "/api/admin/scan"
-      : `/api/admin/fast-start?force=${force ? "true" : "false"}`;
+    const endpoint = kind === "fast-start"
+      ? `/api/admin/fast-start?force=${force ? "true" : "false"}`
+      : `/api/admin/sources/${encodeURIComponent(kind.slice(5))}/scan`;
     try {
       const response = await fetch(endpoint, { method: "POST" });
       if (response.status === 401) {
@@ -818,9 +866,46 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       await refresh();
     } catch {
-      setError(kind === "scan" ? "无法启动目录扫描" : "无法启动 Fast Start 检查");
+      setError(kind.startsWith("scan-") ? "无法启动目录扫描" : "无法启动 Fast Start 检查");
     } finally {
-      setAction(null);
+      setActions((current) => {
+        const next = new Set(current);
+        next.delete(kind);
+        return next;
+      });
+    }
+  };
+
+  const saveSource = async (source: MediaLibrarySource | null, draft: MediaSourceDraft) => {
+    const action: AdminAction = `source-${source?.id ?? "new"}`;
+    if (actions.has(action)) return;
+    setActions((current) => new Set(current).add(action));
+    setError("");
+    try {
+      const response = await fetch(
+        source ? `/api/admin/sources/${encodeURIComponent(source.id)}` : "/api/admin/sources",
+        {
+          method: source ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(draft),
+        },
+      );
+      if (response.status === 401) {
+        onUnauthorized();
+        return;
+      }
+      const body = await response.json().catch(() => ({})) as { detail?: string };
+      if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+      setEditingSource(undefined);
+      await refresh();
+    } catch (sourceError) {
+      setError(sourceError instanceof Error ? sourceError.message : "无法保存媒体源");
+    } finally {
+      setActions((current) => {
+        const next = new Set(current);
+        next.delete(action);
+        return next;
+      });
     }
   };
 
@@ -841,6 +926,17 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
           <h1>媒体管理</h1>
           <p>{status ? formatDate(status.scan.lastSuccess) : "正在读取状态"}</p>
         </div>
+        <button
+          className="icon-button manage-add"
+          type="button"
+          aria-label="添加媒体源"
+          onClick={(event) => {
+            sourceDialogTrigger.current = event.currentTarget;
+            setEditingSource(null);
+          }}
+        >
+          <Plus size={22} aria-hidden="true" />
+        </button>
       </header>
 
       {error && <div className="manage-error" role="alert">{error}</div>}
@@ -873,17 +969,47 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
                 <dd>{status.scan.running ? "扫描中" : status.scan.lastError ? "异常" : "正常"}</dd>
               </div>
             </dl>
-            <div className="section-action">
-              {status.scan.running ? (
-                <span className="running-label" role="status">
-                  <LoaderCircle className="spinner" size={17} aria-hidden="true" />正在扫描目录
-                </span>
-              ) : (
-                <button className="secondary-action" type="button" onClick={() => void runAction("scan")}>
-                  {action === "scan" ? <LoaderCircle className="spinner" size={18} aria-hidden="true" /> : <RefreshCw size={18} aria-hidden="true" />}
-                  {action === "scan" ? "正在启动" : "重新扫描"}
-                </button>
-              )}
+            <div className="source-scans">
+              {status.sources.map((source) => {
+                const action: AdminAction = `scan-${source.id}`;
+                const busy = source.scan.running || actions.has(action);
+                return (
+                  <div className="source-scan-row" key={source.id}>
+                    <div className="source-scan-copy">
+                      <div className="source-scan-heading">
+                        <h3>{source.name}</h3>
+                        <span>{source.section === "feed" ? "短视频 / 长视频" : "ASMR"}</span>
+                      </div>
+                      <p className="source-address">{source.baseUrl}{source.rootPath}</p>
+                      <p>{source.videos} 项 · {source.scan.directories} 个目录 · {source.enabled ? formatDate(source.scan.lastSuccess) : "已停用"}</p>
+                      {source.scan.lastError && <p className="source-scan-error" role="alert">{source.scan.lastError}</p>}
+                    </div>
+                    <div className="source-actions">
+                      <button
+                        className="icon-button"
+                        type="button"
+                        aria-label={`编辑 ${source.name}`}
+                        onClick={(event) => {
+                          sourceDialogTrigger.current = event.currentTarget;
+                          setEditingSource(source);
+                        }}
+                      >
+                        <Pencil size={18} aria-hidden="true" />
+                      </button>
+                      <button
+                        className="secondary-action"
+                        type="button"
+                        disabled={!source.enabled || busy}
+                        aria-busy={busy}
+                        onClick={() => void runAction(action)}
+                      >
+                        {busy ? <LoaderCircle className="spinner" size={18} aria-hidden="true" /> : <RefreshCw size={18} aria-hidden="true" />}
+                        {busy ? "扫描中" : "扫描"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </section>
 
@@ -929,8 +1055,8 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
                 </span>
               ) : (
                 <button className="primary-action" type="button" onClick={() => void runAction("fast-start")}>
-                  {action === "fast-start" ? <LoaderCircle className="spinner" size={18} aria-hidden="true" /> : <ScanSearch size={18} aria-hidden="true" />}
-                  {action === "fast-start" ? "正在启动" : summary?.pending ? "检查未分析视频" : "重新检查"}
+                  {actions.has("fast-start") ? <LoaderCircle className="spinner" size={18} aria-hidden="true" /> : <ScanSearch size={18} aria-hidden="true" />}
+                  {actions.has("fast-start") ? "正在启动" : summary?.pending ? "检查未分析视频" : "重新检查"}
                 </button>
               )}
             </div>
@@ -959,7 +1085,175 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
           </section>
         </div>
       )}
+      {editingSource !== undefined && (
+        <MediaSourceDialog
+          source={editingSource}
+          saving={actions.has(`source-${editingSource?.id ?? "new"}`)}
+          returnFocus={sourceDialogTrigger.current}
+          onClose={closeSourceDialog}
+          onSave={(draft) => void saveSource(editingSource, draft)}
+        />
+      )}
     </main>
+  );
+}
+
+type MediaSourceDialogProps = {
+  source: MediaLibrarySource | null;
+  saving: boolean;
+  returnFocus: HTMLElement | null;
+  onClose: () => void;
+  onSave: (draft: MediaSourceDraft) => void;
+};
+
+function MediaSourceDialog({ source, saving, returnFocus, onClose, onSave }: MediaSourceDialogProps) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const [name, setName] = useState(source?.name ?? "");
+  const [provider, setProvider] = useState<"alist" | "openlist">(source?.provider ?? "alist");
+  const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
+  const [rootPath, setRootPath] = useState(source?.rootPath ?? "/");
+  const [section, setSection] = useState<LibrarySection>(source?.section ?? "feed");
+  const [scanMode, setScanMode] = useState<"tree" | "authors" | "authors_recursive">(
+    source?.scanMode ?? "tree",
+  );
+  const [anonymous, setAnonymous] = useState(source?.anonymous ?? true);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [token, setToken] = useState("");
+  const [enabled, setEnabled] = useState(source?.enabled ?? true);
+  const valid = Boolean(name.trim() && /^https?:\/\//i.test(baseUrl.trim()) && rootPath.trim());
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      if (event.key !== "Tab") return;
+      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+        "button:not([disabled]), input:not([disabled]), select:not([disabled])",
+      );
+      if (!focusable?.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      returnFocus?.focus();
+    };
+  }, [onClose, returnFocus]);
+
+  return (
+    <div className="source-dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section ref={dialogRef} className="source-dialog" role="dialog" aria-modal="true" aria-labelledby="source-dialog-title">
+        <header>
+          <h2 id="source-dialog-title">{source ? "编辑媒体源" : "添加媒体源"}</h2>
+          <button className="icon-button" type="button" aria-label="关闭" onClick={onClose}>
+            <XCircle size={21} aria-hidden="true" />
+          </button>
+        </header>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!valid || saving) return;
+            onSave({
+              name: name.trim(),
+              provider,
+              baseUrl: baseUrl.trim(),
+              rootPath: rootPath.trim(),
+              section,
+              scanMode: section === "feed" ? "tree" : scanMode === "tree" ? "authors_recursive" : scanMode,
+              anonymous,
+              username,
+              password,
+              token,
+              enabled,
+            });
+          }}
+        >
+          <label>
+            <span>名称</span>
+            <input value={name} onChange={(event) => setName(event.target.value)} autoFocus required />
+          </label>
+          <div className="source-form-pair">
+            <label>
+              <span>服务类型</span>
+              <select value={provider} onChange={(event) => setProvider(event.target.value as "alist" | "openlist")}>
+                <option value="alist">AList</option>
+                <option value="openlist">OpenList</option>
+              </select>
+            </label>
+            <label>
+              <span>归属板块</span>
+              <select
+                value={section}
+                onChange={(event) => {
+                  const value = event.target.value as LibrarySection;
+                  setSection(value);
+                  setScanMode(value === "feed" ? "tree" : "authors_recursive");
+                }}
+              >
+                <option value="feed">短视频 / 长视频</option>
+                <option value="asmr">ASMR</option>
+              </select>
+            </label>
+          </div>
+          <label>
+            <span>服务地址</span>
+            <input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://example.com" required />
+          </label>
+          <label>
+            <span>根目录</span>
+            <input value={rootPath} onChange={(event) => setRootPath(event.target.value)} placeholder="/media" required />
+          </label>
+          {section === "asmr" && (
+            <label>
+              <span>作者目录结构</span>
+              <select value={scanMode} onChange={(event) => setScanMode(event.target.value as "authors" | "authors_recursive")}>
+                <option value="authors">一级作者目录</option>
+                <option value="authors_recursive">嵌套作者目录</option>
+              </select>
+            </label>
+          )}
+          <label className="source-toggle">
+            <span>匿名访问</span>
+            <input type="checkbox" checked={anonymous} onChange={(event) => setAnonymous(event.target.checked)} />
+          </label>
+          {!anonymous && (
+            <>
+              <label>
+                <span>用户名{source?.usernameConfigured ? "（已配置）" : ""}</span>
+                <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
+              </label>
+              <label>
+                <span>密码</span>
+                <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="留空保持不变" autoComplete="new-password" />
+              </label>
+              <label>
+                <span>令牌{source?.tokenConfigured ? "（已配置）" : ""}</span>
+                <input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="可选，留空保持不变" autoComplete="off" />
+              </label>
+            </>
+          )}
+          <label className="source-toggle">
+            <span>启用媒体源</span>
+            <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+          </label>
+          <footer>
+            <button className="secondary-action" type="button" onClick={onClose}>取消</button>
+            <button className="primary-action" type="submit" disabled={!valid || saving}>
+              {saving && <LoaderCircle className="spinner" size={17} aria-hidden="true" />}
+              {saving ? "保存中" : "保存"}
+            </button>
+          </footer>
+        </form>
+      </section>
+    </div>
   );
 }
 

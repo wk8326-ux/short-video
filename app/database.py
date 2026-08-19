@@ -8,7 +8,7 @@ import random
 import secrets
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 
@@ -28,16 +28,25 @@ class LibraryDatabase:
                 PRAGMA synchronous=NORMAL;
                 CREATE TABLE IF NOT EXISTS videos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    path TEXT NOT NULL UNIQUE,
+                    path TEXT NOT NULL,
                     name TEXT NOT NULL,
                     size INTEGER NOT NULL DEFAULT 0,
                     modified TEXT,
                     thumb TEXT,
                     active INTEGER NOT NULL DEFAULT 1,
-                    last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    fast_start TEXT,
+                    fast_start_checked_at TEXT,
+                    fast_start_detail TEXT,
+                    source TEXT NOT NULL DEFAULT 'guangya',
+                    author TEXT,
+                    duration_seconds REAL,
+                    media_format TEXT,
+                    media_kind TEXT NOT NULL DEFAULT 'video',
+                    metadata_checked_at TEXT,
+                    metadata_detail TEXT,
+                    UNIQUE(source, path)
                 );
-                CREATE INDEX IF NOT EXISTS idx_videos_active ON videos(active, id);
-                CREATE INDEX IF NOT EXISTS idx_videos_modified ON videos(active, modified);
                 """
             )
             columns = {
@@ -68,8 +77,34 @@ class LibraryDatabase:
                 connection.execute("ALTER TABLE videos ADD COLUMN metadata_checked_at TEXT")
             if "metadata_detail" not in columns:
                 connection.execute("ALTER TABLE videos ADD COLUMN metadata_detail TEXT")
+            connection.commit()
+            self._migrate_video_path_uniqueness(connection)
             connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS media_sources (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    provider TEXT NOT NULL DEFAULT 'alist',
+                    base_url TEXT NOT NULL,
+                    root_path TEXT NOT NULL,
+                    section TEXT NOT NULL,
+                    scan_mode TEXT NOT NULL DEFAULT 'tree',
+                    anonymous INTEGER NOT NULL DEFAULT 1,
+                    token TEXT NOT NULL DEFAULT '',
+                    username TEXT NOT NULL DEFAULT '',
+                    password TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_scan_success INTEGER,
+                    last_scan_error TEXT,
+                    directories INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(base_url, root_path, section)
+                );
+                CREATE INDEX IF NOT EXISTS idx_media_sources_section
+                    ON media_sources(section, enabled, name);
+                CREATE INDEX IF NOT EXISTS idx_videos_active ON videos(active, id);
+                CREATE INDEX IF NOT EXISTS idx_videos_modified ON videos(active, modified);
                 CREATE INDEX IF NOT EXISTS idx_videos_source_active
                     ON videos(source, active, id);
                 CREATE INDEX IF NOT EXISTS idx_videos_source_duration
@@ -78,6 +113,64 @@ class LibraryDatabase:
                     ON videos(source, active, author, media_kind);
                 """
             )
+
+    @staticmethod
+    def _migrate_video_path_uniqueness(connection: sqlite3.Connection) -> None:
+        has_path_only_unique = False
+        for index in connection.execute("PRAGMA index_list(videos)").fetchall():
+            if not int(index["unique"]):
+                continue
+            columns = [
+                str(row["name"])
+                for row in connection.execute(
+                    f"PRAGMA index_info('{index['name']}')"
+                ).fetchall()
+            ]
+            if columns == ["path"]:
+                has_path_only_unique = True
+                break
+        if not has_path_only_unique:
+            return
+
+        connection.executescript(
+            """
+            CREATE TABLE videos_source_scoped (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                size INTEGER NOT NULL DEFAULT 0,
+                modified TEXT,
+                thumb TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                fast_start TEXT,
+                fast_start_checked_at TEXT,
+                fast_start_detail TEXT,
+                source TEXT NOT NULL DEFAULT 'guangya',
+                author TEXT,
+                duration_seconds REAL,
+                media_format TEXT,
+                media_kind TEXT NOT NULL DEFAULT 'video',
+                metadata_checked_at TEXT,
+                metadata_detail TEXT,
+                UNIQUE(source, path)
+            );
+            INSERT INTO videos_source_scoped(
+                id, path, name, size, modified, thumb, active, last_seen,
+                fast_start, fast_start_checked_at, fast_start_detail, source,
+                author, duration_seconds, media_format, media_kind,
+                metadata_checked_at, metadata_detail
+            )
+            SELECT
+                id, path, name, size, modified, thumb, active, last_seen,
+                fast_start, fast_start_checked_at, fast_start_detail, source,
+                author, duration_seconds, media_format, media_kind,
+                metadata_checked_at, metadata_detail
+            FROM videos;
+            DROP TABLE videos;
+            ALTER TABLE videos_source_scoped RENAME TO videos;
+            """
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10, check_same_thread=False)
@@ -94,6 +187,10 @@ class LibraryDatabase:
                 count += 1
                 yield {
                     **video,
+                    "name": str(video.get("name") or ""),
+                    "size": int(video.get("size") or 0),
+                    "modified": video.get("modified"),
+                    "thumb": str(video.get("thumb") or ""),
                     "source": source,
                     "author": video.get("author"),
                     "duration_seconds": video.get("duration_seconds"),
@@ -114,12 +211,11 @@ class LibraryDatabase:
                     :path, :name, :size, :modified, :thumb, :source, :author,
                     :duration_seconds, :media_format, :media_kind, 1, :scan_marker
                 )
-                ON CONFLICT(path) DO UPDATE SET
+                ON CONFLICT(source, path) DO UPDATE SET
                     name = excluded.name,
                     size = excluded.size,
                     modified = excluded.modified,
                     thumb = excluded.thumb,
-                    source = excluded.source,
                     author = excluded.author,
                     duration_seconds = COALESCE(videos.duration_seconds, excluded.duration_seconds),
                     media_format = excluded.media_format,
@@ -151,12 +247,178 @@ class LibraryDatabase:
             ).fetchone()
         return dict(row) if row else None
 
-    def stats(self, *, source: str | None = None) -> dict[str, int]:
+    def seed_media_sources(self, sources: Iterable[dict[str, Any]]) -> None:
+        records = list(sources)
+        with self._lock, self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO media_sources(
+                    id, name, provider, base_url, root_path, section, scan_mode,
+                    anonymous, token, username, password, enabled
+                )
+                VALUES(
+                    :id, :name, :provider, :base_url, :root_path, :section, :scan_mode,
+                    :anonymous, :token, :username, :password, :enabled
+                )
+                ON CONFLICT(id) DO NOTHING
+                """,
+                [self._source_record(source) for source in records],
+            )
+            asmr6 = next((source for source in records if source["id"] == "asmr6"), None)
+            if asmr6:
+                root = "/" + str(asmr6["root_path"]).strip("/")
+                connection.execute(
+                    """
+                    UPDATE videos
+                    SET source = 'asmr6'
+                    WHERE source = 'asmr' AND (path = ? OR path LIKE ?)
+                    """,
+                    (root, f"{root}/%"),
+                )
+
+    def add_media_source(self, source: dict[str, Any]) -> dict[str, Any]:
+        record = self._source_record(
+            {**source, "id": source.get("id") or f"source-{secrets.token_hex(6)}"}
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO media_sources(
+                    id, name, provider, base_url, root_path, section, scan_mode,
+                    anonymous, token, username, password, enabled
+                )
+                VALUES(
+                    :id, :name, :provider, :base_url, :root_path, :section, :scan_mode,
+                    :anonymous, :token, :username, :password, :enabled
+                )
+                """,
+                record,
+            )
+        return self.get_media_source(str(record["id"])) or record
+
+    def update_media_source(self, source_id: str, values: dict[str, Any]) -> dict[str, Any] | None:
+        allowed = {
+            "name",
+            "provider",
+            "base_url",
+            "root_path",
+            "section",
+            "scan_mode",
+            "anonymous",
+            "token",
+            "username",
+            "password",
+            "enabled",
+        }
+        updates = {key: value for key, value in values.items() if key in allowed}
+        if not updates:
+            return self.get_media_source(source_id)
+        if "anonymous" in updates:
+            updates["anonymous"] = int(bool(updates["anonymous"]))
+        if "enabled" in updates:
+            updates["enabled"] = int(bool(updates["enabled"]))
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                f"UPDATE media_sources SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [*updates.values(), source_id],
+            )
+        return self.get_media_source(source_id)
+
+    def get_media_source(self, source_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM media_sources WHERE id = ?",
+                (source_id,),
+            ).fetchone()
+        return self._normalize_source(row) if row else None
+
+    def list_media_sources(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
+        enabled_clause = "" if include_disabled else "WHERE s.enabled = 1"
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT s.*, COUNT(v.id) AS videos, COALESCE(SUM(v.size), 0) AS bytes
+                FROM media_sources s
+                LEFT JOIN videos v ON v.source = s.id AND v.active = 1
+                {enabled_clause}
+                GROUP BY s.id
+                ORDER BY s.section, s.created_at, s.name COLLATE NOCASE
+                """
+            ).fetchall()
+        return [self._normalize_source(row) for row in rows]
+
+    def source_ids_for_section(self, section: str) -> tuple[str, ...]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id FROM media_sources
+                WHERE section = ? AND enabled = 1
+                ORDER BY created_at, id
+                """,
+                (section,),
+            ).fetchall()
+        return tuple(str(row["id"]) for row in rows)
+
+    def update_source_scan_state(
+        self,
+        source_id: str,
+        *,
+        last_success: int | None,
+        last_error: str | None,
+        directories: int,
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE media_sources
+                SET last_scan_success = ?, last_scan_error = ?, directories = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (last_success, last_error, max(0, directories), source_id),
+            )
+
+    @staticmethod
+    def _source_record(source: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(source["id"]),
+            "name": str(source["name"]),
+            "provider": str(source.get("provider") or "alist"),
+            "base_url": str(source["base_url"]).rstrip("/"),
+            "root_path": "/" + str(source["root_path"]).strip("/"),
+            "section": str(source["section"]),
+            "scan_mode": str(source.get("scan_mode") or "tree"),
+            "anonymous": int(bool(source.get("anonymous", True))),
+            "token": str(source.get("token") or ""),
+            "username": str(source.get("username") or ""),
+            "password": str(source.get("password") or ""),
+            "enabled": int(bool(source.get("enabled", True))),
+        }
+
+    @staticmethod
+    def _normalize_source(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        source = dict(row)
+        source["anonymous"] = bool(source.get("anonymous"))
+        source["enabled"] = bool(source.get("enabled"))
+        if "videos" in source:
+            source["videos"] = int(source["videos"] or 0)
+            source["bytes"] = int(source["bytes"] or 0)
+        return source
+
+    def stats(
+        self,
+        *,
+        source: str | None = None,
+        sources: Sequence[str] | None = None,
+    ) -> dict[str, int]:
         where = "WHERE active = 1"
-        params: tuple[Any, ...] = ()
-        if source:
-            where += " AND source = ?"
-            params = (source,)
+        params: list[Any] = []
+        selected_sources = tuple(sources) if sources is not None else ((source,) if source else ())
+        if selected_sources:
+            source_clause, source_params = self._sources_clause(selected_sources)
+            where += f" AND {source_clause}"
+            params.extend(source_params)
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 f"SELECT COUNT(*) AS active, COALESCE(SUM(size), 0) AS bytes FROM videos {where}",
@@ -164,19 +426,26 @@ class LibraryDatabase:
             ).fetchone()
         return {"videos": int(row["active"]), "bytes": int(row["bytes"])}
 
-    def fast_start_candidates(self, *, force: bool = False) -> list[dict[str, Any]]:
+    def fast_start_candidates(
+        self,
+        *,
+        force: bool = False,
+        sources: Sequence[str] = ("guangya",),
+    ) -> list[dict[str, Any]]:
         condition = "" if force else "AND fast_start IS NULL"
+        source_clause, source_params = self._sources_clause(sources)
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT id, path, name
+                SELECT id, path, name, source
                 FROM videos
                 WHERE active = 1
-                  AND source = 'guangya'
+                  AND {source_clause}
                   AND (lower(name) LIKE '%.mp4' OR lower(name) LIKE '%.m4v' OR lower(name) LIKE '%.mov')
                   {condition}
                 ORDER BY id
-                """
+                """,
+                source_params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -186,22 +455,24 @@ class LibraryDatabase:
                 """
                 UPDATE videos
                 SET fast_start = ?, fast_start_detail = ?, fast_start_checked_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND active = 1 AND source = 'guangya'
+                WHERE id = ? AND active = 1
                 """,
                 (status, detail[:240], video_id),
             )
 
-    def fast_start_summary(self) -> dict[str, int]:
+    def fast_start_summary(self, *, sources: Sequence[str] = ("guangya",)) -> dict[str, int]:
+        source_clause, source_params = self._sources_clause(sources)
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT fast_start, COUNT(*) AS count
                 FROM videos
                 WHERE active = 1
-                  AND source = 'guangya'
+                  AND {source_clause}
                   AND (lower(name) LIKE '%.mp4' OR lower(name) LIKE '%.m4v' OR lower(name) LIKE '%.mov')
                 GROUP BY fast_start
-                """
+                """,
+                source_params,
             ).fetchall()
         counts = {str(row["fast_start"]): int(row["count"]) for row in rows if row["fast_start"]}
         total = sum(int(row["count"]) for row in rows)
@@ -216,19 +487,25 @@ class LibraryDatabase:
             "pending": total - checked,
         }
 
-    def fast_start_issues(self, *, limit: int) -> list[dict[str, Any]]:
+    def fast_start_issues(
+        self,
+        *,
+        limit: int,
+        sources: Sequence[str] = ("guangya",),
+    ) -> list[dict[str, Any]]:
+        source_clause, source_params = self._sources_clause(sources)
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, name, path, fast_start, fast_start_detail, fast_start_checked_at
                 FROM videos
                 WHERE active = 1
-                  AND source = 'guangya'
+                  AND {source_clause}
                   AND fast_start IN ('not_optimized', 'inconclusive', 'error')
                 ORDER BY CASE fast_start WHEN 'not_optimized' THEN 0 WHEN 'error' THEN 1 ELSE 2 END, id
                 LIMIT ?
                 """,
-                (limit,),
+                [*source_params, limit],
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -241,18 +518,22 @@ class LibraryDatabase:
         exclude_ids: set[int] | None = None,
         start_id: int | None = None,
         source: str = "guangya",
+        sources: Sequence[str] | None = None,
         category: str | None = None,
         duration_boundary: float = 180.0,
     ) -> tuple[list[dict[str, Any]], str | None, int]:
         excluded = exclude_ids or set()
-        filter_key = self._filter_key(excluded, start_id, f"{source}:{category or 'all'}")
+        selected_sources = tuple(sources) if sources is not None else (source,)
+        scope = ",".join(sorted(selected_sources))
+        filter_key = self._filter_key(excluded, start_id, f"{scope}:{category or 'all'}")
         seed, offset, cursor_mode, cursor_filter = self._decode_cursor(cursor)
         if cursor and (cursor_mode != mode or cursor_filter != filter_key):
             seed, offset = secrets.randbits(63), 0
 
         with self._lock, self._connect() as connection:
-            conditions = ["active = 1", "source = ?"]
-            params: list[Any] = [source]
+            source_clause, source_params = self._sources_clause(selected_sources)
+            conditions = ["active = 1", source_clause]
+            params: list[Any] = list(source_params)
             if category == "short":
                 conditions.append("(duration_seconds < ? OR duration_seconds IS NULL)")
                 params.append(duration_boundary)
@@ -326,25 +607,27 @@ class LibraryDatabase:
         *,
         force: bool = False,
         limit: int = 30,
+        sources: Sequence[str] = ("guangya",),
     ) -> list[dict[str, Any]]:
         retry_condition = "" if force else (
             "AND (metadata_checked_at IS NULL "
             "OR metadata_checked_at < datetime('now', '-1 day'))"
         )
+        source_clause, source_params = self._sources_clause(sources)
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT id, path, name, size
+                SELECT id, path, name, size, source
                 FROM videos
                 WHERE active = 1
-                  AND source = 'guangya'
+                  AND {source_clause}
                   AND duration_seconds IS NULL
                   AND (lower(name) LIKE '%.mp4' OR lower(name) LIKE '%.m4v' OR lower(name) LIKE '%.mov')
                   {retry_condition}
                 ORDER BY size DESC, id
                 LIMIT ?
                 """,
-                (max(1, limit),),
+                [*source_params, max(1, limit)],
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -381,9 +664,11 @@ class LibraryDatabase:
         search: str = "",
         limit: int | None = None,
         offset: int = 0,
+        sources: Sequence[str] = ("asmr",),
     ) -> list[dict[str, Any]]:
-        conditions = ["active = 1", "source = 'asmr'", "author IS NOT NULL"]
-        params: list[Any] = []
+        source_clause, source_params = self._sources_clause(sources)
+        conditions = ["active = 1", source_clause, "author IS NOT NULL"]
+        params: list[Any] = list(source_params)
         if search:
             conditions.append("author LIKE ? ESCAPE '\\'")
             params.append(f"%{self._escape_like(search)}%")
@@ -415,9 +700,15 @@ class LibraryDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def asmr_author_count(self, *, search: str = "") -> int:
-        conditions = ["active = 1", "source = 'asmr'", "author IS NOT NULL"]
-        params: list[Any] = []
+    def asmr_author_count(
+        self,
+        *,
+        search: str = "",
+        sources: Sequence[str] = ("asmr",),
+    ) -> int:
+        source_clause, source_params = self._sources_clause(sources)
+        conditions = ["active = 1", source_clause, "author IS NOT NULL"]
+        params: list[Any] = list(source_params)
         if search:
             conditions.append("author LIKE ? ESCAPE '\\'")
             params.append(f"%{self._escape_like(search)}%")
@@ -436,9 +727,11 @@ class LibraryDatabase:
         search: str = "",
         limit: int | None = None,
         offset: int = 0,
+        sources: Sequence[str] = ("asmr",),
     ) -> list[dict[str, Any]]:
-        conditions = ["active = 1", "source = 'asmr'", "author = ?"]
-        params: list[Any] = [author]
+        source_clause, source_params = self._sources_clause(sources)
+        conditions = ["active = 1", source_clause, "author = ?"]
+        params: list[Any] = [*source_params, author]
         if kind == "video":
             conditions.append(
                 "(LOWER(COALESCE(media_format, '')) = 'm3u8' OR media_kind = 'video')"
@@ -473,9 +766,11 @@ class LibraryDatabase:
         author: str,
         kind: str = "all",
         search: str = "",
+        sources: Sequence[str] = ("asmr",),
     ) -> int:
-        conditions = ["active = 1", "source = 'asmr'", "author = ?"]
-        params: list[Any] = [author]
+        source_clause, source_params = self._sources_clause(sources)
+        conditions = ["active = 1", source_clause, "author = ?"]
+        params: list[Any] = [*source_params, author]
         if kind == "video":
             conditions.append(
                 "(LOWER(COALESCE(media_format, '')) = 'm3u8' OR media_kind = 'video')"
@@ -493,6 +788,14 @@ class LibraryDatabase:
                 params,
             ).fetchone()
         return int(row[0] or 0)
+
+    @staticmethod
+    def _sources_clause(sources: Sequence[str]) -> tuple[str, list[str]]:
+        selected = tuple(dict.fromkeys(str(source) for source in sources if source))
+        if not selected:
+            return "0 = 1", []
+        placeholders = ", ".join("?" for _ in selected)
+        return f"source IN ({placeholders})", list(selected)
 
     @staticmethod
     def _escape_like(value: str) -> str:

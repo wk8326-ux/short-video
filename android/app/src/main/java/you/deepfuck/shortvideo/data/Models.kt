@@ -20,6 +20,11 @@ enum class AsmrFilter(val apiValue: String, val label: String) {
     AUDIO("audio", "音频"),
 }
 
+enum class LibrarySection(val apiValue: String, val label: String) {
+    FEED("feed", "短视频 / 长视频"),
+    ASMR("asmr", "ASMR"),
+}
+
 data class MediaEntry(
     val id: Long,
     val title: String,
@@ -109,10 +114,79 @@ data class AdminStatus(
     val scanRunning: Boolean,
     val scanLastSuccess: Long?,
     val scanLastError: String?,
+    val sources: List<MediaLibrarySource>,
     val fastStartRunning: Boolean,
     val fastStartOptimized: Int,
     val fastStartIssues: Int,
     val fastStartPending: Int,
+)
+
+data class LibraryScanStatus(
+    val running: Boolean,
+    val lastSuccess: Long?,
+    val lastError: String?,
+    val directories: Int,
+) {
+    companion object {
+        fun fromJson(value: JSONObject?): LibraryScanStatus = LibraryScanStatus(
+            running = value?.optBoolean("running") == true,
+            lastSuccess = value?.optLong("lastSuccess")?.takeIf { it > 0L },
+            lastError = value?.optNullableString("lastError"),
+            directories = value?.optInt("directories") ?: 0,
+        )
+    }
+}
+
+data class MediaLibrarySource(
+    val id: String,
+    val name: String,
+    val provider: String,
+    val baseUrl: String,
+    val rootPath: String,
+    val section: LibrarySection,
+    val scanMode: String,
+    val anonymous: Boolean,
+    val usernameConfigured: Boolean,
+    val tokenConfigured: Boolean,
+    val enabled: Boolean,
+    val videos: Int,
+    val bytes: Long,
+    val scan: LibraryScanStatus,
+) {
+    companion object {
+        fun fromJson(value: JSONObject): MediaLibrarySource = MediaLibrarySource(
+            id = value.optString("id"),
+            name = value.optString("name"),
+            provider = value.optString("provider", "alist"),
+            baseUrl = value.optString("baseUrl"),
+            rootPath = value.optString("rootPath", "/"),
+            section = LibrarySection.entries.firstOrNull {
+                it.apiValue == value.optString("section")
+            } ?: LibrarySection.FEED,
+            scanMode = value.optString("scanMode", "tree"),
+            anonymous = value.optBoolean("anonymous", true),
+            usernameConfigured = value.optBoolean("usernameConfigured"),
+            tokenConfigured = value.optBoolean("tokenConfigured"),
+            enabled = value.optBoolean("enabled", true),
+            videos = value.optInt("videos"),
+            bytes = value.optLong("bytes"),
+            scan = LibraryScanStatus.fromJson(value.optJSONObject("scan")),
+        )
+    }
+}
+
+data class MediaSourceDraft(
+    val name: String,
+    val provider: String,
+    val baseUrl: String,
+    val rootPath: String,
+    val section: LibrarySection,
+    val scanMode: String,
+    val anonymous: Boolean,
+    val token: String = "",
+    val username: String = "",
+    val password: String = "",
+    val enabled: Boolean = true,
 )
 
 internal fun JSONObject.optNullableString(name: String): String? =

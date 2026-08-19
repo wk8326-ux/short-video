@@ -1,6 +1,7 @@
 import hashlib
 import importlib
 import json
+import sys
 
 from fastapi.testclient import TestClient
 
@@ -15,6 +16,7 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     monkeypatch.setenv("AUTH_PASSWORD_HASH", "scrypt:test")
     monkeypatch.setenv("SESSION_SECRET", "test-session-secret-with-at-least-32-characters")
 
+    sys.modules.pop("app.main", None)
     main = importlib.import_module("app.main")
 
     async def idle_scan(stop):
@@ -29,14 +31,18 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
 
     monkeypatch.setattr(main, "spawn_background", record_background)
 
-    async def resolved_direct_url(video_id, path, *, refresh=False):
-        return "https://media.example/video.mp4", False
-
-    monkeypatch.setattr(main.direct_urls, "get", resolved_direct_url)
     cookie = f"short_session={main.session_manager.issue()}"
     headers = {"Cookie": cookie}
 
     with TestClient(main.app) as client:
+        async def resolved_direct_url(video_id, path, *, refresh=False):
+            return "https://media.example/video.mp4", False
+
+        monkeypatch.setattr(
+            main.source_registry.get("guangya").direct_urls,
+            "get",
+            resolved_direct_url,
+        )
         main.database.replace_scan(
             [
                 {
@@ -142,6 +148,44 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
             headers={**headers, "Range": "bytes=3-"},
         )
         stale_update = client.get("/api/app/update/apk?versionCode=131", headers=headers)
+        added_source = client.post(
+            "/api/admin/sources",
+            headers=headers,
+            json={
+                "name": "备用 ASMR",
+                "provider": "openlist",
+                "baseUrl": "https://backup.example",
+                "rootPath": "/library",
+                "section": "asmr",
+                "scanMode": "authors_recursive",
+                "anonymous": False,
+                "token": "private-token",
+                "username": "reader",
+                "password": "private-password",
+                "enabled": True,
+            },
+        )
+        source_id = added_source.json()["id"]
+        source_list = client.get("/api/admin/sources", headers=headers)
+        disabled_source = client.put(
+            f"/api/admin/sources/{source_id}",
+            headers=headers,
+            json={
+                "name": "备用 ASMR",
+                "provider": "openlist",
+                "baseUrl": "https://backup.example",
+                "rootPath": "/library",
+                "section": "asmr",
+                "scanMode": "authors_recursive",
+                "anonymous": False,
+                "username": "reader",
+                "enabled": False,
+            },
+        )
+        disabled_scan = client.post(
+            f"/api/admin/sources/{source_id}/scan",
+            headers=headers,
+        )
 
     assert [item["title"] for item in short.json()["items"]] == ["short"]
     assert [item["title"] for item in long.json()["items"]] == ["long"]
@@ -175,4 +219,12 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     assert update_range.headers["accept-ranges"] == "bytes"
     assert update_range.headers["content-range"] == "bytes 3-9/10"
     assert stale_update.status_code == 409
+    assert added_source.status_code == 201
+    assert added_source.json()["section"] == "asmr"
+    assert added_source.json()["tokenConfigured"] is True
+    assert "token" not in added_source.json()
+    assert "password" not in added_source.json()
+    assert len(source_list.json()["items"]) == 4
+    assert disabled_source.json()["enabled"] is False
+    assert disabled_scan.status_code == 404
     assert any(name.startswith("prewarm-asmr-play-") for name in spawned_names)

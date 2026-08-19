@@ -33,6 +33,9 @@ class AListClient:
         media_path: str | None = None,
         extensions: frozenset[str] | None = None,
         anonymous: bool = False,
+        token: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
         request_interval_seconds: float = 0.0,
     ):
         self.settings = settings
@@ -45,9 +48,13 @@ class AListClient:
             timeout=httpx.Timeout(20.0, connect=10.0),
         )
         self._owns_client = client is None
-        self._token = "" if anonymous else settings.alist_token
-        self._username = "" if anonymous else settings.alist_username
-        self._password = "" if anonymous else settings.alist_password
+        self._token = "" if anonymous else (settings.alist_token if token is None else token)
+        self._username = "" if anonymous else (
+            settings.alist_username if username is None else username
+        )
+        self._password = "" if anonymous else (
+            settings.alist_password if password is None else password
+        )
         self._auth_lock = asyncio.Lock()
         self._request_lock = asyncio.Lock()
         self._request_interval_seconds = max(0.0, request_interval_seconds)

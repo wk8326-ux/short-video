@@ -1,5 +1,5 @@
 const CACHE_NAME = "short-video-shell-v4";
-const SHELL = ["/", "/manifest.webmanifest", "/icon.svg"];
+const SHELL = ["/", "/manifest.webmanifest", "/icon.png"];
 
 async function cacheShell() {
   const cache = await caches.open(CACHE_NAME);

@@ -30,6 +30,7 @@ import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
+import you.deepfuck.shortvideo.data.MediaSourceDraft
 import you.deepfuck.shortvideo.data.PlaybackPreferences
 import you.deepfuck.shortvideo.data.shouldRefreshAsmrAuthorIndex
 import you.deepfuck.shortvideo.media.PlaybackEngine
@@ -71,6 +72,7 @@ data class AppUiState(
     val showManagement: Boolean = false,
     val adminStatus: AdminStatus? = null,
     val adminLoading: Boolean = false,
+    val adminActions: Set<String> = emptySet(),
     val adminError: String? = null,
     val appUpdate: AppUpdateUiState = AppUpdateUiState(),
     val showRuntimeLogs: Boolean = false,
@@ -503,9 +505,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun startLibraryScan() = runAdminAction { api.startScan() }
+    fun startLibraryScan(sourceId: String) = runAdminAction("scan-$sourceId") {
+        api.startScan(sourceId)
+    }
 
-    fun startFastStartCheck() = runAdminAction { api.startFastStartCheck() }
+    fun saveMediaSource(sourceId: String?, draft: MediaSourceDraft) =
+        runAdminAction("source-${sourceId ?: "new"}") {
+            api.saveMediaSource(sourceId, draft)
+        }
+
+    fun startFastStartCheck() = runAdminAction("fast-start") { api.startFastStartCheck() }
 
     fun checkForAppUpdate() {
         appUpdateJob?.cancel()
@@ -1136,22 +1145,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun runAdminAction(block: () -> Unit) {
-        if (mutableState.value.adminLoading) return
-        mutableState.value = mutableState.value.copy(adminLoading = true, adminError = null)
+    private fun runAdminAction(action: String, block: () -> Unit) {
+        if (action in mutableState.value.adminActions) return
+        mutableState.update {
+            it.copy(adminActions = it.adminActions + action, adminError = null)
+        }
         viewModelScope.launch {
             runApi(block)
                 .onSuccess {
                     delay(500)
-                    mutableState.value = mutableState.value.copy(adminLoading = false)
+                    mutableState.update { it.copy(adminActions = it.adminActions - action) }
                     loadAdminStatus()
                 }
                 .onFailure { error ->
                     if (!handleUnauthorized(error)) {
-                        mutableState.value = mutableState.value.copy(
-                            adminLoading = false,
-                            adminError = "操作失败，请稍后重试",
-                        )
+                        mutableState.update {
+                            it.copy(
+                                adminActions = it.adminActions - action,
+                                adminError = "操作失败，请稍后重试",
+                            )
+                        }
                     }
                 }
         }

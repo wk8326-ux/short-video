@@ -1,3 +1,5 @@
+import sqlite3
+
 from app.database import LibraryDatabase
 
 
@@ -262,3 +264,101 @@ def test_duration_probe_batch_is_limited_and_prioritizes_large_files(tmp_path):
         "video-7.mp4",
         "video-6.mp4",
     ]
+
+
+def test_multiple_sources_can_share_paths_and_aggregate_into_one_section(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    shared_path = {
+        "path": "/media/shared.mp4",
+        "name": "shared.mp4",
+        "size": 10,
+        "modified": "2026-08-19",
+        "thumb": "",
+    }
+
+    database.replace_scan([shared_path], source="feed-a")
+    database.replace_scan([{**shared_path, "size": 20}], source="feed-b")
+
+    rows, _, total = database.feed(
+        limit=10,
+        cursor=None,
+        mode="oldest",
+        sources=("feed-a", "feed-b"),
+    )
+
+    assert total == 2
+    assert {row["source"] for row in rows} == {"feed-a", "feed-b"}
+    assert database.stats(sources=("feed-a", "feed-b")) == {
+        "videos": 2,
+        "bytes": 30,
+    }
+
+
+def test_media_source_registry_persists_scan_state_and_section(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    database.seed_media_sources(
+        [
+            {
+                "id": "guangya",
+                "name": "光鸭",
+                "provider": "alist",
+                "base_url": "https://guangya.example",
+                "root_path": "/media",
+                "section": "feed",
+                "scan_mode": "tree",
+                "anonymous": False,
+                "token": "secret",
+                "username": "",
+                "password": "",
+                "enabled": True,
+            }
+        ]
+    )
+    database.update_source_scan_state(
+        "guangya",
+        last_success=1787100000,
+        last_error=None,
+        directories=12,
+    )
+
+    source = database.get_media_source("guangya")
+
+    assert source is not None
+    assert source["section"] == "feed"
+    assert source["last_scan_success"] == 1787100000
+    assert source["directories"] == 12
+    assert database.source_ids_for_section("feed") == ("guangya",)
+
+
+def test_initialize_migrates_legacy_path_unique_without_changing_ids(tmp_path):
+    path = tmp_path / "library.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                size INTEGER NOT NULL DEFAULT 0,
+                modified TEXT,
+                thumb TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                source TEXT NOT NULL DEFAULT 'guangya'
+            );
+            INSERT INTO videos(id, path, name, source)
+            VALUES(41, '/media/existing.mp4', 'existing.mp4', 'guangya');
+            """
+        )
+
+    database = LibraryDatabase(str(path))
+    database.initialize()
+    database.replace_scan(
+        [{"path": "/media/existing.mp4", "name": "existing.mp4", "size": 2, "thumb": ""}],
+        source="second-source",
+    )
+
+    assert database.get_video(41)["source"] == "guangya"
+    assert database.stats()["videos"] == 2

@@ -163,6 +163,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         val scan = payload.getJSONObject("scan")
         val fastStart = payload.getJSONObject("fastStart")
         val summary = fastStart.getJSONObject("summary")
+        val sources = payload.optJSONArray("sources")
         return AdminStatus(
             totalItems = library.optInt("videos"),
             totalBytes = library.optLong("bytes"),
@@ -171,6 +172,11 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             scanRunning = scan.optBoolean("running"),
             scanLastSuccess = scan.optLong("lastSuccess").takeIf { it > 0L },
             scanLastError = scan.optNullableString("lastError"),
+            sources = buildList {
+                if (sources != null) for (index in 0 until sources.length()) {
+                    sources.optJSONObject(index)?.let { add(MediaLibrarySource.fromJson(it)) }
+                }
+            },
             fastStartRunning = fastStart.optBoolean("running"),
             fastStartOptimized = summary.optInt("optimized"),
             fastStartIssues = summary.optInt("notOptimized") + summary.optInt("errors"),
@@ -178,7 +184,29 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         )
     }
 
-    fun startScan() = post("/api/admin/scan")
+    fun startScan(sourceId: String) = post("/api/admin/sources/$sourceId/scan")
+
+    fun saveMediaSource(sourceId: String?, draft: MediaSourceDraft) {
+        val body = JSONObject()
+            .put("name", draft.name)
+            .put("provider", draft.provider)
+            .put("baseUrl", draft.baseUrl)
+            .put("rootPath", draft.rootPath)
+            .put("section", draft.section.apiValue)
+            .put("scanMode", draft.scanMode)
+            .put("anonymous", draft.anonymous)
+            .put("token", draft.token)
+            .put("username", draft.username)
+            .put("password", draft.password)
+            .put("enabled", draft.enabled)
+            .toString()
+            .toRequestBody(JSON_MEDIA_TYPE)
+        val target = sourceId?.let { "/api/admin/sources/$it" } ?: "/api/admin/sources"
+        val request = Request.Builder().url(url(target)).apply {
+            if (sourceId == null) post(body) else put(body)
+        }.build()
+        executeJson(request)
+    }
 
     fun startFastStartCheck() = post("/api/admin/fast-start")
 

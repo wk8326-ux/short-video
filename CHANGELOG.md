@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.4.0] - 2026-08-19
+
+### Added
+
+- Add persistent AList/OpenList source management with create, edit, enable/disable, per-source statistics, and independent scan actions in Android and PWA.
+- Aggregate any number of sources into the short/long feed or ASMR section while retaining the 180-second short/long split.
+- Seed the existing library as three independently managed sources: Guangya, `asmrgay / asmr`, and `asmrgay / asmr6`.
+
+### Changed
+
+- Route scans, direct URL resolution, duration probes, and Fast Start checks through each media source's own runtime client and cache.
+- Scope media uniqueness to source plus path so identical paths from different AList/OpenList servers can coexist.
+- Replace the Android and PWA launcher artwork with the supplied mint player icon.
+
+### Fixed
+
+- Rescanning one media source no longer scans or changes any other source in the same section.
+- Preserve existing media IDs and indexed records while migrating legacy databases to source-scoped paths.
+
 ## [1.3.7] - 2026-08-19
 
 ### Changed
