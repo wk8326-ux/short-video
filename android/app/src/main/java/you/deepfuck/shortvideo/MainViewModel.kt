@@ -123,6 +123,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var feedTotalJob: Job? = null
     private var feedRequestGeneration = 0L
     private val feedSessions = FeedSessionRegistry()
+    private val feedLibraryRefresh = FeedLibraryRefreshGate()
     private var asmrAuthorsJob: Job? = null
     private var asmrAuthorsLoaded = false
     private var asmrAuthorIndexRestored = false
@@ -243,7 +244,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (surface == MediaSurface.ASMR) {
             restoreAsmrSurface()
         } else {
-            restoreFeed(surface)
+            if (!refreshPendingFeedLibrary()) restoreFeed(surface)
         }
     }
 
@@ -288,7 +289,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun activateFeedItem(index: Int, autoPlay: Boolean) {
         val state = mutableState.value
-        if (!shouldActivateFeedItem(state.surface)) return
+        if (!shouldActivateFeedItem(state.surface, state.showManagement)) return
         val entry = state.feedItems.getOrNull(index) ?: return
         if (activeFeedItemId == entry.id) {
             if (autoPlay && !playback.player.playWhenReady) playback.player.play()
@@ -464,6 +465,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun hideManagement() {
         logs.info("management_close", "surface=${mutableState.value.surface}")
         mutableState.value = mutableState.value.copy(showManagement = false)
+        refreshPendingFeedLibrary()
     }
 
     fun showRuntimeLogs() {
@@ -1132,13 +1134,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             LibrarySection.FEED -> {
                 feedSessions.clear()
                 preferences.clearFeedSessions()
-                if (mutableState.value.surface != MediaSurface.ASMR) {
-                    activeFeedItemId = null
-                    requestFeed(reset = true)
-                }
+                feedLibraryRefresh.markPending()
+                refreshPendingFeedLibrary()
             }
             LibrarySection.ASMR -> refreshAsmrLibrary()
         }
+    }
+
+    private fun refreshPendingFeedLibrary(): Boolean {
+        val state = mutableState.value
+        if (!feedLibraryRefresh.consumeIfVisible(state.surface, state.showManagement)) return false
+        activeFeedItemId = null
+        restoreFeed(state.surface)
+        return true
     }
 
     private fun refreshAsmrLibrary() {

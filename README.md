@@ -57,12 +57,12 @@ Android updates are published from `/data/app-update`, which is inside the exist
 
 ```json
 {
-  "versionCode": 142,
-  "versionName": "1.4.2",
-  "apkFile": "short-video-android-v1.4.2-debug.apk",
-  "sha256": "086fe5bbe7da6dda33e91a3662d07726c3e6d204b3a365a6883029f1311ac0e9",
-  "size": 22692112,
-  "notes": "强化锁屏后台更新与断点续传；媒体库仅手工逐源扫描，并在扫描完成后刷新 ASMR 作者与作品缓存。"
+  "versionCode": 143,
+  "versionName": "1.4.3",
+  "apkFile": "short-video-android-v1.4.3-debug.apk",
+  "sha256": "96b7105965081e709c75b7870d63fff6b4a3bf2be562fc6750412cee75d43c69",
+  "size": 22674708,
+  "notes": "修复手工扫描光鸭媒体库完成后，管理页面背后的短视频或长视频被刷新并自动播放的问题。"
 }
 ```
 

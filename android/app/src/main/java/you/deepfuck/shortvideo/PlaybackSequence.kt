@@ -108,7 +108,29 @@ internal fun nextAsmrEntry(items: List<MediaEntry>, afterId: Long): MediaEntry? 
 internal fun shouldAttachFeedPlayer(active: Boolean, entryId: Long, mediaId: Long?): Boolean =
     active && mediaId == entryId
 
-internal fun shouldActivateFeedItem(surface: MediaSurface): Boolean = surface != MediaSurface.ASMR
+internal fun shouldActivateFeedItem(
+    surface: MediaSurface,
+    showManagement: Boolean,
+): Boolean = surface != MediaSurface.ASMR && !showManagement
+
+internal fun shouldRefreshFeedAfterScan(
+    surface: MediaSurface,
+    showManagement: Boolean,
+): Boolean = surface != MediaSurface.ASMR && !showManagement
+
+internal class FeedLibraryRefreshGate {
+    private var pending = false
+
+    fun markPending() {
+        pending = true
+    }
+
+    fun consumeIfVisible(surface: MediaSurface, showManagement: Boolean): Boolean {
+        if (!pending || !shouldRefreshFeedAfterScan(surface, showManagement)) return false
+        pending = false
+        return true
+    }
+}
 
 internal fun shouldApplyFeedResponse(
     requestGeneration: Long,

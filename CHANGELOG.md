@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.4.3] - 2026-08-20
+
+### Fixed
+
+- Defer short/long feed sequence refreshes triggered by a completed source scan until the management screen is closed or the feed becomes visible again.
+- Prevent feed activation and automatic playback while the management screen is visible, including asynchronous feed callbacks that finish after management was opened.
+
 ## [1.4.2] - 2026-08-19
 
 ### Changed

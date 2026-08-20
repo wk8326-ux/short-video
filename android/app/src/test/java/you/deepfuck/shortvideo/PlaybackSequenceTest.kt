@@ -126,9 +126,30 @@ class PlaybackSequenceTest {
 
     @Test
     fun staleFeedCallbacksCannotRestartPlaybackInsideAsmr() {
-        assertTrue(shouldActivateFeedItem(MediaSurface.SHORT))
-        assertTrue(shouldActivateFeedItem(MediaSurface.LONG))
-        assertFalse(shouldActivateFeedItem(MediaSurface.ASMR))
+        assertTrue(shouldActivateFeedItem(MediaSurface.SHORT, showManagement = false))
+        assertTrue(shouldActivateFeedItem(MediaSurface.LONG, showManagement = false))
+        assertFalse(shouldActivateFeedItem(MediaSurface.ASMR, showManagement = false))
+        assertFalse(shouldActivateFeedItem(MediaSurface.SHORT, showManagement = true))
+        assertFalse(shouldActivateFeedItem(MediaSurface.LONG, showManagement = true))
+    }
+
+    @Test
+    fun `feed scan refresh is deferred while management is visible`() {
+        assertTrue(shouldRefreshFeedAfterScan(MediaSurface.SHORT, showManagement = false))
+        assertTrue(shouldRefreshFeedAfterScan(MediaSurface.LONG, showManagement = false))
+        assertFalse(shouldRefreshFeedAfterScan(MediaSurface.SHORT, showManagement = true))
+        assertFalse(shouldRefreshFeedAfterScan(MediaSurface.LONG, showManagement = true))
+        assertFalse(shouldRefreshFeedAfterScan(MediaSurface.ASMR, showManagement = false))
+
+        val gate = FeedLibraryRefreshGate()
+        gate.markPending()
+        assertFalse(gate.consumeIfVisible(MediaSurface.SHORT, showManagement = true))
+        assertTrue(gate.consumeIfVisible(MediaSurface.SHORT, showManagement = false))
+        assertFalse(gate.consumeIfVisible(MediaSurface.SHORT, showManagement = false))
+
+        gate.markPending()
+        assertFalse(gate.consumeIfVisible(MediaSurface.ASMR, showManagement = false))
+        assertTrue(gate.consumeIfVisible(MediaSurface.LONG, showManagement = false))
     }
 
     @Test
