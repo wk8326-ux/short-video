@@ -1,6 +1,7 @@
 import sqlite3
 
 from app.database import LibraryDatabase
+from app.movie_metadata import parse_movie_filename
 
 
 class TracedLibraryDatabase(LibraryDatabase):
@@ -363,3 +364,55 @@ def test_initialize_migrates_legacy_path_unique_without_changing_ids(tmp_path):
 
     assert database.get_video(41)["source"] == "guangya"
     assert database.stats()["videos"] == 2
+
+
+def test_movie_index_keeps_metadata_across_rescans_and_removes_missing_rows(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    records = [
+        {
+            "path": "/movies/流浪地球2.2023.2160p.mkv",
+            "name": "流浪地球2.2023.2160p.mkv",
+            "size": 100,
+            "modified": "2026-08-20",
+            "thumb": "",
+            "media_format": "mkv",
+        },
+        {
+            "path": "/movies/另一部.2022.mp4",
+            "name": "另一部.2022.mp4",
+            "size": 200,
+            "modified": "2026-08-20",
+            "thumb": "",
+            "media_format": "mp4",
+        },
+    ]
+    database.replace_scan(records, source="movies")
+    database.sync_movie_index("movies", parse_movie_filename)
+
+    first = database.movies(sources=("movies",), limit=10)
+    assert [item["display_title"] for item in first] == ["另一部", "流浪地球2"]
+    assert first[1]["year"] == 2023
+    matched_id = first[1]["id"]
+    database.update_movie_metadata(
+        matched_id,
+        display_title="流浪地球 2",
+        match_status="matched",
+        tmdb_id=123,
+    )
+
+    database.replace_scan(records[:1], source="movies")
+    database.sync_movie_index("movies", parse_movie_filename)
+
+    current = database.movies(sources=("movies",), limit=10)
+    assert len(current) == 1
+    assert current[0]["id"] == matched_id
+    assert current[0]["display_title"] == "流浪地球 2"
+    assert database.movie_count(sources=("movies",)) == 1
+
+
+def test_movie_filename_parser_is_conservative():
+    parsed = parse_movie_filename("The.Dark.Knight.2008.1080p.BluRay.x264.mkv")
+    assert parsed.display_title == "The Dark Knight"
+    assert parsed.normalized_title == "the dark knight"
+    assert parsed.year == 2008

@@ -111,6 +111,30 @@ class LibraryDatabase:
                     ON videos(source, active, duration_seconds);
                 CREATE INDEX IF NOT EXISTS idx_videos_author
                     ON videos(source, active, author, media_kind);
+                CREATE TABLE IF NOT EXISTS movies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id INTEGER NOT NULL UNIQUE,
+                    source TEXT NOT NULL,
+                    display_title TEXT NOT NULL,
+                    normalized_title TEXT NOT NULL,
+                    original_title TEXT,
+                    year INTEGER,
+                    overview TEXT,
+                    poster_url TEXT,
+                    backdrop_url TEXT,
+                    rating REAL,
+                    runtime_minutes INTEGER,
+                    tmdb_id INTEGER,
+                    match_status TEXT NOT NULL DEFAULT 'pending',
+                    match_confidence REAL,
+                    scraped_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_movies_source_title
+                    ON movies(source, display_title COLLATE NOCASE);
+                CREATE INDEX IF NOT EXISTS idx_movies_match_status
+                    ON movies(source, match_status, updated_at);
                 """
             )
 
@@ -246,6 +270,181 @@ class LibraryDatabase:
                 "SELECT * FROM videos WHERE id = ? AND active = 1", (video_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def sync_movie_index(self, source: str, parser: Any) -> int:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, source, name
+                FROM videos
+                WHERE source = ? AND active = 1
+                ORDER BY id
+                """,
+                (source,),
+            ).fetchall()
+            parsed_rows = []
+            for row in rows:
+                parsed = parser(str(row["name"]))
+                parsed_rows.append(
+                    {
+                        "video_id": int(row["id"]),
+                        "source": source,
+                        "display_title": parsed.display_title,
+                        "normalized_title": parsed.normalized_title,
+                        "year": parsed.year,
+                    }
+                )
+            connection.executemany(
+                """
+                INSERT INTO movies(video_id, source, display_title, normalized_title, year)
+                VALUES(:video_id, :source, :display_title, :normalized_title, :year)
+                ON CONFLICT(video_id) DO UPDATE SET
+                    source = excluded.source,
+                    display_title = CASE
+                        WHEN movies.match_status IN ('matched', 'manual') THEN movies.display_title
+                        ELSE excluded.display_title
+                    END,
+                    normalized_title = CASE
+                        WHEN movies.match_status IN ('matched', 'manual') THEN movies.normalized_title
+                        ELSE excluded.normalized_title
+                    END,
+                    year = CASE
+                        WHEN movies.match_status IN ('matched', 'manual') THEN movies.year
+                        ELSE excluded.year
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                parsed_rows,
+            )
+            connection.execute(
+                """
+                DELETE FROM movies
+                WHERE source = ?
+                  AND video_id NOT IN (
+                      SELECT id FROM videos WHERE source = ? AND active = 1
+                  )
+                """,
+                (source, source),
+            )
+            connection.commit()
+        return len(rows)
+
+    def movies(
+        self,
+        *,
+        search: str = "",
+        limit: int = 24,
+        offset: int = 0,
+        sources: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        conditions = ["v.active = 1", source_clause]
+        params: list[Any] = list(source_params)
+        if search:
+            escaped = self._escape_like(search)
+            conditions.append(
+                "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%", f"%{escaped}%"])
+        params.extend([max(1, limit), max(0, offset)])
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT m.*, v.name, v.path, v.size, v.modified, v.duration_seconds,
+                       v.thumb, v.media_format, v.media_kind
+                FROM movies m
+                JOIN videos v ON v.id = m.video_id
+                WHERE {' AND '.join(conditions)}
+                ORDER BY m.display_title COLLATE NOCASE, m.year, m.id
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def movie_count(self, *, search: str = "", sources: Sequence[str] = ()) -> int:
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        conditions = ["v.active = 1", source_clause]
+        params: list[Any] = list(source_params)
+        if search:
+            escaped = self._escape_like(search)
+            conditions.append(
+                "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%", f"%{escaped}%"])
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM movies m
+                JOIN videos v ON v.id = m.video_id
+                WHERE {' AND '.join(conditions)}
+                """,
+                params,
+            ).fetchone()
+        return int(row[0] or 0)
+
+    def get_movie(self, movie_id: int, *, sources: Sequence[str] = ()) -> dict[str, Any] | None:
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT m.*, v.name, v.path, v.size, v.modified, v.duration_seconds,
+                       v.thumb, v.media_format, v.media_kind
+                FROM movies m
+                JOIN videos v ON v.id = m.video_id
+                WHERE m.id = ? AND v.active = 1 AND {source_clause}
+                """,
+                [movie_id, *source_params],
+            ).fetchone()
+        return dict(row) if row else None
+
+    def movie_metadata_candidates(
+        self,
+        *,
+        sources: Sequence[str] = (),
+        force: bool = False,
+    ) -> list[dict[str, Any]]:
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        status_clause = "" if force else "AND m.match_status IN ('pending', 'ambiguous', 'unmatched')"
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT m.*
+                FROM movies m
+                JOIN videos v ON v.id = m.video_id
+                WHERE v.active = 1 AND {source_clause} {status_clause}
+                ORDER BY CASE m.match_status WHEN 'pending' THEN 0 ELSE 1 END, m.id
+                """,
+                source_params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_movie_metadata(self, movie_id: int, **values: Any) -> None:
+        allowed = {
+            "display_title", "normalized_title", "original_title", "year", "overview",
+            "poster_url", "backdrop_url", "rating", "runtime_minutes", "tmdb_id",
+            "match_status", "match_confidence",
+        }
+        updates = {key: value for key, value in values.items() if key in allowed}
+        if not updates:
+            return
+        updates["scraped_at"] = "CURRENT_TIMESTAMP"
+        assignments = ", ".join(
+            f"{key} = {value}" if value == "CURRENT_TIMESTAMP" else f"{key} = ?"
+            for key, value in updates.items()
+        )
+        params = [value for value in updates.values() if value != "CURRENT_TIMESTAMP"]
+        params.append(movie_id)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                f"UPDATE movies SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                params,
+            )
 
     def seed_media_sources(self, sources: Iterable[dict[str, Any]]) -> None:
         records = list(sources)

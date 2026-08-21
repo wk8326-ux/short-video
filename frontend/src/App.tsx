@@ -41,6 +41,7 @@ import {
 import type { MediaSurface } from "./playbackStore";
 
 const AsmrLibrary = lazy(() => import("./AsmrLibrary"));
+const MovieLibrary = lazy(() => import("./MovieLibrary"));
 
 type VideoItem = {
   id: number;
@@ -75,7 +76,7 @@ type FastStartSummary = {
   pending: number;
 };
 
-type LibrarySection = "feed" | "asmr";
+type LibrarySection = "feed" | "asmr" | "movie";
 
 type MediaLibrarySource = {
   id: string;
@@ -110,6 +111,7 @@ type AdminStatus = {
     bytes: number;
     guangya: { videos: number; bytes: number };
     asmr: { videos: number; bytes: number };
+    movie: { videos: number; bytes: number };
   };
   scan: {
     running: boolean;
@@ -122,6 +124,14 @@ type AdminStatus = {
       lastError: string | null;
       directories: number;
     }>;
+  };
+  movieMetadata?: {
+    running: boolean;
+    checked: number;
+    total: number;
+    matched: number;
+    lastSuccess: number | null;
+    lastError: string | null;
   };
   sources: MediaLibrarySource[];
   fastStart: {
@@ -141,7 +151,13 @@ type AdminStatus = {
   }>;
 };
 
-type AdminAction = `scan-${string}` | `source-${string}` | "fast-start";
+type AdminAction = `scan-${string}` | `metadata-${string}` | `source-${string}` | "fast-start";
+
+type FeedSurface = Exclude<MediaSurface, "asmr" | "movie">;
+
+function isFeedSurface(surface: MediaSurface): surface is FeedSurface {
+  return surface === "short" || surface === "long";
+}
 
 const MODES: Array<{ value: FeedMode; label: string; icon: typeof Shuffle }> = [
   { value: "shuffle", label: "随机播放", icon: Shuffle },
@@ -172,12 +188,12 @@ function setAuthenticationHint(authenticated: boolean): void {
   }
 }
 
-function feedCacheId(surface: Exclude<MediaSurface, "asmr">, mode: FeedMode): string {
+function feedCacheId(surface: FeedSurface, mode: FeedMode): string {
   return `${surface}:${mode}`;
 }
 
 function readFeedCache(
-  surface: Exclude<MediaSurface, "asmr">,
+  surface: FeedSurface,
   mode: FeedMode,
 ): CachedFeedEntry | null {
   try {
@@ -194,7 +210,7 @@ function readFeedCache(
 }
 
 function writeFeedCache(
-  surface: Exclude<MediaSurface, "asmr">,
+  surface: FeedSurface,
   mode: FeedMode,
   items: VideoItem[],
   total: number,
@@ -464,7 +480,7 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
   const requestPage = useCallback(async (
     reset: boolean,
     requestedMode: FeedMode,
-    requestedSurface: Exclude<MediaSurface, "asmr">,
+    requestedSurface: FeedSurface,
   ) => {
     if (reset) abortRef.current?.abort();
     else if (loadingRef.current || !cursorRef.current) return;
@@ -530,7 +546,7 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
   }, [onUnauthorized]);
 
   useEffect(() => {
-    if (!preferences || surface === "asmr") return;
+    if (!preferences || !isFeedSurface(surface)) return;
     generationRef.current += 1;
     cursorRef.current = null;
     sessionExcludeRef.current = mode === "shuffle" ? [...recentRef.current] : [];
@@ -548,7 +564,7 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
 
   useEffect(() => {
     if (!cursorRef.current || activeIndex < items.length - 4) return;
-    if (surface !== "asmr") void requestPage(false, mode, surface);
+    if (isFeedSurface(surface)) void requestPage(false, mode, surface);
   }, [activeIndex, items.length, mode, requestPage, surface]);
 
   useEffect(() => {
@@ -694,13 +710,14 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
   const effectiveActiveIndex = landscapeIndex ?? activeIndex;
 
   return (
-    <main className={`app-shell${surface === "asmr" ? " is-library" : ""}`}>
+    <main className={`app-shell${surface === "asmr" || surface === "movie" ? " is-library" : ""}`}>
       <header className="top-bar">
         <div className="surface-tabs" role="tablist" aria-label="媒体分类">
           {([
             ["short", "短视频"],
             ["long", "长视频"],
             ["asmr", "ASMR"],
+            ["movie", "电影"],
           ] as const).map(([value, label]) => (
             <button
               key={value}
@@ -726,7 +743,7 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
           </button>
           {menuOpen && (
             <div className="mode-menu" id="player-menu" role="menu">
-              {surface !== "asmr" && MODES.map((entry) => {
+              {isFeedSurface(surface) && MODES.map((entry) => {
                 const Icon = entry.icon;
                 return (
                   <button
@@ -742,7 +759,7 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
                   </button>
                 );
               })}
-              {surface !== "asmr" && <div className="menu-separator" role="separator" />}
+              {isFeedSurface(surface) && <div className="menu-separator" role="separator" />}
               <button type="button" role="menuitem" onClick={openManagement}>
                 <Settings2 size={18} aria-hidden="true" />
                 <span>管理</span>
@@ -763,6 +780,15 @@ function PlayerApp({ onUnauthorized }: PlayerAppProps) {
           <AsmrLibrary
             positions={preferences?.positions ?? {}}
             onProgress={recordProgress}
+            onUnauthorized={onUnauthorized}
+          />
+        </Suspense>
+      ) : surface === "movie" ? (
+        <Suspense fallback={<div className="feed-state"><LoaderCircle className="spinner" size={28} aria-hidden="true" /></div>}>
+          <MovieLibrary
+            positions={preferences?.positions ?? {}}
+            onProgress={recordProgress}
+            onWatched={markWatched}
             onUnauthorized={onUnauthorized}
           />
         </Suspense>
@@ -856,7 +882,9 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
     const force = kind === "fast-start" && status?.fastStart.summary.pending === 0;
     const endpoint = kind === "fast-start"
       ? `/api/admin/fast-start?force=${force ? "true" : "false"}`
-      : `/api/admin/sources/${encodeURIComponent(kind.slice(5))}/scan`;
+      : kind.startsWith("metadata-")
+        ? `/api/admin/sources/${encodeURIComponent(kind.slice(9))}/metadata`
+        : `/api/admin/sources/${encodeURIComponent(kind.slice(5))}/scan`;
     try {
       const response = await fetch(endpoint, { method: "POST" });
       if (response.status === 401) {
@@ -866,7 +894,7 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       await refresh();
     } catch {
-      setError(kind.startsWith("scan-") ? "无法启动目录扫描" : "无法启动 Fast Start 检查");
+      setError(kind.startsWith("metadata-") ? "无法启动电影刮削" : kind.startsWith("scan-") ? "无法启动目录扫描" : "无法启动 Fast Start 检查");
     } finally {
       setActions((current) => {
         const next = new Set(current);
@@ -972,13 +1000,15 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
             <div className="source-scans">
               {status.sources.map((source) => {
                 const action: AdminAction = `scan-${source.id}`;
+                const metadataAction: AdminAction = `metadata-${source.id}`;
                 const busy = source.scan.running || actions.has(action);
+                const metadataBusy = actions.has(metadataAction) || Boolean(status.movieMetadata?.running && source.section === "movie");
                 return (
                   <div className="source-scan-row" key={source.id}>
                     <div className="source-scan-copy">
                       <div className="source-scan-heading">
                         <h3>{source.name}</h3>
-                        <span>{source.section === "feed" ? "短视频 / 长视频" : "ASMR"}</span>
+                        <span>{source.section === "feed" ? "短视频 / 长视频" : source.section === "asmr" ? "ASMR" : "电影"}</span>
                       </div>
                       <p className="source-address">{source.baseUrl}{source.rootPath}</p>
                       <p>{source.videos} 项 · {source.scan.directories} 个目录 · {source.enabled ? formatDate(source.scan.lastSuccess) : "已停用"}</p>
@@ -1006,6 +1036,18 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
                         {busy ? <LoaderCircle className="spinner" size={18} aria-hidden="true" /> : <RefreshCw size={18} aria-hidden="true" />}
                         {busy ? "扫描中" : "扫描"}
                       </button>
+                      {source.section === "movie" && (
+                        <button
+                          className="secondary-action"
+                          type="button"
+                          disabled={!source.enabled || busy || metadataBusy}
+                          aria-busy={metadataBusy}
+                          onClick={() => void runAction(metadataAction)}
+                        >
+                          {metadataBusy ? <LoaderCircle className="spinner" size={18} aria-hidden="true" /> : <Film size={18} aria-hidden="true" />}
+                          {metadataBusy ? "刮削中" : "刮削"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -1195,11 +1237,12 @@ function MediaSourceDialog({ source, saving, returnFocus, onClose, onSave }: Med
                 onChange={(event) => {
                   const value = event.target.value as LibrarySection;
                   setSection(value);
-                  setScanMode(value === "feed" ? "tree" : "authors_recursive");
+                  setScanMode(value === "feed" || value === "movie" ? "tree" : "authors_recursive");
                 }}
               >
                 <option value="feed">短视频 / 长视频</option>
                 <option value="asmr">ASMR</option>
+                <option value="movie">电影</option>
               </select>
             </label>
           </div>

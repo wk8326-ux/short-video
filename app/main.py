@@ -21,6 +21,8 @@ from app.database import LibraryDatabase
 from app.faststart import inspect_mp4_prefix
 from app.media_metadata import mp4_duration_seconds
 from app.media_sources import MediaSourceRegistry
+from app.movie_metadata import parse_movie_filename
+from app.tmdb import TmdbClient
 from app.settings import Settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -56,6 +58,15 @@ metadata_state: dict[str, Any] = {
     "lastError": None,
 }
 metadata_lock = asyncio.Lock()
+movie_metadata_state: dict[str, Any] = {
+    "running": False,
+    "checked": 0,
+    "total": 0,
+    "matched": 0,
+    "lastSuccess": None,
+    "lastError": None,
+}
+movie_metadata_lock = asyncio.Lock()
 fast_start_state: dict[str, Any] = {
     "running": False,
     "checked": 0,
@@ -150,6 +161,12 @@ async def scan_source(source: str) -> bool:
                 videos,
                 source=source,
             )
+            if runtime.config["section"] == "movie":
+                await asyncio.to_thread(
+                    database.sync_movie_index,
+                    source,
+                    parse_movie_filename,
+                )
             now = int(time.time())
             source_state.update(
                 {
@@ -317,6 +334,69 @@ async def check_media_metadata(*, force: bool) -> None:
             metadata_state["running"] = False
 
 
+async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
+    if movie_metadata_lock.locked():
+        return
+    if not settings.tmdb_api_read_token and not settings.tmdb_api_key:
+        movie_metadata_state["lastError"] = "TMDB 未配置 API 令牌"
+        return
+    async with movie_metadata_lock:
+        movie_metadata_state.update(
+            {"running": True, "checked": 0, "total": 0, "matched": 0, "lastError": None}
+        )
+        try:
+            source_ids = (source,)
+            movies = await asyncio.to_thread(
+                database.movie_metadata_candidates,
+                sources=source_ids,
+                force=force,
+            )
+            movie_metadata_state["total"] = len(movies)
+            client = TmdbClient(
+                read_token=settings.tmdb_api_read_token,
+                api_key=settings.tmdb_api_key,
+                language=settings.tmdb_language,
+            )
+            try:
+                for movie in movies:
+                    match = await client.search_movie(
+                        str(movie.get("normalized_title") or movie.get("display_title") or ""),
+                        year=movie.get("year"),
+                    )
+                    if match is None:
+                        await asyncio.to_thread(
+                            database.update_movie_metadata,
+                            int(movie["id"]),
+                            match_status="unmatched",
+                            match_confidence=0.0,
+                        )
+                    else:
+                        await asyncio.to_thread(
+                            database.update_movie_metadata,
+                            int(movie["id"]),
+                            original_title=match.original_title,
+                            display_title=match.title or movie["display_title"],
+                            year=match.year or movie.get("year"),
+                            overview=match.overview,
+                            poster_url=match.poster_url,
+                            backdrop_url=match.backdrop_url,
+                            rating=match.rating,
+                            tmdb_id=match.tmdb_id,
+                            match_status=match.status,
+                            match_confidence=match.confidence,
+                        )
+                        movie_metadata_state["matched"] += 1
+                    movie_metadata_state["checked"] += 1
+            finally:
+                await client.close()
+            movie_metadata_state["lastSuccess"] = int(time.time())
+        except Exception as exc:
+            movie_metadata_state["lastError"] = str(exc)
+            logger.exception("Movie metadata scrape failed for %s", source)
+        finally:
+            movie_metadata_state["running"] = False
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await asyncio.to_thread(database.initialize)
@@ -371,7 +451,7 @@ class MediaSourceRequest(BaseModel):
     provider: Literal["alist", "openlist"] = "alist"
     baseUrl: str = Field(min_length=8, max_length=500)
     rootPath: str = Field(min_length=1, max_length=500)
-    section: Literal["feed", "asmr"]
+    section: Literal["feed", "asmr", "movie"]
     scanMode: Literal["tree", "authors", "authors_recursive"] | None = None
     anonymous: bool = True
     token: str = Field(default="", max_length=2000)
@@ -386,9 +466,9 @@ def normalize_source_payload(payload: MediaSourceRequest) -> dict[str, Any]:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username:
         raise HTTPException(status_code=422, detail="AList 地址必须是有效的 HTTP(S) 地址")
     root_path = "/" + payload.rootPath.strip().strip("/")
-    scan_mode = payload.scanMode or ("tree" if payload.section == "feed" else "authors_recursive")
-    if payload.section == "feed" and scan_mode != "tree":
-        raise HTTPException(status_code=422, detail="短视频/长视频来源必须使用递归目录扫描")
+    scan_mode = payload.scanMode or ("tree" if payload.section in {"feed", "movie"} else "authors_recursive")
+    if payload.section in {"feed", "movie"} and scan_mode != "tree":
+        raise HTTPException(status_code=422, detail="该板块来源必须使用递归目录扫描")
     if payload.section == "asmr" and scan_mode == "tree":
         raise HTTPException(status_code=422, detail="ASMR 来源必须使用作者目录扫描")
     return {
@@ -427,6 +507,32 @@ def public_source(source: dict[str, Any]) -> dict[str, Any]:
         "bytes": int(source.get("bytes") or 0),
         "scan": state,
     }
+
+
+def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
+    payload = {
+        "id": int(row["id"]),
+        "videoId": int(row["video_id"]),
+        "title": str(row.get("display_title") or Path(row["name"]).stem),
+        "originalTitle": row.get("original_title"),
+        "year": row.get("year"),
+        "overview": row.get("overview") or "",
+        "posterUrl": row.get("poster_url") or (f"/api/videos/{row['video_id']}/poster" if row.get("thumb") else None),
+        "backdropUrl": row.get("backdrop_url"),
+        "rating": row.get("rating"),
+        "runtimeMinutes": row.get("runtime_minutes"),
+        "matchStatus": row.get("match_status") or "pending",
+        "matchConfidence": row.get("match_confidence"),
+        "playUrl": f"/api/videos/{row['video_id']}/play",
+        "modified": row.get("modified"),
+        "duration": row.get("duration_seconds"),
+    }
+    if detail:
+        payload["source"] = row.get("source")
+        payload["path"] = row.get("path")
+        payload["size"] = row.get("size")
+        payload["format"] = row.get("media_format")
+    return payload
 
 
 def _client_key(request: Request) -> str:
@@ -527,19 +633,22 @@ async def app_update_apk(versionCode: int | None = Query(default=None, ge=1)):
 async def admin_status() -> dict[str, Any]:
     feed_sources = source_registry.ids("feed")
     asmr_sources = source_registry.ids("asmr")
-    library, feed_library, asmr_library, sources, summary, issues = await asyncio.gather(
+    movie_sources = source_registry.ids("movie")
+    library, feed_library, asmr_library, movie_library, sources, summary, issues = await asyncio.gather(
         asyncio.to_thread(database.stats),
         asyncio.to_thread(database.stats, sources=feed_sources),
         asyncio.to_thread(database.stats, sources=asmr_sources),
+        asyncio.to_thread(database.stats, sources=movie_sources),
         asyncio.to_thread(database.list_media_sources),
         asyncio.to_thread(database.fast_start_summary, sources=feed_sources),
         asyncio.to_thread(database.fast_start_issues, limit=20, sources=feed_sources),
     )
     return {
-        "library": {**library, "guangya": feed_library, "asmr": asmr_library},
+        "library": {**library, "guangya": feed_library, "asmr": asmr_library, "movie": movie_library},
         "scan": dict(scan_state),
         "sources": [public_source(source) for source in sources],
         "metadata": dict(metadata_state),
+        "movieMetadata": dict(movie_metadata_state),
         "fastStart": {**fast_start_state, "summary": summary},
         "issues": issues,
     }
@@ -609,6 +718,19 @@ async def update_source(source_id: str, payload: MediaSourceRequest) -> dict[str
 @app.post("/api/admin/sources/{source_id}/scan", status_code=202)
 async def scan_one_source(source_id: str) -> dict[str, Any]:
     return await start_scan(source=source_id)
+
+
+@app.post("/api/admin/sources/{source_id}/metadata", status_code=202)
+async def start_movie_metadata(source_id: str, force: bool = False) -> dict[str, Any]:
+    if source_id not in source_registry.ids("movie"):
+        raise HTTPException(status_code=404, detail="电影媒体源不存在或已停用")
+    started = not movie_metadata_lock.locked() and not movie_metadata_state["running"]
+    if started:
+        spawn_background(
+            scrape_movie_metadata(source_id, force=force),
+            name=f"movie-metadata-{source_id}",
+        )
+    return {"started": started, "movieMetadata": movie_metadata_state}
 
 
 @app.post("/api/admin/fast-start", status_code=202)
@@ -835,6 +957,38 @@ async def asmr_author_items(
         "total": total,
         "nextOffset": offset + len(rows) if limit is not None and offset + len(rows) < total else None,
     }
+
+
+@app.get("/api/movies")
+async def movies(
+    q: str = Query(default="", max_length=100),
+    limit: int = Query(default=24, ge=1, le=60),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    sources = source_registry.ids("movie")
+    search = q.strip()
+    rows, total = await asyncio.gather(
+        asyncio.to_thread(database.movies, search=search, limit=limit, offset=offset, sources=sources),
+        asyncio.to_thread(database.movie_count, search=search, sources=sources),
+    )
+    return {
+        "items": [public_movie(row) for row in rows],
+        "total": total,
+        "nextOffset": offset + len(rows) if offset + len(rows) < total else None,
+        "scan": {"running": any(scan_state["sources"].get(source, {}).get("running") for source in sources)},
+    }
+
+
+@app.get("/api/movies/{movie_id}")
+async def movie_detail(movie_id: int) -> dict[str, Any]:
+    row = await asyncio.to_thread(
+        database.get_movie,
+        movie_id,
+        sources=source_registry.ids("movie"),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    return public_movie(row, detail=True)
 
 
 @app.get("/api/videos/{video_id}/poster")

@@ -1,5 +1,5 @@
 export type FeedMode = "shuffle" | "newest" | "oldest";
-export type MediaSurface = "short" | "long" | "asmr";
+export type MediaSurface = "short" | "long" | "asmr" | "movie";
 
 export type SavedPosition = {
   time: number;
@@ -84,7 +84,7 @@ function normalizeState(value: unknown): PlaybackState {
   const mode: FeedMode = ["shuffle", "newest", "oldest"].includes(candidate.mode ?? "")
     ? (candidate.mode as FeedMode)
     : "shuffle";
-  const surface: MediaSurface = ["short", "long", "asmr"].includes(candidate.surface ?? "")
+  const surface: MediaSurface = ["short", "long", "asmr", "movie"].includes(candidate.surface ?? "")
     ? (candidate.surface as MediaSurface)
     : "short";
   const recentVideoIds = Array.isArray(candidate.recentVideoIds)
@@ -103,7 +103,7 @@ function normalizeState(value: unknown): PlaybackState {
   );
   const lastVideoIds = Object.fromEntries(
     Object.entries(candidate.lastVideoIds ?? {}).filter(([key, id]) => {
-      return ["short", "long", "asmr"].includes(key) && Number.isInteger(id) && Number(id) > 0;
+      return ["short", "long", "asmr", "movie"].includes(key) && Number.isInteger(id) && Number(id) > 0;
     }),
   ) as Partial<Record<MediaSurface, number>>;
   if (!lastVideoIds.short && Number.isInteger(candidate.lastVideoId) && Number(candidate.lastVideoId) > 0) {

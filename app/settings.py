@@ -55,6 +55,11 @@ class Settings:
     auth_password_hash: str
     session_secret: str
     session_days: int
+    movie_extensions: frozenset[str] = field(
+        default_factory=lambda: frozenset(
+            {".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".ts", ".m2ts", ".flv"}
+        )
+    )
     asmr_base_url: str = "https://www.asmrgay.com"
     asmr_media_path: str = "/asmr6"
     asmr_extensions: frozenset[str] = field(
@@ -70,12 +75,23 @@ class Settings:
         default_factory=lambda: frozenset(DEFAULT_ASMR_AUTHOR_GROUP_PATHS)
     )
     asmr_search_result_limit: int = 100000
+    tmdb_api_read_token: str = ""
+    tmdb_api_key: str = ""
+    tmdb_language: str = "zh-CN"
 
     @classmethod
     def from_env(cls) -> "Settings":
         extensions = {
             value.strip().lower()
             for value in os.getenv("VIDEO_EXTENSIONS", ".mp4,.m4v,.mov,.webm").split(",")
+            if value.strip()
+        }
+        movie_extensions = {
+            value.strip().lower()
+            for value in os.getenv(
+                "MOVIE_EXTENSIONS",
+                ".mp4,.m4v,.mov,.webm,.mkv,.avi,.ts,.m2ts,.flv",
+            ).split(",")
             if value.strip()
         }
         asmr_extensions = {
@@ -96,6 +112,7 @@ class Settings:
             static_dir=os.getenv("STATIC_DIR", "/app/static"),
             direct_url_cache_seconds=_positive_int("DIRECT_URL_CACHE_SECONDS", 600, 0),
             video_extensions=frozenset(extensions),
+            movie_extensions=frozenset(movie_extensions),
             auth_password_hash=os.getenv("AUTH_PASSWORD_HASH", "").strip(),
             session_secret=os.getenv("SESSION_SECRET", "").strip(),
             session_days=_positive_int("SESSION_DAYS", 180, 1),
@@ -114,6 +131,9 @@ class Settings:
             asmr_search_result_limit=_positive_int(
                 "ASMR_SEARCH_RESULT_LIMIT", 100000, 1
             ),
+            tmdb_api_read_token=os.getenv("TMDB_API_READ_TOKEN", "").strip(),
+            tmdb_api_key=os.getenv("TMDB_API_KEY", "").strip(),
+            tmdb_language=os.getenv("TMDB_LANGUAGE", "zh-CN").strip() or "zh-CN",
         )
 
     def validate(self) -> None:
@@ -129,6 +149,8 @@ class Settings:
             raise ValueError("ASMR_SEARCH_PATHS entries must start with /")
         if any(not path.startswith("/") for path in self.asmr_author_group_paths):
             raise ValueError("ASMR_AUTHOR_GROUP_PATHS entries must start with /")
+        if not self.tmdb_language:
+            raise ValueError("TMDB_LANGUAGE must not be empty")
         if not self.auth_password_hash.startswith("scrypt:"):
             raise ValueError("AUTH_PASSWORD_HASH is missing; run: python app/auth.py init-env .env")
         if len(self.session_secret) < 32:

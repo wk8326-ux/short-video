@@ -92,6 +92,8 @@ class MediaSourceRegistry:
         extensions = (
             self.settings.asmr_extensions
             if config["section"] == "asmr"
+            else self.settings.movie_extensions
+            if config["section"] == "movie"
             else self.settings.video_extensions
         )
         client = AListClient(
