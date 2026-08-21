@@ -6,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -38,9 +40,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -59,6 +61,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -262,52 +266,72 @@ private fun LoginScreen(busy: Boolean, error: String?, onLogin: (String) -> Unit
         contentAlignment = Alignment.Center,
     ) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 36.dp),
+            modifier = Modifier.fillMaxWidth().widthIn(max = 420.dp).padding(bottom = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                 Box(Modifier.size(7.dp, 30.dp).clip(RoundedCornerShape(2.dp)).background(Accent))
                 Text("短片", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
             }
-            Spacer(Modifier.height(52.dp))
-            Icon(Icons.Outlined.Lock, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(30.dp))
-            Spacer(Modifier.height(16.dp))
-            Text("继续上次播放", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(7.dp))
-            Text("输入访问密码", color = TextFaint, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(24.dp))
-            OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
+            Spacer(Modifier.height(36.dp))
+            GlassPanel(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !busy,
-                singleLine = true,
-                label = { Text("访问密码") },
-                isError = error != null,
-                supportingText = { if (error != null) Text(error) },
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                keyboardActions = KeyboardActions(onDone = {
-                    focusManager.clearFocus()
-                    onLogin(password)
-                }),
-                shape = RoundedCornerShape(6.dp),
-            )
-            Spacer(Modifier.height(14.dp))
-            Button(
-                onClick = { focusManager.clearFocus(); onLogin(password) },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = RoundedCornerShape(6.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                fill = GlassFillSoft,
             ) {
-                if (busy) {
-                    CircularProgressIndicator(Modifier.size(19.dp), color = TextPrimary, strokeWidth = 2.dp)
-                } else {
-                    Icon(Icons.AutoMirrored.Outlined.Login, contentDescription = null, modifier = Modifier.size(19.dp))
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(Icons.Outlined.Lock, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(28.dp))
+                    Spacer(Modifier.height(16.dp))
+                    Text("继续上次播放", style = MaterialTheme.typography.headlineSmall)
+                    Spacer(Modifier.height(6.dp))
+                    Text("输入访问密码", color = TextFaint, style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(24.dp))
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !busy,
+                        singleLine = true,
+                        label = { Text("访问密码") },
+                        isError = error != null,
+                        supportingText = { if (error != null) Text(error) },
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = {
+                            focusManager.clearFocus()
+                            onLogin(password)
+                        }),
+                        shape = ControlShape,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = CanvasSoft.copy(alpha = 0.72f),
+                            unfocusedContainerColor = CanvasSoft.copy(alpha = 0.54f),
+                            focusedBorderColor = GlassLine,
+                            unfocusedBorderColor = Line,
+                            cursorColor = AccentSoft,
+                        ),
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Button(
+                        onClick = { focusManager.clearFocus(); onLogin(password) },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        shape = ControlShape,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Accent,
+                            contentColor = Color.White,
+                        ),
+                    ) {
+                        if (busy) {
+                            CircularProgressIndicator(Modifier.size(19.dp), color = Color.White, strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.AutoMirrored.Outlined.Login, contentDescription = null, modifier = Modifier.size(19.dp))
+                        }
+                        Spacer(Modifier.size(8.dp))
+                        Text(if (busy) "正在验证" else "进入")
+                    }
                 }
-                Spacer(Modifier.size(8.dp))
-                Text(if (busy) "正在验证" else "进入")
             }
         }
     }
@@ -325,64 +349,75 @@ internal fun AppNavigation(
     modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    val tabWidth = 72.dp
-    val indicatorOffset by animateDpAsState(
-        targetValue = tabWidth * state.surface.ordinal,
-        animationSpec = tween(200),
-        label = "分类指示线",
-    )
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .height(48.dp)
+            .height(52.dp)
             .padding(horizontal = if (compact) 8.dp else 12.dp),
     ) {
-        Box(
+        val tabWidth = ((maxWidth - 112.dp - 16.dp) / MediaSurface.entries.size)
+            .coerceIn(48.dp, 72.dp)
+        val indicatorOffset by animateDpAsState(
+            targetValue = tabWidth * state.surface.ordinal,
+            animationSpec = tween(200),
+            label = "分类指示线",
+        )
+        GlassPanel(
             modifier = Modifier
                 .align(Alignment.Center)
-                .width(tabWidth * MediaSurface.entries.size)
-                .height(48.dp),
+                .width(tabWidth * MediaSurface.entries.size + 16.dp)
+                .height(52.dp),
+            fill = GlassFillSoft,
+            line = Line,
         ) {
-            Row(Modifier.fillMaxSize()) {
-                MediaSurface.entries.forEach { surface ->
-                    val selected = state.surface == surface
-                    TextButton(
-                        onClick = { onSurface(surface) },
-                        modifier = Modifier.width(tabWidth).height(44.dp),
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = Color.White.copy(alpha = if (selected) 1f else 0.66f),
-                        ),
-                    ) {
-                        Text(
-                            if (compact && surface != MediaSurface.ASMR) surface.label.take(1) else surface.label,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                shadow = Shadow(Color.Black.copy(alpha = 0.58f), Offset(0f, 1f), 3f),
+            Box(Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
+                Row(Modifier.fillMaxSize()) {
+                    MediaSurface.entries.forEach { surface ->
+                        val active = state.surface == surface
+                        TextButton(
+                            onClick = { onSurface(surface) },
+                            modifier = Modifier
+                                .width(tabWidth)
+                                .height(48.dp)
+                                .semantics { selected = active },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = Color.White.copy(alpha = if (active) 1f else 0.66f),
                             ),
-                        )
+                        ) {
+                            Text(
+                                if (compact && surface != MediaSurface.ASMR) surface.label.take(1) else surface.label,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    shadow = Shadow(Color.Black.copy(alpha = 0.58f), Offset(0f, 1f), 3f),
+                                ),
+                            )
+                        }
                     }
                 }
+                Box(
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .offset { IntOffset(x = (indicatorOffset + 24.dp).roundToPx(), y = 0) }
+                        .width(24.dp)
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(Accent),
+                )
             }
-            Box(
-                Modifier
-                    .align(Alignment.BottomStart)
-                    .offset { IntOffset(x = (indicatorOffset + 24.dp).roundToPx(), y = 0) }
-                    .width(24.dp)
-                    .height(2.dp)
-                    .clip(RoundedCornerShape(1.dp))
-                    .background(Accent),
-            )
         }
         Box(Modifier.align(Alignment.CenterEnd)) {
-            IconButton(
+            GlassIconButton(
+                label = "更多",
                 onClick = { menuOpen = true },
             ) {
-                Icon(Icons.Outlined.MoreVert, contentDescription = "更多", tint = Color.White)
+                Icon(Icons.Outlined.MoreVert, contentDescription = null)
             }
             DropdownMenu(
                 expanded = menuOpen,
                 onDismissRequest = { menuOpen = false },
-                containerColor = Raised,
+                containerColor = RaisedStrong,
+                shape = GlassPanelShape,
+                shadowElevation = 0.dp,
             ) {
                 if (state.surface != MediaSurface.ASMR) {
                     FeedMode.entries.forEach { mode ->

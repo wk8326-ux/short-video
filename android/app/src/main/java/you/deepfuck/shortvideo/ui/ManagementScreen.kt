@@ -2,6 +2,7 @@ package you.deepfuck.shortvideo.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -33,8 +34,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -47,6 +46,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -81,33 +82,41 @@ internal fun ManagementScreen(
             modifier = Modifier.fillMaxWidth().height(68.dp).padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(
+            GlassIconButton(
+                label = "返回",
                 onClick = onBack,
-                colors = IconButtonDefaults.iconButtonColors(contentColor = TextPrimary),
-            ) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回") }
+                tint = TextPrimary,
+            ) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null) }
             Column(Modifier.weight(1f)) {
-                Text("媒体库管理", fontWeight = FontWeight.SemiBold, color = TextPrimary)
                 Text(
-                    state.adminStatus?.scanLastSuccess?.let(::formatTimestamp) ?: "尚未完成扫描",
+                    "媒体库管理",
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary,
+                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    "各媒体源独立维护，只在手动操作时扫描",
                     color = TextFaint,
                     style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 )
             }
-            IconButton(
+            GlassIconButton(
+                label = "添加媒体源",
                 onClick = {
                     editingSource = null
                     sourceDialogOpen = true
                 },
-                colors = IconButtonDefaults.iconButtonColors(contentColor = TextPrimary),
+                tint = TextPrimary,
             ) {
-                Icon(Icons.Outlined.Add, contentDescription = "添加媒体源")
+                Icon(Icons.Outlined.Add, contentDescription = null)
             }
-            IconButton(
+            GlassIconButton(
+                label = "刷新状态",
                 onClick = onRefresh,
                 enabled = !state.adminLoading,
-                colors = IconButtonDefaults.iconButtonColors(contentColor = TextPrimary),
+                tint = TextPrimary,
             ) {
-                Icon(Icons.Outlined.Refresh, contentDescription = "刷新状态")
+                Icon(Icons.Outlined.Refresh, contentDescription = null)
             }
         }
         HorizontalDivider(color = Line)
@@ -150,7 +159,7 @@ internal fun ManagementScreen(
                         Spacer(Modifier.height(18.dp))
                         status.sources.forEachIndexed { index, source ->
                             if (index > 0) {
-                                HorizontalDivider(Modifier.padding(vertical = 16.dp), color = Line)
+                                Spacer(Modifier.height(12.dp))
                             }
                             MediaSourceRow(
                                 source = source,
@@ -181,6 +190,8 @@ internal fun ManagementScreen(
                         OutlinedButton(
                             onClick = onFastStart,
                             enabled = !status.fastStartRunning && "fast-start" !in state.adminActions,
+                            modifier = Modifier.heightIn(min = 48.dp),
+                            shape = ControlShape,
                         ) {
                             if (status.fastStartRunning) {
                                 CircularProgressIndicator(Modifier.size(18.dp), color = TextSecondary, strokeWidth = 2.dp)
@@ -266,8 +277,20 @@ private fun MediaSourceRow(
     onEdit: () -> Unit,
 ) {
     val busy = source.scan.running || starting
-    Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    val statusLabel = when {
+        busy -> "扫描中"
+        !source.enabled -> "已停用"
+        source.scan.lastError != null -> "需检查"
+        source.scan.lastSuccess != null -> "已索引"
+        else -> "待扫描"
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .glassSurface(fill = Raised, line = Line)
+            .padding(14.dp),
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
             Column(Modifier.weight(1f)) {
                 Text(
                     source.name,
@@ -285,44 +308,60 @@ private fun MediaSourceRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            IconButton(onClick = onEdit) {
-                Icon(Icons.Outlined.Edit, contentDescription = "编辑 ${source.name}", tint = TextSecondary)
-            }
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
+            Box(
+                modifier = Modifier
+                    .clip(ControlShape)
+                    .background(Accent.copy(alpha = 0.12f))
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            ) {
                 Text(
-                    "${source.section.label} · ${source.videos} 项 · ${source.scan.directories} 个目录",
-                    color = TextSecondary,
-                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    if (source.enabled) {
-                        source.scan.lastSuccess?.let(::formatTimestamp) ?: "尚未完成扫描"
-                    } else {
-                        "已停用"
-                    },
-                    color = TextFaint,
+                    source.section.label,
+                    color = AccentSoft,
                     style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 )
-                source.scan.lastError?.let {
-                    Spacer(Modifier.height(5.dp))
-                    Text(
-                        it,
-                        color = androidx.compose.material3.MaterialTheme.colorScheme.error,
-                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                    )
-                }
             }
+        }
+        HorizontalDivider(Modifier.padding(top = 14.dp, bottom = 10.dp), color = Line)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            SourceMetric("媒体数量", source.videos.toString(), Modifier.weight(1f))
+            SourceMetric("目录", source.scan.directories.toString(), Modifier.weight(1f))
+            SourceMetric("当前状态", statusLabel, Modifier.weight(1f))
+        }
+        source.scan.lastSuccess?.let {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "上次扫描 ${formatTimestamp(it)}",
+                color = TextFaint,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+            )
+        }
+        source.scan.lastError?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                it,
+                color = androidx.compose.material3.MaterialTheme.colorScheme.error,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = onEdit, modifier = Modifier.heightIn(min = 48.dp)) {
+                Icon(Icons.Outlined.Edit, contentDescription = null)
+                Spacer(Modifier.size(6.dp))
+                Text("编辑")
+            }
+            Spacer(Modifier.weight(1f))
             OutlinedButton(
                 onClick = { onScan(source.id) },
                 enabled = source.enabled && !busy,
-                modifier = Modifier.heightIn(min = 44.dp),
+                modifier = Modifier.heightIn(min = 48.dp),
+                shape = ControlShape,
             ) {
                 if (busy) {
                     CircularProgressIndicator(Modifier.size(17.dp), color = TextSecondary, strokeWidth = 2.dp)
@@ -333,6 +372,26 @@ private fun MediaSourceRow(
                 Text(if (busy) "扫描中" else "扫描")
             }
         }
+    }
+}
+
+@Composable
+private fun SourceMetric(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text(
+            value,
+            color = TextPrimary,
+            fontWeight = FontWeight.SemiBold,
+            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(3.dp))
+        Text(
+            label,
+            color = TextFaint,
+            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+        )
     }
 }
 
@@ -460,9 +519,17 @@ private fun ChoiceRow(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             choices.forEach { (value, text) ->
                 if (value == selected) {
-                    Button(onClick = { onSelected(value) }, modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text(text) }
+                    Button(
+                        onClick = { onSelected(value) },
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        shape = ControlShape,
+                    ) { Text(text) }
                 } else {
-                    OutlinedButton(onClick = { onSelected(value) }, modifier = Modifier.weight(1f).heightIn(min = 44.dp)) { Text(text) }
+                    OutlinedButton(
+                        onClick = { onSelected(value) },
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                        shape = ControlShape,
+                    ) { Text(text) }
                 }
             }
         }
@@ -472,7 +539,7 @@ private fun ChoiceRow(
 @Composable
 private fun ToggleRow(label: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 44.dp),
+        Modifier.fillMaxWidth().heightIn(min = 48.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, Modifier.weight(1f), color = TextSecondary)

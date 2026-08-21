@@ -26,6 +26,8 @@ The user resumes media at the saved position, sees no recent repeats in shuffle 
 
 # Learned constraints
 
+- **2026-08-21** - Use direction A, "restrained liquid glass", as the production visual language. Glass belongs only to navigation, control clusters, floating playback, dialogs and actionable source cards; media and flat lists stay unframed. *Why:* The quiet, low-obstruction direction best matches the user's taste and remains comfortable during long viewing sessions.
+
 - **2026-08-16** - Keep the product lightweight and single-purpose. *Why:* Emby already handles long-form media; this surface exists specifically for short-video playback.
 - **2026-08-16** - Keep playback chrome transient, especially filenames, progress, and bottom shading. *Why:* The video itself should remain unobstructed once the user has oriented to the current clip.
 - **2026-08-16** - Avoid the native Fullscreen API in the Android PWA; use an in-app landscape surface instead. *Why:* Chrome's mandatory fullscreen safety prompt obscures the video and cannot be styled or suppressed by the page.
@@ -54,3 +56,4 @@ The user resumes media at the saved position, sees no recent repeats in shuffle 
 - **2026-08-18** - Use a compact animated equalizer for the currently playing ASMR audio row, with a static play icon when paused. *Why:* Playback state should be recognizable without adding another labeled or framed control.
 - **2026-08-18** - Keep ASMR's all/video/audio filter consistent from the author index into the selected author's paginated media, and keep progress visible in the persistent bottom player. *Why:* A library-level filter must describe the content the user will actually enter, while background listening still needs position feedback without reopening the player.
 - **2026-08-18** - Provide the dark application's foreground color at the Compose root and keep operational text explicitly high contrast. *Why:* Components that rely on an inherited default must never render black text or icons against the dark canvas.
+- **2026-08-20** - Keep ASMR video background-playback and landscape controls in the lower-right thumb zone in portrait, while preserving the existing landscape control layout. *Why:* These frequent viewing controls must remain reachable during one-handed portrait use without crowding the title bar.

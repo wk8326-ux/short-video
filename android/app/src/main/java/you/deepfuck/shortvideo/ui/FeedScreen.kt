@@ -32,8 +32,6 @@ import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay10
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -247,7 +245,7 @@ private fun FeedPage(
                     .align(Alignment.BottomCenter)
                     .background(
                         androidx.compose.ui.graphics.Brush.verticalGradient(
-                            listOf(Color.Transparent, Color(0xC7000000)),
+                            listOf(Color.Transparent, Color(0xA8000000)),
                         ),
                     ),
             )
@@ -344,8 +342,7 @@ private fun FeedPage(
             Row(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0x72000000))
+                    .glassSurface(fill = GlassFillSoft)
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -385,12 +382,12 @@ internal fun OverlayIconControl(
     onClick: () -> Unit,
     content: @Composable () -> Unit,
 ) {
-    IconButton(
+    GlassIconButton(
+        label = label,
         onClick = onClick,
         modifier = modifier
-            .size(size.dp)
-            .semantics { contentDescription = label },
-        colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
+            .size(size.dp),
+        size = size.dp,
     ) {
         content()
     }
@@ -404,7 +401,7 @@ private fun FeedState(loading: Boolean, error: String?, onRetry: () -> Unit) {
                 CircularProgressIndicator(Modifier.size(28.dp), color = TextSecondary, strokeWidth = 2.dp)
             } else {
                 Text(error ?: "暂无视频", color = TextSecondary)
-                TextButton(onClick = onRetry, modifier = Modifier.widthIn(min = 96.dp).height(44.dp)) {
+                TextButton(onClick = onRetry, modifier = Modifier.widthIn(min = 96.dp).height(48.dp)) {
                     Icon(Icons.Outlined.Refresh, contentDescription = null)
                     Spacer(Modifier.size(8.dp))
                     Text("重试")

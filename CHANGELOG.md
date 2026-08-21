@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.5.0] - 2026-08-21
+
+### Added
+
+- Apply the restrained liquid-glass visual system across the native Android client, including navigation, playback controls, ASMR mini-player, management source cards, login, and update dialogs.
+- Add responsive top-tab sizing, accessible selected states, safe-area-aware ASMR list insets, and subtle press/highlight feedback for Android controls.
+
+### Changed
+
+- Move ASMR portrait video controls for landscape mode and video background playback into the lower-right one-hand reach zone; landscape keeps its existing control layout.
+- Keep media content and flat ASMR lists unobstructed while limiting glass surfaces to navigation, control clusters, dialogs, mini-player, and actionable source cards.
+
 ## [1.4.3] - 2026-08-20
 
 ### Fixed

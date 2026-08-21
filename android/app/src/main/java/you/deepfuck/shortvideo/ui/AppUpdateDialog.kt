@@ -40,8 +40,9 @@ internal fun AppUpdateDialog(
     val info = state.info
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Raised,
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+        containerColor = RaisedStrong.copy(alpha = 0.96f),
+        shape = GlassPanelShape,
+        tonalElevation = 0.dp,
         title = {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -151,7 +152,7 @@ internal fun AppUpdateDialog(
         },
         dismissButton = {
             if (state.phase != AppUpdatePhase.LATEST) {
-                TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 44.dp)) {
+                TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) {
                     Text(
                         when (state.phase) {
                             AppUpdatePhase.CHECKING -> "取消"
@@ -185,8 +186,12 @@ private fun BusyMessage(label: String) {
 private fun PrimaryAction(label: String, onClick: () -> Unit) {
     Button(
         onClick = onClick,
-        modifier = Modifier.heightIn(min = 44.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = Accent),
+        modifier = Modifier.heightIn(min = 48.dp),
+        shape = ControlShape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Accent,
+            contentColor = Color.White,
+        ),
     ) {
         Text(label)
     }

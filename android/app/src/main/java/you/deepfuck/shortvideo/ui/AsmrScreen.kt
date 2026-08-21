@@ -36,10 +36,12 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Audiotrack
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Forward10
 import androidx.compose.material.icons.outlined.Fullscreen
 import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.Headphones
+import androidx.compose.material.icons.outlined.LibraryMusic
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay10
@@ -47,8 +49,6 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -74,10 +74,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.media3.exoplayer.ExoPlayer
@@ -122,6 +124,8 @@ internal fun AsmrScreen(
     onAuthorListPosition: (ListPosition) -> Unit,
     onMediaListPosition: (String, ListPosition) -> Unit,
 ) {
+    val miniPlayerVisible = state.nowPlaying != null && state.expandedMedia == null
+    val listBottomPadding = if (miniPlayerVisible) 102.dp else 16.dp
     Box(Modifier.fillMaxSize().background(Canvas)) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             Spacer(Modifier.height(52.dp))
@@ -137,6 +141,7 @@ internal fun AsmrScreen(
                     filter = state.asmrFilter,
                     onFilter = onFilter,
                     onAuthor = onAuthor,
+                    bottomContentPadding = listBottomPadding,
                 )
             } else {
                 key(selectedAuthor) {
@@ -150,6 +155,7 @@ internal fun AsmrScreen(
                         onFilter = onFilter,
                         onQuery = onQuery,
                         onPlay = onPlay,
+                        bottomContentPadding = listBottomPadding,
                     )
                 }
             }
@@ -199,6 +205,7 @@ private fun AuthorLibrary(
     filter: AsmrFilter,
     onFilter: (AsmrFilter) -> Unit,
     onAuthor: (String) -> Unit,
+    bottomContentPadding: Dp,
 ) {
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = initialPosition.index.coerceAtLeast(0),
@@ -221,13 +228,30 @@ private fun AuthorLibrary(
     }
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 18.dp)) {
-            Text("ASMR 媒体库", fontWeight = FontWeight.SemiBold, style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
-            Spacer(Modifier.height(5.dp))
-            Text(
-                if (total > authors.size) "已载入 ${authors.size} / $total 位作者" else "${authors.size} 位作者",
-                color = TextFaint,
-                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "ASMR 媒体库",
+                        fontWeight = FontWeight.SemiBold,
+                        style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        if (total > authors.size) "已载入 ${authors.size} / $total 位作者" else "${authors.size} 位作者",
+                        color = TextFaint,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                    )
+                }
+                Icon(
+                    Icons.Outlined.LibraryMusic,
+                    contentDescription = null,
+                    tint = TextFaint,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
             Spacer(Modifier.height(16.dp))
             AsmrFilterTabs(selected = filter, onFilter = onFilter)
             Spacer(Modifier.height(12.dp))
@@ -236,16 +260,18 @@ private fun AuthorLibrary(
                 onValueChange = { query = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                placeholder = { Text("搜索作者") },
+                placeholder = { Text("搜索全部作者") },
                 leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, tint = Color.White) },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                shape = RoundedCornerShape(6.dp),
+                shape = ControlShape,
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = TextPrimary,
                     unfocusedTextColor = TextPrimary,
-                    focusedBorderColor = Color.White.copy(alpha = 0.46f),
-                    unfocusedBorderColor = Color.White.copy(alpha = 0.18f),
-                    cursorColor = Color.White,
+                    focusedContainerColor = GlassFillSoft,
+                    unfocusedContainerColor = CanvasSoft.copy(alpha = 0.7f),
+                    focusedBorderColor = GlassLine,
+                    unfocusedBorderColor = Line,
+                    cursorColor = AccentSoft,
                 ),
             )
         }
@@ -254,11 +280,11 @@ private fun AuthorLibrary(
             error != null && authors.isEmpty() -> CenterMessage(error)
             else -> LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize().navigationBarsPadding(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     start = 16.dp,
                     end = 16.dp,
-                    bottom = 94.dp,
+                    bottom = bottomContentPadding,
                 ),
             ) {
                 items(filtered, key = AsmrAuthor::name) { author ->
@@ -290,6 +316,13 @@ private fun AuthorLibrary(
                                 color = TextSecondary,
                                 style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                             )
+                            Spacer(Modifier.width(4.dp))
+                            Icon(
+                                Icons.Outlined.ChevronRight,
+                                contentDescription = null,
+                                tint = TextFaint,
+                                modifier = Modifier.size(18.dp),
+                            )
                         }
                     }
                     HorizontalDivider(color = Line)
@@ -311,7 +344,10 @@ private fun AsmrFilterTabs(
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                 TextButton(
                     onClick = { onFilter(filter) },
-                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .semantics { this.selected = active },
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = Color.White.copy(alpha = if (active) 1f else 0.62f),
                     ),
@@ -344,6 +380,7 @@ private fun AuthorMedia(
     onFilter: (AsmrFilter) -> Unit,
     onQuery: (String) -> Unit,
     onPlay: (MediaEntry) -> Unit,
+    bottomContentPadding: Dp,
 ) {
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = initialPosition.index.coerceAtLeast(0),
@@ -380,11 +417,11 @@ private fun AuthorMedia(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(
+            GlassIconButton(
+                label = "返回作者列表",
                 onClick = onBack,
-                colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
             ) {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回作者列表")
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
             }
             Column(Modifier.weight(1f)) {
                 Text(
@@ -416,13 +453,15 @@ private fun AuthorMedia(
             singleLine = true,
             placeholder = { Text("搜索媒体") },
             leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, tint = Color.White) },
-            shape = RoundedCornerShape(6.dp),
+            shape = ControlShape,
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = TextPrimary,
                 unfocusedTextColor = TextPrimary,
-                focusedBorderColor = Color.White.copy(alpha = 0.46f),
-                unfocusedBorderColor = Color.White.copy(alpha = 0.18f),
-                cursorColor = Color.White,
+                focusedContainerColor = GlassFillSoft,
+                unfocusedContainerColor = CanvasSoft.copy(alpha = 0.7f),
+                focusedBorderColor = GlassLine,
+                unfocusedBorderColor = Line,
+                cursorColor = AccentSoft,
             ),
         )
         when {
@@ -430,8 +469,12 @@ private fun AuthorMedia(
             state.asmrError != null && state.asmrItems.isEmpty() -> CenterMessage(state.asmrError)
             else -> LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 16.dp, end = 16.dp, bottom = 94.dp),
+                modifier = Modifier.fillMaxSize().navigationBarsPadding(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    bottom = bottomContentPadding,
+                ),
             ) {
                 items(filtered, key = MediaEntry::id) { entry ->
                     val active = state.nowPlaying?.id == entry.id && player.mediaId == entry.id
@@ -496,8 +539,9 @@ private fun MiniPlayer(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xF2111214))
             .navigationBarsPadding()
+            .padding(horizontal = 8.dp, vertical = 8.dp)
+            .glassSurface()
             .pointerInput(Unit) {
                 // Keep unhandled touches on the player plane instead of the media list below it.
                 awaitPointerEventScope {
@@ -509,11 +553,6 @@ private fun MiniPlayer(
                 }
             },
     ) {
-        FineProgressBar(
-            player = player,
-            onSeek = onSeek,
-            compact = true,
-        )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -543,24 +582,29 @@ private fun MiniPlayer(
                 if (player.isBuffering) {
                     DelayedSpinner(visible = true, modifier = Modifier.size(22.dp))
                 } else {
-                    IconButton(
+                    GlassIconButton(
+                        label = if (player.playWhenReady) "暂停" else "播放",
                         onClick = onToggle,
-                        colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
                     ) {
                         Icon(
                             if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            contentDescription = if (player.playWhenReady) "暂停" else "播放",
+                            contentDescription = null,
                         )
                     }
                 }
             }
-            IconButton(
+            GlassIconButton(
+                label = "关闭播放器",
                 onClick = onClose,
-                colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
             ) {
-                Icon(Icons.Outlined.Close, contentDescription = "关闭播放器")
+                Icon(Icons.Outlined.Close, contentDescription = null)
             }
         }
+        FineProgressBar(
+            player = player,
+            onSeek = onSeek,
+            compact = true,
+        )
     }
 }
 
@@ -629,7 +673,7 @@ private fun ExpandedAsmrPlayer(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF070809))
+            .background(Canvas)
             .clickable(
                 interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                 indication = null,
@@ -660,59 +704,59 @@ private fun ExpandedAsmrPlayer(
                 modifier = Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
-                    .background(Brush.verticalGradient(listOf(Color(0xCC070809), Color.Transparent)))
+                    .background(Brush.verticalGradient(listOf(Canvas.copy(alpha = 0.8f), Color.Transparent)))
                     .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(
+                GlassIconButton(
+                    label = "收起播放器",
                     onClick = onCollapse,
-                    colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
-                ) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "收起播放器") }
+                ) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null) }
                 Column(Modifier.weight(1f)) {
                     Text(entry.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
                     Text(entry.author.orEmpty(), maxLines = 1, color = TextFaint, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
                 }
-                IconButton(
-                    onClick = { onBackgroundPlayback(!backgroundPlayback) },
-                    colors = IconButtonDefaults.iconButtonColors(
-                        contentColor = if (backgroundPlayback) Accent else Color.White,
-                    ),
-                ) {
-                    Icon(
-                        Icons.Outlined.Headphones,
-                        contentDescription = if (backgroundPlayback) "关闭视频后台播放" else "开启视频后台播放",
-                    )
+                if (fullscreen) {
+                    GlassIconButton(
+                        label = if (backgroundPlayback) "关闭视频后台播放" else "开启视频后台播放",
+                        onClick = { onBackgroundPlayback(!backgroundPlayback) },
+                        tint = if (backgroundPlayback) Accent else Color.White,
+                    ) {
+                        Icon(
+                            Icons.Outlined.Headphones,
+                            contentDescription = null,
+                        )
+                    }
+                    GlassIconButton(
+                        label = "退出横屏",
+                        onClick = { onFullscreen(false) },
+                    ) {
+                        Icon(Icons.Outlined.FullscreenExit, contentDescription = null)
+                    }
                 }
-                IconButton(
-                    onClick = { onFullscreen(!fullscreen) },
-                    colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
-                ) {
-                    Icon(if (fullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen, contentDescription = if (fullscreen) "退出横屏" else "横屏")
-                }
-                IconButton(
+                GlassIconButton(
+                    label = "关闭播放器",
                     onClick = onClose,
-                    colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
-                ) { Icon(Icons.Outlined.Close, contentDescription = "关闭播放器") }
+                ) { Icon(Icons.Outlined.Close, contentDescription = null) }
             }
 
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xD8000000))))
+                    .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xB3000000))))
                     .navigationBarsPadding()
                     .padding(start = 12.dp, end = 12.dp, top = 34.dp, bottom = 10.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (!fullscreen) {
-                        IconButton(
+                        GlassIconButton(
+                            label = if (player.playWhenReady) "暂停" else "播放",
                             onClick = onToggle,
-                            modifier = Modifier.size(48.dp),
-                            colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
                         ) {
                             Icon(
                                 if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                                contentDescription = if (player.playWhenReady) "暂停" else "播放",
+                                contentDescription = null,
                             )
                         }
                     }
@@ -731,7 +775,14 @@ private fun ExpandedAsmrPlayer(
             }
 
             Column(
-                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 12.dp),
+                modifier = if (fullscreen) {
+                    Modifier.align(Alignment.CenterEnd).padding(end = 12.dp)
+                } else {
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .navigationBarsPadding()
+                        .padding(end = 12.dp, bottom = 70.dp)
+                },
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 OverlayIconControl(
@@ -739,6 +790,24 @@ private fun ExpandedAsmrPlayer(
                     onClick = { onMuted(!muted) },
                 ) {
                     Icon(if (muted) Icons.AutoMirrored.Outlined.VolumeOff else Icons.AutoMirrored.Outlined.VolumeUp, contentDescription = null)
+                }
+                if (!fullscreen) {
+                    OverlayIconControl(
+                        label = if (backgroundPlayback) "关闭视频后台播放" else "开启视频后台播放",
+                        onClick = { onBackgroundPlayback(!backgroundPlayback) },
+                    ) {
+                        Icon(
+                            Icons.Outlined.Headphones,
+                            contentDescription = null,
+                            tint = if (backgroundPlayback) Accent else Color.White,
+                        )
+                    }
+                    OverlayIconControl(
+                        label = "横屏",
+                        onClick = { onFullscreen(true) },
+                    ) {
+                        Icon(Icons.Outlined.Fullscreen, contentDescription = null)
+                    }
                 }
             }
         }
@@ -774,8 +843,7 @@ private fun ExpandedAsmrPlayer(
                 "${formatDuration(it)} / ${formatDuration(player.durationMs)}",
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0x72000000))
+                    .glassSurface(fill = GlassFillSoft)
                     .padding(14.dp),
                 color = Color.White,
             )
