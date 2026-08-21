@@ -61,7 +61,7 @@ Android updates are published from `/data/app-update`, which is inside the exist
   "versionName": "1.5.1",
   "apkFile": "short-video-android-v1.5.1-debug.apk",
   "sha256": "b93cd45c7c30567f79a2e336bfaecd8b47d53486a89dec37f5b45a75346279b7",
-  "size": 22691092,
+  "size": 22691088,
   "notes": "修复 ASMR 底部液态玻璃播放器遮挡列表，以及旧版覆盖安装时的签名不一致问题。"
 }
 ```
