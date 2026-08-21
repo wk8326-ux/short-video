@@ -53,6 +53,39 @@ async def test_recursive_scan_and_resolve():
 
 
 @pytest.mark.asyncio
+async def test_movie_scan_can_index_provider_files_without_reliable_extensions():
+    async def handler(_: httpx.Request) -> httpx.Response:
+        content = [
+            {"name": "《无间道》", "is_dir": False, "size": 3_612_015_764},
+            {"name": "《蝙蝠侠.黑暗骑士》", "is_dir": False, "size": 7_725_900_519},
+            {"name": "字幕.srt", "is_dir": False, "size": 1024},
+        ]
+        return httpx.Response(
+            200,
+            json={"code": 200, "data": {"content": content, "total": len(content)}},
+        )
+
+    http_client = httpx.AsyncClient(
+        base_url="https://alist.example", transport=httpx.MockTransport(handler)
+    )
+    client = AListClient(
+        _settings(),
+        http_client,
+        extensions=frozenset({".mp4", ".mkv"}),
+        include_unknown_files=True,
+    )
+
+    videos, directories = await client.scan()
+    await http_client.aclose()
+
+    assert directories == 1
+    assert [(row["name"], row["media_format"]) for row in videos] == [
+        ("《无间道》", "unknown"),
+        ("《蝙蝠侠.黑暗骑士》", "unknown"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_resolve_rejects_non_http_url():
     transport = httpx.MockTransport(
         lambda _: httpx.Response(200, json={"code": 200, "data": {"raw_url": "file:///secret.mp4"}})

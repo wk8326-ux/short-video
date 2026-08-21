@@ -152,6 +152,7 @@ internal fun ManagementScreen(
                                 "总计" to status.totalItems.toString(),
                                 "光鸭" to status.guangyaItems.toString(),
                                 "ASMR" to status.asmrItems.toString(),
+                                "电影" to status.movieItems.toString(),
                             ),
                         )
                         Spacer(Modifier.height(8.dp))
@@ -440,7 +441,7 @@ private fun MediaSourceDialog(
                     selected = section.apiValue,
                     onSelected = { value ->
                         section = LibrarySection.entries.first { it.apiValue == value }
-                        scanMode = if (section == LibrarySection.FEED) "tree" else "authors_recursive"
+                        scanMode = if (section.usesTreeScan) "tree" else "authors_recursive"
                     },
                 )
                 if (section == LibrarySection.ASMR) {
@@ -490,7 +491,7 @@ private fun MediaSourceDialog(
                             baseUrl = baseUrl.trim(),
                             rootPath = rootPath.trim(),
                             section = section,
-                            scanMode = if (section == LibrarySection.FEED) "tree" else scanMode,
+                            scanMode = if (section.usesTreeScan) "tree" else scanMode,
                             anonymous = anonymous,
                             token = token,
                             username = username,

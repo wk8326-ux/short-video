@@ -89,6 +89,7 @@ class PlaybackPreferences(context: Context) {
     }
 
     internal fun feedSession(surface: MediaSurface, mode: FeedMode): FeedSessionState? = runCatching {
+        if (!surface.isFeed) return null
         val raw = preferences.getString(feedKey(surface, mode), null) ?: return null
         val payload = JSONObject(raw)
         if (System.currentTimeMillis() - payload.optLong("savedAt") > FEED_MAX_AGE_MS) {
@@ -119,6 +120,7 @@ class PlaybackPreferences(context: Context) {
     }.getOrNull()
 
     internal fun saveFeedSession(surface: MediaSurface, mode: FeedMode, session: FeedSessionState) {
+        require(surface.isFeed) { "Only feed surfaces can own feed sessions" }
         val stored = session.storageWindow(FEED_CACHE_ITEM_LIMIT)
         val payload = JSONObject()
             .put("savedAt", System.currentTimeMillis())
@@ -196,7 +198,7 @@ class PlaybackPreferences(context: Context) {
     internal fun clearFeedSessions() {
         preferences.edit().apply {
             MediaSurface.entries
-                .filterNot { it == MediaSurface.ASMR }
+                .filter { it.isFeed }
                 .forEach { surface ->
                     FeedMode.entries.forEach { mode -> remove(feedKey(surface, mode)) }
                 }
@@ -214,6 +216,12 @@ class PlaybackPreferences(context: Context) {
 
     internal fun saveAsmrMediaListPosition(author: String, position: ListPosition) =
         saveListPosition("$KEY_ASMR_MEDIA_LIST_POSITION:$author", position)
+
+    internal fun movieListPosition(): ListPosition =
+        listPosition(KEY_MOVIE_LIST_POSITION)
+
+    internal fun saveMovieListPosition(position: ListPosition) =
+        saveListPosition(KEY_MOVIE_LIST_POSITION, position)
 
     fun clearSession() {
         sessionCookie = null
@@ -245,6 +253,7 @@ class PlaybackPreferences(context: Context) {
         const val KEY_ASMR_AUTHOR_INDEX = "asmr_author_index"
         const val KEY_ASMR_AUTHOR_LIST_POSITION = "asmr_author_list_position"
         const val KEY_ASMR_MEDIA_LIST_POSITION = "asmr_media_list_position"
+        const val KEY_MOVIE_LIST_POSITION = "movie_list_position"
         const val KEY_RECENT = "recent"
         const val KEY_POSITIONS = "positions"
         const val FEED_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1_000

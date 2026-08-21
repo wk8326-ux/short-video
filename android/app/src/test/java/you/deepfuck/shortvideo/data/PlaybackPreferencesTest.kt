@@ -51,6 +51,20 @@ class PlaybackPreferencesTest {
         assertNull(PlaybackPreferences(context).asmrAuthorIndex())
     }
 
+    @Test
+    fun movieSurfaceAndGridPositionSurviveProcessRestart() {
+        val context = RuntimeEnvironment.getApplication()
+        context.getSharedPreferences("short_video", Context.MODE_PRIVATE).edit().clear().commit()
+        val preferences = PlaybackPreferences(context)
+
+        preferences.surface = MediaSurface.MOVIE
+        preferences.saveMovieListPosition(you.deepfuck.shortvideo.ListPosition(27, 14))
+
+        val restored = PlaybackPreferences(context)
+        assertEquals(MediaSurface.MOVIE, restored.surface)
+        assertEquals(you.deepfuck.shortvideo.ListPosition(27, 14), restored.movieListPosition())
+    }
+
     private fun media(id: Long) = MediaEntry(
         id = id,
         title = "video-$id",

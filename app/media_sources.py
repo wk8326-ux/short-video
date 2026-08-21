@@ -110,6 +110,7 @@ class MediaSourceRegistry:
                 if config["section"] == "asmr"
                 else 0.0
             ),
+            include_unknown_files=config["section"] == "movie",
         )
         self._runtimes[source_id] = SourceRuntime(
             config=config,

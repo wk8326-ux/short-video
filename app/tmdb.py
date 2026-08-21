@@ -21,21 +21,30 @@ class TmdbMatch:
 
 
 class TmdbClient:
-    def __init__(self, *, read_token: str = "", api_key: str = "", language: str = "zh-CN"):
+    def __init__(
+        self,
+        *,
+        read_token: str = "",
+        api_key: str = "",
+        language: str = "zh-CN",
+        client: httpx.AsyncClient | None = None,
+    ):
         self._read_token = read_token
         self._api_key = api_key
         self._language = language
         headers = {"Accept": "application/json", "User-Agent": "short-video-movie-library/1"}
         if read_token:
             headers["Authorization"] = f"Bearer {read_token}"
-        self._client = httpx.AsyncClient(
+        self._client = client or httpx.AsyncClient(
             base_url="https://api.themoviedb.org/3",
             headers=headers,
             timeout=httpx.Timeout(15.0, connect=8.0),
         )
+        self._owns_client = client is None
 
     async def close(self) -> None:
-        await self._client.aclose()
+        if self._owns_client:
+            await self._client.aclose()
 
     async def search_movie(self, title: str, *, year: int | None = None) -> TmdbMatch | None:
         params: dict[str, Any] = {"query": title, "language": self._language, "include_adult": "false"}
@@ -49,13 +58,31 @@ class TmdbClient:
         results = payload.get("results") if isinstance(payload, dict) else None
         if not isinstance(results, list) or not results:
             return None
-        candidate = next(
-            (item for item in results if year and str(item.get("release_date") or "").startswith(str(year))),
-            results[0],
-        )
+        normalized_query = _normalize_title(title)
+
+        def rank(item: dict[str, Any]) -> tuple[int, int]:
+            release_date = str(item.get("release_date") or "")
+            candidate_year = int(release_date[:4]) if release_date[:4].isdigit() else None
+            candidate_titles = {
+                _normalize_title(str(item.get("title") or "")),
+                _normalize_title(str(item.get("original_title") or "")),
+            }
+            exact_title = normalized_query in candidate_titles
+            return (
+                (4 if exact_title else 0) + (2 if year and candidate_year == year else 0),
+                1 if exact_title else 0,
+            )
+
+        candidate = max(results, key=rank)
         release_date = str(candidate.get("release_date") or "")
         candidate_year = int(release_date[:4]) if release_date[:4].isdigit() else None
-        exact = bool(year and candidate_year == year)
+        candidate_titles = {
+            _normalize_title(str(candidate.get("title") or "")),
+            _normalize_title(str(candidate.get("original_title") or "")),
+        }
+        exact_title = normalized_query in candidate_titles
+        exact_year = year is None or candidate_year == year
+        exact = exact_title and exact_year
         poster_path = str(candidate.get("poster_path") or "")
         backdrop_path = str(candidate.get("backdrop_path") or "")
         return TmdbMatch(
@@ -70,3 +97,7 @@ class TmdbClient:
             status="matched" if exact or year is None else "ambiguous",
             confidence=0.95 if exact else 0.7,
         )
+
+
+def _normalize_title(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())

@@ -1,6 +1,7 @@
 package you.deepfuck.shortvideo
 
 import you.deepfuck.shortvideo.data.MediaEntry
+import you.deepfuck.shortvideo.data.MovieItem
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.AsmrFilter
@@ -43,11 +44,12 @@ internal class FeedSessionRegistry {
     private val sessions = mutableMapOf<Key, FeedSessionState>()
 
     fun save(surface: MediaSurface, mode: FeedMode, session: FeedSessionState) {
+        require(surface.isFeed) { "Only feed surfaces can own feed sessions" }
         sessions[Key(surface, mode)] = session
     }
 
     fun restore(surface: MediaSurface, mode: FeedMode): FeedSessionState? =
-        sessions[Key(surface, mode)]
+        if (surface.isFeed) sessions[Key(surface, mode)] else null
 
     fun clear() = sessions.clear()
 }
@@ -111,12 +113,12 @@ internal fun shouldAttachFeedPlayer(active: Boolean, entryId: Long, mediaId: Lon
 internal fun shouldActivateFeedItem(
     surface: MediaSurface,
     showManagement: Boolean,
-): Boolean = surface != MediaSurface.ASMR && !showManagement
+): Boolean = surface.isFeed && !showManagement
 
 internal fun shouldRefreshFeedAfterScan(
     surface: MediaSurface,
     showManagement: Boolean,
-): Boolean = surface != MediaSurface.ASMR && !showManagement
+): Boolean = surface.isFeed && !showManagement
 
 internal class FeedLibraryRefreshGate {
     private var pending = false
@@ -151,6 +153,26 @@ internal fun stableAsmrAuthors(authors: List<AsmrAuthor>): List<AsmrAuthor> =
 
 internal fun stableAsmrEntries(entries: List<MediaEntry>): List<MediaEntry> =
     entries.distinctBy { it.id }
+
+internal fun mergeMoviePages(
+    current: List<MovieItem>,
+    incoming: List<MovieItem>,
+    reset: Boolean,
+): List<MovieItem> {
+    if (reset) return incoming.distinctBy(MovieItem::id)
+    val ids = current.mapTo(mutableSetOf(), MovieItem::id)
+    return current + incoming.filter { ids.add(it.id) }
+}
+
+internal fun shouldApplyMovieResponse(
+    requestGeneration: Long,
+    currentGeneration: Long,
+    requestedQuery: String,
+    currentQuery: String,
+    currentSurface: MediaSurface,
+): Boolean = requestGeneration == currentGeneration &&
+    requestedQuery == currentQuery &&
+    currentSurface == MediaSurface.MOVIE
 
 internal fun filterAsmrAuthors(
     authors: List<AsmrAuthor>,

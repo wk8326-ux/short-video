@@ -33,6 +33,7 @@ import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.data.MediaSourceDraft
+import you.deepfuck.shortvideo.data.MovieItem
 import you.deepfuck.shortvideo.data.PlaybackPreferences
 import you.deepfuck.shortvideo.media.PlaybackEngine
 import you.deepfuck.shortvideo.media.PlaybackEndedEvent
@@ -67,6 +68,14 @@ data class AppUiState(
     val asmrError: String? = null,
     val asmrFilter: AsmrFilter = AsmrFilter.ALL,
     val asmrQuery: String = "",
+    val movieItems: List<MovieItem> = emptyList(),
+    val movieTotal: Int = 0,
+    val movieNextOffset: Int? = 0,
+    val movieLoading: Boolean = false,
+    val movieError: String? = null,
+    val movieQuery: String = "",
+    val movieDetailLoading: Boolean = false,
+    val selectedMovie: MovieItem? = null,
     val expandedMedia: MediaEntry? = null,
     val nowPlaying: MediaEntry? = null,
     val asmrVideoBackgroundPlayback: Boolean = false,
@@ -136,8 +145,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var asmrQueueKey: AsmrItemsKey? = null
     private var asmrQueue: List<MediaEntry> = emptyList()
     private var pendingAsmrAdvanceId: Long? = null
+    private var movieJob: Job? = null
+    private var movieSearchJob: Job? = null
+    private var movieDetailJob: Job? = null
+    private var movieRequestGeneration = 0L
+    private var movieCatalogDirty = false
     private var appUpdateJob: Job? = null
     private var appUpdateObserverJob: Job? = null
+    val movieImageLoader by lazy { api.movieImageLoader(application) }
 
     init {
         playback.setMuted(preferences.muted)
@@ -206,10 +221,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (surface == previousSurface) return
         logs.info("surface_change", "from=$previousSurface to=$surface media=${playback.snapshot.value.mediaId}")
         saveCurrentPosition()
-        if (previousSurface == MediaSurface.ASMR) {
-            persistAsmrPlaybackState()
-        } else {
-            persistCurrentFeedSession()
+        when {
+            previousSurface == MediaSurface.ASMR -> persistAsmrPlaybackState()
+            previousSurface.isFeed -> persistCurrentFeedSession()
+            previousSurface == MediaSurface.MOVIE -> updateMovieResumePosition()
         }
         feedJob?.cancel()
         feedJob = null
@@ -224,6 +239,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 job.cancel()
             }
         }
+        if (previousSurface == MediaSurface.MOVIE) {
+            movieJob?.cancel()
+            movieSearchJob?.cancel()
+            movieDetailJob?.cancel()
+            movieRequestGeneration += 1L
+        }
         preferences.surface = surface
         activeFeedItemId = null
         asmrQueueKey = null
@@ -231,31 +252,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pendingAsmrAdvanceId = null
         mutableState.value = mutableState.value.copy(
             surface = surface,
-            feedItems = if (surface == MediaSurface.ASMR) emptyList() else mutableState.value.feedItems,
+            feedItems = if (surface.isFeed) mutableState.value.feedItems else emptyList(),
             activeIndex = 0,
             expandedMedia = null,
             nowPlaying = null,
+            selectedMovie = null,
+            movieDetailLoading = false,
             showManagement = false,
             feedError = null,
             asmrError = null,
+            movieError = null,
         )
         playback.stop()
+        playback.prefetch(surface, emptyList())
         stopPlaybackService()
-        if (surface == MediaSurface.ASMR) {
-            restoreAsmrSurface()
-        } else {
-            if (!refreshPendingFeedLibrary()) restoreFeed(surface)
+        when {
+            surface.isFeed -> if (!refreshPendingFeedLibrary()) restoreFeed(surface)
+            surface == MediaSurface.ASMR -> restoreAsmrSurface()
+            surface == MediaSurface.MOVIE -> restoreMovieSurface()
         }
     }
 
     fun changeMode(mode: FeedMode) {
+        if (!mutableState.value.surface.isFeed) return
         if (mode == mutableState.value.mode) return
         saveCurrentPosition()
         persistCurrentFeedSession()
         preferences.mode = mode
         activeFeedItemId = null
         mutableState.value = mutableState.value.copy(mode = mode, activeIndex = 0)
-        if (mutableState.value.surface != MediaSurface.ASMR) restoreFeed(mutableState.value.surface)
+        restoreFeed(mutableState.value.surface)
     }
 
     fun setMuted(muted: Boolean) {
@@ -266,10 +292,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlayback() {
         playback.togglePlayback()
-        if (mutableState.value.surface == MediaSurface.ASMR) {
-            persistAsmrPlaybackState()
-        } else {
-            persistCurrentFeedSession()
+        when {
+            mutableState.value.surface == MediaSurface.ASMR -> persistAsmrPlaybackState()
+            mutableState.value.surface.isFeed -> persistCurrentFeedSession()
+            mutableState.value.surface == MediaSurface.MOVIE -> saveCurrentPosition()
         }
         if (playback.player.playWhenReady && keepCurrentAsmrPlaybackInBackground()) {
             startPlaybackService()
@@ -447,6 +473,98 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pendingAsmrAdvanceId = null
         preferences.saveAsmrPlaybackState(null)
         mutableState.value = mutableState.value.copy(expandedMedia = null, nowPlaying = null)
+    }
+
+    fun setMovieQuery(query: String) {
+        if (query == mutableState.value.movieQuery) return
+        movieJob?.cancel()
+        movieSearchJob?.cancel()
+        movieRequestGeneration += 1L
+        mutableState.value = mutableState.value.copy(movieQuery = query, movieError = null)
+        movieSearchJob = viewModelScope.launch {
+            delay(320)
+            if (mutableState.value.surface == MediaSurface.MOVIE) loadMovies(reset = true)
+        }
+    }
+
+    fun retryMovies() = loadMovies(reset = true)
+
+    fun loadMoreMovies() {
+        val state = mutableState.value
+        if (
+            state.surface == MediaSurface.MOVIE &&
+            !state.movieLoading &&
+            state.movieNextOffset != null
+        ) {
+            loadMovies(reset = false)
+        }
+    }
+
+    fun selectMovie(movie: MovieItem) {
+        if (mutableState.value.surface != MediaSurface.MOVIE) return
+        val localMovie = movie.withResumePosition()
+        mutableState.value = mutableState.value.copy(
+            selectedMovie = localMovie,
+            movieDetailLoading = true,
+            movieError = null,
+            nowPlaying = null,
+        )
+        playback.prefetch(MediaSurface.MOVIE, listOf(localMovie.asMediaEntry()))
+        movieDetailJob?.cancel()
+        movieDetailJob = viewModelScope.launch {
+            runApi { api.movieDetail(movie.id) }
+                .onSuccess { detail ->
+                    val state = mutableState.value
+                    if (state.surface != MediaSurface.MOVIE || state.selectedMovie?.id != movie.id) return@onSuccess
+                    val resolved = detail.withResumePosition()
+                    mutableState.value = state.copy(
+                        selectedMovie = resolved,
+                        movieItems = state.movieItems.map { if (it.id == resolved.id) resolved else it },
+                        movieDetailLoading = false,
+                    )
+                    playback.prefetch(MediaSurface.MOVIE, listOf(resolved.asMediaEntry()))
+                }
+                .onFailure { error ->
+                    if (!handleUnauthorized(error)) {
+                        val state = mutableState.value
+                        if (state.surface == MediaSurface.MOVIE && state.selectedMovie?.id == movie.id) {
+                            mutableState.value = state.copy(movieDetailLoading = false)
+                        }
+                    }
+                }
+        }
+    }
+
+    fun closeMovieDetail() {
+        if (mutableState.value.surface != MediaSurface.MOVIE) return
+        saveCurrentPosition()
+        movieDetailJob?.cancel()
+        playback.stop()
+        playback.prefetch(MediaSurface.MOVIE, emptyList())
+        mutableState.value = mutableState.value.copy(
+            selectedMovie = null,
+            movieDetailLoading = false,
+            nowPlaying = null,
+        )
+    }
+
+    fun playMovie(movie: MovieItem) {
+        if (mutableState.value.surface != MediaSurface.MOVIE) return
+        saveCurrentPosition()
+        val resolved = movie.withResumePosition()
+        val entry = resolved.asMediaEntry()
+        preferences.setLastVideo(MediaSurface.MOVIE, entry.id)
+        mutableState.value = mutableState.value.copy(
+            selectedMovie = resolved,
+            nowPlaying = entry,
+            movieError = null,
+        )
+        if (!playback.play(entry, resolved.resumePositionMs)) {
+            mutableState.value = mutableState.value.copy(
+                nowPlaying = null,
+                movieError = "无法准备该电影",
+            )
+        }
     }
 
     fun showManagement() {
@@ -772,6 +890,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         snapshot.mediaId?.let {
             preferences.savePosition(it, snapshot.positionMs, snapshot.durationMs)
         }
+        if (mutableState.value.surface == MediaSurface.MOVIE) updateMovieResumePosition()
     }
 
     internal fun asmrAuthorListPosition(): ListPosition = preferences.asmrAuthorListPosition()
@@ -787,11 +906,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.saveAsmrMediaListPosition(author, position)
     }
 
+    internal fun movieListPosition(): ListPosition = preferences.movieListPosition()
+
+    internal fun saveMovieListPosition(position: ListPosition) {
+        preferences.saveMovieListPosition(position)
+    }
+
     private fun persistCurrentFeedSession(
         playWhenReady: Boolean = playback.snapshot.value.playWhenReady,
     ) {
         val state = mutableState.value
-        if (state.surface == MediaSurface.ASMR || state.feedItems.isEmpty()) return
+        if (!state.surface.isFeed || state.feedItems.isEmpty()) return
         val activeId = state.feedItems.getOrNull(state.activeIndex)?.id ?: state.nowPlaying?.id
         val session = FeedSessionState(
             items = state.feedItems,
@@ -826,8 +951,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun restoreCurrentSurface() {
-        if (mutableState.value.surface == MediaSurface.ASMR) restoreAsmrSurface()
-        else restoreFeed(mutableState.value.surface)
+        val surface = mutableState.value.surface
+        when {
+            surface.isFeed -> restoreFeed(surface)
+            surface == MediaSurface.ASMR -> restoreAsmrSurface()
+            surface == MediaSurface.MOVIE -> restoreMovieSurface()
+        }
     }
 
     private fun restoreAsmrSurface() {
@@ -877,7 +1006,96 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (resume.playWhenReady && backgroundPlaybackEnabled(resume.entry)) startPlaybackService()
     }
 
+    private fun restoreMovieSurface() {
+        mutableState.value = mutableState.value.copy(
+            selectedMovie = null,
+            movieDetailLoading = false,
+            nowPlaying = null,
+            movieError = null,
+        )
+        if (movieCatalogDirty || mutableState.value.movieItems.isEmpty()) {
+            loadMovies(reset = true)
+        }
+    }
+
+    private fun loadMovies(reset: Boolean) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.MOVIE) return
+        val offset = if (reset) 0 else state.movieNextOffset ?: return
+        if (reset) movieJob?.cancel() else if (state.movieLoading) return
+        val requestedQuery = state.movieQuery.trim()
+        val requestGeneration = ++movieRequestGeneration
+        mutableState.value = state.copy(movieLoading = true, movieError = null)
+        movieJob = viewModelScope.launch {
+            runApi { api.movies(query = requestedQuery, offset = offset) }
+                .onSuccess { page ->
+                    val current = mutableState.value
+                    if (
+                        !shouldApplyMovieResponse(
+                            requestGeneration = requestGeneration,
+                            currentGeneration = movieRequestGeneration,
+                            requestedQuery = requestedQuery,
+                            currentQuery = current.movieQuery.trim(),
+                            currentSurface = current.surface,
+                        )
+                    ) return@onSuccess
+                    val incoming = page.items.map { it.withResumePosition() }
+                    val merged = mergeMoviePages(current.movieItems, incoming, reset)
+                    movieCatalogDirty = false
+                    mutableState.value = current.copy(
+                        movieItems = merged,
+                        movieTotal = maxOf(page.total, merged.size),
+                        movieNextOffset = page.nextOffset,
+                        movieLoading = false,
+                        movieError = null,
+                    )
+                    if (reset && page.items.isEmpty() && page.scanRunning) {
+                        delay(1_500)
+                        loadMovies(reset = true)
+                    }
+                }
+                .onFailure { error ->
+                    val current = mutableState.value
+                    if (
+                        !shouldApplyMovieResponse(
+                            requestGeneration = requestGeneration,
+                            currentGeneration = movieRequestGeneration,
+                            requestedQuery = requestedQuery,
+                            currentQuery = current.movieQuery.trim(),
+                            currentSurface = current.surface,
+                        )
+                    ) return@onFailure
+                    if (!handleUnauthorized(error)) {
+                        mutableState.value = current.copy(
+                            movieLoading = false,
+                            movieError = "电影目录暂时无法载入",
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun MovieItem.withResumePosition(): MovieItem =
+        copy(
+            posterUrl = posterUrl?.let(api::absoluteUrl),
+            backdropUrl = backdropUrl?.let(api::absoluteUrl),
+            resumePositionMs = preferences.position(videoId),
+        )
+
+    private fun updateMovieResumePosition() {
+        val state = mutableState.value
+        val selected = state.selectedMovie ?: return
+        val position = preferences.position(selected.videoId)
+        if (position == selected.resumePositionMs) return
+        val updated = selected.copy(resumePositionMs = position)
+        mutableState.value = state.copy(
+            selectedMovie = updated,
+            movieItems = state.movieItems.map { if (it.id == updated.id) updated else it },
+        )
+    }
+
     private fun restoreFeed(surface: MediaSurface) {
+        require(surface.isFeed) { "Only short and long surfaces can restore a feed" }
         feedJob?.cancel()
         feedTotalJob?.cancel()
         feedRequestGeneration += 1L
@@ -906,7 +1124,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun requestFeed(reset: Boolean) {
         val requestedSurface = mutableState.value.surface
-        if (requestedSurface == MediaSurface.ASMR) return
+        if (!requestedSurface.isFeed) return
         val requestedMode = mutableState.value.mode
         if (reset) feedJob?.cancel() else if (mutableState.value.feedLoading) return
         val currentItems = mutableState.value.feedItems
@@ -995,6 +1213,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun refreshFeedTotal(surface: MediaSurface) {
+        if (!surface.isFeed) return
         val requestedMode = mutableState.value.mode
         feedTotalJob?.cancel()
         feedTotalJob = viewModelScope.launch {
@@ -1138,6 +1357,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 refreshPendingFeedLibrary()
             }
             LibrarySection.ASMR -> refreshAsmrLibrary()
+            LibrarySection.MOVIE -> refreshMovieLibrary()
         }
     }
 
@@ -1177,6 +1397,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         loadAsmrAuthors()
         selectedAuthor?.let { loadAsmrItems(AsmrItemsKey(it, mutableState.value.asmrFilter), reset = true) }
+    }
+
+    private fun refreshMovieLibrary() {
+        movieCatalogDirty = true
+        if (mutableState.value.surface == MediaSurface.MOVIE) loadMovies(reset = true)
     }
 
     private fun loadAsmrItems(key: AsmrItemsKey, reset: Boolean) {
@@ -1292,18 +1517,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 stateMediaId = state.nowPlaying?.id,
             )
         ) return
-        if (state.surface == MediaSurface.ASMR) {
-            val current = state.nowPlaying ?: return
-            val next = nextAsmrEntry(asmrQueue, current.id)
-            if (next != null) {
-                startAsmrPlayback(next, expandVideo = state.expandedMedia != null)
-            } else if (asmrQueueKey?.let { asmrItemJobs[it]?.isActive } == true) {
-                pendingAsmrAdvanceId = current.id
-            } else if (asmrQueueKey?.let { asmrItemsNextOffsets[it] != null } == true) {
-                pendingAsmrAdvanceId = current.id
-                loadAsmrItems(asmrQueueKey ?: return, reset = false)
+        when {
+            state.surface == MediaSurface.ASMR -> {
+                val current = state.nowPlaying ?: return
+                val next = nextAsmrEntry(asmrQueue, current.id)
+                if (next != null) {
+                    startAsmrPlayback(next, expandVideo = state.expandedMedia != null)
+                } else if (asmrQueueKey?.let { asmrItemJobs[it]?.isActive } == true) {
+                    pendingAsmrAdvanceId = current.id
+                } else if (asmrQueueKey?.let { asmrItemsNextOffsets[it] != null } == true) {
+                    pendingAsmrAdvanceId = current.id
+                    loadAsmrItems(asmrQueueKey ?: return, reset = false)
+                }
+                return
             }
-            return
+            state.surface == MediaSurface.MOVIE -> {
+                saveCurrentPosition()
+                playback.seekTo(0L)
+                playback.pause()
+                return
+            }
+            !state.surface.isFeed -> return
         }
         val nextIndex = nextFeedIndex(state.activeIndex, state.feedItems.size) ?: return
         if (nextIndex == state.activeIndex) {

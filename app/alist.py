@@ -17,6 +17,33 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
 )
 TRANSIENT_DATABASE_RETRIES = 4
+NON_MEDIA_EXTENSIONS = frozenset(
+    {
+        ".7z",
+        ".ass",
+        ".bmp",
+        ".gif",
+        ".gz",
+        ".idx",
+        ".iso",
+        ".jpeg",
+        ".jpg",
+        ".json",
+        ".nfo",
+        ".png",
+        ".rar",
+        ".srt",
+        ".ssa",
+        ".sub",
+        ".tar",
+        ".torrent",
+        ".txt",
+        ".vtt",
+        ".webp",
+        ".xml",
+        ".zip",
+    }
+)
 
 
 class AListError(RuntimeError):
@@ -37,6 +64,7 @@ class AListClient:
         username: str | None = None,
         password: str | None = None,
         request_interval_seconds: float = 0.0,
+        include_unknown_files: bool = False,
     ):
         self.settings = settings
         self.base_url = (base_url or settings.alist_base_url).rstrip("/")
@@ -59,6 +87,7 @@ class AListClient:
         self._request_lock = asyncio.Lock()
         self._request_interval_seconds = max(0.0, request_interval_seconds)
         self._last_request_at = 0.0
+        self._include_unknown_files = include_unknown_files
 
     async def close(self) -> None:
         if self._owns_client:
@@ -271,7 +300,9 @@ class AListClient:
                     queue.append(child)
                     continue
                 extension = PurePosixPath(name).suffix.lower()
-                if extension not in self.extensions:
+                if extension not in self.extensions and (
+                    not self._include_unknown_files or extension in NON_MEDIA_EXTENSIONS
+                ):
                     continue
                 videos.append(
                     {
@@ -280,7 +311,11 @@ class AListClient:
                         "size": int(entry.get("size") or 0),
                         "modified": entry.get("modified") or entry.get("created"),
                         "thumb": self._absolute_url(str(entry.get("thumb") or "")),
-                        "media_format": extension.lstrip("."),
+                        "media_format": (
+                            extension.lstrip(".")
+                            if extension in self.extensions
+                            else "unknown"
+                        ),
                         "media_kind": "video",
                     }
                 )

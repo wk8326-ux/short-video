@@ -10,6 +10,23 @@ _TECHNICAL = re.compile(
     r"\b(?:2160p|1080p|720p|576p|480p|4k|8k|uhd|hdr10?\+?|hdr|dv|dolby[ ._-]?vision|web[ ._-]?dl|web[ ._-]?rip|blu[ ._-]?ray|brrip|remux|x26[45]|av1|hevc|aac|dts|truehd|atmos|中文|国语|中字)\b",
     re.IGNORECASE,
 )
+_MOVIE_EXTENSIONS = frozenset(
+    {
+        ".3gp",
+        ".avi",
+        ".flv",
+        ".m2ts",
+        ".m4v",
+        ".mkv",
+        ".mov",
+        ".mp4",
+        ".mpeg",
+        ".mpg",
+        ".ts",
+        ".webm",
+        ".wmv",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -20,13 +37,14 @@ class MovieName:
 
 
 def parse_movie_filename(name: str) -> MovieName:
-    stem = PurePath(name).stem
+    suffix = PurePath(name).suffix.lower()
+    stem = name[: -len(suffix)] if suffix in _MOVIE_EXTENSIONS else name
     year_match = _YEAR.search(stem)
     year = int(year_match.group(1)) if year_match else None
     title = stem[: year_match.start()] if year_match else stem
     title = re.sub(r"[._]+", " ", title)
     title = _TECHNICAL.sub(" ", title)
-    title = re.sub(r"[\[\](){}]", " ", title)
+    title = re.sub(r"[\[\](){}【】《》「」『』]", " ", title)
     title = re.sub(r"\s+", " ", title).strip(" -_")
     if not title:
         title = stem.strip() or "未命名电影"

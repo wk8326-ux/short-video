@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -95,7 +96,11 @@ fun ShortVideoApp(
         state.expandedMedia?.id,
         state.appUpdate.phase,
     ) {
-        val fullscreenContentClosed = state.surface == MediaSurface.ASMR && state.expandedMedia == null
+        val fullscreenContentClosed = when (state.surface) {
+            MediaSurface.ASMR -> state.expandedMedia == null
+            MediaSurface.MOVIE -> state.selectedMovie == null || state.nowPlaying == null
+            else -> false
+        }
         if (
             fullscreen &&
             (
@@ -126,6 +131,12 @@ fun ShortVideoApp(
     ) {
         viewModel.leaveAsmrAuthor()
     }
+    BackHandler(
+        enabled = !fullscreen && !state.showManagement &&
+            state.surface == MediaSurface.MOVIE && state.selectedMovie != null,
+    ) {
+        viewModel.closeMovieDetail()
+    }
 
     when (state.authentication) {
         AuthenticationState.CHECKING -> LoadingScreen()
@@ -150,7 +161,8 @@ fun ShortVideoApp(
         } else {
             Box(Modifier.fillMaxSize()) {
                 key(state.surface) {
-                    if (state.surface == MediaSurface.ASMR) {
+                    when (state.surface) {
+                        MediaSurface.ASMR -> {
                         AsmrScreen(
                             state = state,
                             player = player,
@@ -188,7 +200,33 @@ fun ShortVideoApp(
                             onAuthorListPosition = viewModel::saveAsmrAuthorListPosition,
                             onMediaListPosition = viewModel::saveAsmrMediaListPosition,
                         )
-                    } else {
+                        }
+                        MediaSurface.MOVIE -> {
+                            MovieScreen(
+                                state = state,
+                                player = player,
+                                exoPlayer = viewModel.playback.player,
+                                imageLoader = viewModel.movieImageLoader,
+                                fullscreen = fullscreen,
+                                listPosition = viewModel.movieListPosition(),
+                                onQuery = viewModel::setMovieQuery,
+                                onSelect = viewModel::selectMovie,
+                                onBack = viewModel::closeMovieDetail,
+                                onPlay = viewModel::playMovie,
+                                onLoadMore = viewModel::loadMoreMovies,
+                                onRetry = viewModel::retryMovies,
+                                onTogglePlayback = viewModel::togglePlayback,
+                                onMuted = viewModel::setMuted,
+                                onSeek = viewModel.playback::seekTo,
+                                onSeekBy = viewModel.playback::seekBy,
+                                onFullscreen = {
+                                    fullscreen = it
+                                    onFullscreenChanged(it)
+                                },
+                                onListPosition = viewModel::saveMovieListPosition,
+                            )
+                        }
+                        MediaSurface.SHORT, MediaSurface.LONG -> {
                         FeedScreen(
                             state = state,
                             player = player,
@@ -211,9 +249,10 @@ fun ShortVideoApp(
                             onCheckUpdate = viewModel::checkForAppUpdate,
                             onLogout = viewModel::logout,
                         )
+                        }
                     }
                 }
-                if (!fullscreen && state.expandedMedia == null) {
+                if (!fullscreen && state.expandedMedia == null && state.selectedMovie == null) {
                     AppNavigation(
                         state = state,
                         compact = false,
@@ -380,14 +419,19 @@ internal fun AppNavigation(
                                 .width(tabWidth)
                                 .height(48.dp)
                                 .semantics { selected = active },
+                            contentPadding = PaddingValues(horizontal = 2.dp),
                             colors = ButtonDefaults.textButtonColors(
                                 contentColor = Color.White.copy(alpha = if (active) 1f else 0.66f),
                             ),
                         ) {
                             Text(
-                                if (compact && surface != MediaSurface.ASMR) surface.label.take(1) else surface.label,
+                                surface.label,
                                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                style = MaterialTheme.typography.labelLarge.copy(
+                                style = (if (tabWidth < 62.dp) {
+                                    MaterialTheme.typography.labelMedium
+                                } else {
+                                    MaterialTheme.typography.labelLarge
+                                }).copy(
                                     shadow = Shadow(Color.Black.copy(alpha = 0.58f), Offset(0f, 1f), 3f),
                                 ),
                             )
@@ -397,7 +441,7 @@ internal fun AppNavigation(
                 Box(
                     Modifier
                         .align(Alignment.BottomStart)
-                        .offset { IntOffset(x = (indicatorOffset + 24.dp).roundToPx(), y = 0) }
+                        .offset { IntOffset(x = (indicatorOffset + (tabWidth - 24.dp) / 2).roundToPx(), y = 0) }
                         .width(24.dp)
                         .height(2.dp)
                         .clip(RoundedCornerShape(1.dp))
@@ -419,7 +463,7 @@ internal fun AppNavigation(
                 shape = GlassPanelShape,
                 shadowElevation = 0.dp,
             ) {
-                if (state.surface != MediaSurface.ASMR) {
+                if (state.surface.isFeed) {
                     FeedMode.entries.forEach { mode ->
                         DropdownMenuItem(
                             text = { Text(mode.label) },

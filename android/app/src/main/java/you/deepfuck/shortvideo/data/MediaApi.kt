@@ -1,5 +1,9 @@
 package you.deepfuck.shortvideo.data
 
+import android.content.Context
+import coil.ImageLoader
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -78,6 +82,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         excludedIds: List<Long>,
         startId: Long?,
     ): FeedPage {
+        require(surface.isFeed) { "Feed API only supports short and long surfaces" }
         val builder = url("/api/feed").newBuilder()
             .addQueryParameter("limit", "18")
             .addQueryParameter("mode", mode.apiValue)
@@ -102,6 +107,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     }
 
     fun feedTotal(surface: MediaSurface): Int {
+        require(surface.isFeed) { "Feed API only supports short and long surfaces" }
         val target = url("/api/feed").newBuilder()
             .addQueryParameter("limit", "1")
             .addQueryParameter("mode", FeedMode.NEWEST.apiValue)
@@ -162,6 +168,31 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         return AsmrPage(parsed, payload.optInt("total", parsed.size), payload.optIntOrNull("nextOffset"))
     }
 
+    fun movies(query: String = "", limit: Int = MOVIE_PAGE_SIZE, offset: Int = 0): MoviePage {
+        val target = url("/api/movies").newBuilder()
+            .addQueryParameter("limit", limit.toString())
+            .addQueryParameter("offset", offset.toString())
+            .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
+            .build()
+        val payload = getJson(target.toString())
+        val items = payload.optJSONArray("items")
+        val parsed = buildList {
+            if (items == null) return@buildList
+            for (index in 0 until items.length()) {
+                items.optJSONObject(index)?.let { add(MovieItem.fromJson(it)) }
+            }
+        }
+        return MoviePage(
+            items = parsed,
+            total = payload.optInt("total", parsed.size),
+            nextOffset = payload.optIntOrNull("nextOffset"),
+            scanRunning = payload.optJSONObject("scan")?.optBoolean("running") == true,
+        )
+    }
+
+    fun movieDetail(movieId: Long): MovieItem =
+        MovieItem.fromJson(getJson("/api/movies/$movieId"))
+
     fun adminStatus(): AdminStatus {
         val payload = getJson("/api/admin/status")
         val library = payload.getJSONObject("library")
@@ -174,6 +205,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             totalBytes = library.optLong("bytes"),
             guangyaItems = library.optJSONObject("guangya")?.optInt("videos") ?: 0,
             asmrItems = library.optJSONObject("asmr")?.optInt("videos") ?: 0,
+            movieItems = library.optJSONObject("movie")?.optInt("videos") ?: 0,
             scanRunning = scan.optBoolean("running"),
             scanLastSuccess = scan.optLong("lastSuccess").takeIf { it > 0L },
             scanLastError = scan.optNullableString("lastError"),
@@ -264,6 +296,27 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     fun absoluteUrl(path: String): String =
         if (path.startsWith("http://") || path.startsWith("https://")) path else url(path).toString()
 
+    fun movieImageLoader(context: Context): ImageLoader = ImageLoader.Builder(context)
+        .okHttpClient {
+            client.newBuilder()
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .build()
+        }
+        .memoryCache {
+            MemoryCache.Builder(context)
+                .maxSizePercent(0.12)
+                .build()
+        }
+        .diskCache {
+            DiskCache.Builder()
+                .directory(context.cacheDir.resolve("movie-posters"))
+                .maxSizeBytes(96L * 1024 * 1024)
+                .build()
+        }
+        .crossfade(180)
+        .build()
+
     private fun post(path: String): JSONObject =
         executeJson(
             Request.Builder()
@@ -291,6 +344,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
 
     private companion object {
         const val ASMR_PAGE_SIZE = 24
+        const val MOVIE_PAGE_SIZE = 24
         const val BASE_URL = "https://short.deepfuck.you/"
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }

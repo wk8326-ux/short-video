@@ -11,6 +11,7 @@ import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.LibraryScanStatus
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
+import you.deepfuck.shortvideo.data.MovieItem
 import you.deepfuck.shortvideo.media.PlaybackEndedEvent
 import you.deepfuck.shortvideo.media.PlaybackIdentity
 
@@ -129,6 +130,7 @@ class PlaybackSequenceTest {
         assertTrue(shouldActivateFeedItem(MediaSurface.SHORT, showManagement = false))
         assertTrue(shouldActivateFeedItem(MediaSurface.LONG, showManagement = false))
         assertFalse(shouldActivateFeedItem(MediaSurface.ASMR, showManagement = false))
+        assertFalse(shouldActivateFeedItem(MediaSurface.MOVIE, showManagement = false))
         assertFalse(shouldActivateFeedItem(MediaSurface.SHORT, showManagement = true))
         assertFalse(shouldActivateFeedItem(MediaSurface.LONG, showManagement = true))
     }
@@ -140,6 +142,7 @@ class PlaybackSequenceTest {
         assertFalse(shouldRefreshFeedAfterScan(MediaSurface.SHORT, showManagement = true))
         assertFalse(shouldRefreshFeedAfterScan(MediaSurface.LONG, showManagement = true))
         assertFalse(shouldRefreshFeedAfterScan(MediaSurface.ASMR, showManagement = false))
+        assertFalse(shouldRefreshFeedAfterScan(MediaSurface.MOVIE, showManagement = false))
 
         val gate = FeedLibraryRefreshGate()
         gate.markPending()
@@ -149,6 +152,7 @@ class PlaybackSequenceTest {
 
         gate.markPending()
         assertFalse(gate.consumeIfVisible(MediaSurface.ASMR, showManagement = false))
+        assertFalse(gate.consumeIfVisible(MediaSurface.MOVIE, showManagement = false))
         assertTrue(gate.consumeIfVisible(MediaSurface.LONG, showManagement = false))
     }
 
@@ -247,6 +251,7 @@ class PlaybackSequenceTest {
         assertEquals(2, sessions.restore(MediaSurface.SHORT, FeedMode.SHUFFLE)?.activeIndex())
         assertEquals(longItems, sessions.restore(MediaSurface.LONG, FeedMode.SHUFFLE)?.items)
         assertEquals(1, sessions.restore(MediaSurface.LONG, FeedMode.SHUFFLE)?.activeIndex())
+        assertNull(sessions.restore(MediaSurface.MOVIE, FeedMode.SHUFFLE))
     }
 
     @Test
@@ -341,6 +346,24 @@ class PlaybackSequenceTest {
         assertTrue(shouldKeepPlayingInBackground(MediaSurface.ASMR, video, videoEnabled = true))
         assertFalse(shouldKeepPlayingInBackground(MediaSurface.ASMR, video, videoEnabled = false))
         assertFalse(shouldKeepPlayingInBackground(MediaSurface.ASMR, null, videoEnabled = true))
+        assertFalse(shouldKeepPlayingInBackground(MediaSurface.MOVIE, video, videoEnabled = true))
+    }
+
+    @Test
+    fun moviePagingMergesByStableMovieId() {
+        val first = listOf(movie(1L, 101L), movie(2L, 102L))
+        val second = listOf(movie(2L, 102L), movie(3L, 103L))
+
+        assertEquals(listOf(1L, 2L, 3L), mergeMoviePages(first, second, reset = false).map(MovieItem::id))
+        assertEquals(listOf(2L, 3L), mergeMoviePages(first, second, reset = true).map(MovieItem::id))
+    }
+
+    @Test
+    fun movieResponsesOnlyApplyToTheCurrentMovieQuery() {
+        assertTrue(shouldApplyMovieResponse(4L, 4L, "matrix", "matrix", MediaSurface.MOVIE))
+        assertFalse(shouldApplyMovieResponse(3L, 4L, "matrix", "matrix", MediaSurface.MOVIE))
+        assertFalse(shouldApplyMovieResponse(4L, 4L, "matrix", "alien", MediaSurface.MOVIE))
+        assertFalse(shouldApplyMovieResponse(4L, 4L, "matrix", "matrix", MediaSurface.SHORT))
     }
 
     @Test
@@ -385,5 +408,23 @@ class PlaybackSequenceTest {
         author = author,
         format = if (kind == "audio") "mp3" else "mp4",
         kind = kind,
+    )
+
+    private fun movie(id: Long, videoId: Long) = MovieItem(
+        id = id,
+        videoId = videoId,
+        title = "movie-$id",
+        originalTitle = null,
+        year = 2026,
+        overview = "",
+        posterUrl = null,
+        backdropUrl = null,
+        rating = null,
+        runtimeMinutes = 90,
+        matchStatus = "matched",
+        matchConfidence = null,
+        playUrl = "/api/videos/$videoId/play",
+        modified = null,
+        durationSeconds = 5_400.0,
     )
 }

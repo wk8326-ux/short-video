@@ -416,3 +416,11 @@ def test_movie_filename_parser_is_conservative():
     assert parsed.display_title == "The Dark Knight"
     assert parsed.normalized_title == "the dark knight"
     assert parsed.year == 2008
+
+    extensionless = parse_movie_filename("《无间道》")
+    assert extensionless.display_title == "无间道"
+    assert extensionless.normalized_title == "无间道"
+    assert extensionless.year is None
+
+    dotted_extensionless = parse_movie_filename("《蝙蝠侠.黑暗骑士》")
+    assert dotted_extensionless.display_title == "蝙蝠侠 黑暗骑士"

@@ -6,6 +6,10 @@ enum class MediaSurface(val apiValue: String, val label: String) {
     SHORT("short", "短视频"),
     LONG("long", "长视频"),
     ASMR("asmr", "ASMR"),
+    MOVIE("movie", "电影"),
+    ;
+
+    val isFeed: Boolean get() = this == SHORT || this == LONG
 }
 
 enum class FeedMode(val apiValue: String, val label: String) {
@@ -23,6 +27,10 @@ enum class AsmrFilter(val apiValue: String, val label: String) {
 enum class LibrarySection(val apiValue: String, val label: String) {
     FEED("feed", "短视频 / 长视频"),
     ASMR("asmr", "ASMR"),
+    MOVIE("movie", "电影"),
+    ;
+
+    val usesTreeScan: Boolean get() = this != ASMR
 }
 
 data class MediaEntry(
@@ -107,11 +115,86 @@ data class AsmrPage<T>(
     val scanRunning: Boolean = false,
 )
 
+data class MovieItem(
+    val id: Long,
+    val videoId: Long,
+    val title: String,
+    val originalTitle: String?,
+    val year: Int?,
+    val overview: String,
+    val posterUrl: String?,
+    val backdropUrl: String?,
+    val rating: Double?,
+    val runtimeMinutes: Int?,
+    val matchStatus: String,
+    val matchConfidence: Double?,
+    val playUrl: String,
+    val modified: String?,
+    val durationSeconds: Double?,
+    val source: String? = null,
+    val path: String? = null,
+    val size: Long = 0L,
+    val format: String? = null,
+    val resumePositionMs: Long = 0L,
+) {
+    val resumeFraction: Float
+        get() {
+            val durationMs = (
+                durationSeconds?.times(1_000)?.toLong()
+                    ?: runtimeMinutes?.times(60_000L)
+                )?.takeIf { it > 0L } ?: return 0f
+            return (resumePositionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+        }
+
+    fun asMediaEntry(): MediaEntry = MediaEntry(
+        id = videoId,
+        title = title,
+        size = size,
+        modified = modified,
+        durationSeconds = durationSeconds,
+        playUrl = playUrl,
+        posterUrl = posterUrl,
+        format = format,
+    )
+
+    companion object {
+        fun fromJson(value: JSONObject): MovieItem = MovieItem(
+            id = value.getLong("id"),
+            videoId = value.getLong("videoId"),
+            title = value.optString("title"),
+            originalTitle = value.optNullableString("originalTitle"),
+            year = value.optNullableInt("year"),
+            overview = value.optString("overview"),
+            posterUrl = value.optNullableString("posterUrl"),
+            backdropUrl = value.optNullableString("backdropUrl"),
+            rating = value.optNullableDouble("rating"),
+            runtimeMinutes = value.optNullableInt("runtimeMinutes"),
+            matchStatus = value.optString("matchStatus", "pending"),
+            matchConfidence = value.optNullableDouble("matchConfidence"),
+            playUrl = value.optString("playUrl"),
+            modified = value.optNullableString("modified"),
+            durationSeconds = value.optNullableDouble("duration"),
+            source = value.optNullableString("source"),
+            path = value.optNullableString("path"),
+            size = value.optLong("size"),
+            format = value.optNullableString("format"),
+        )
+    }
+}
+
+data class MoviePage(
+    val items: List<MovieItem>,
+    val total: Int,
+    val nextOffset: Int?,
+    val scanRunning: Boolean,
+)
+
 data class AdminStatus(
     val totalItems: Int,
     val totalBytes: Long,
     val guangyaItems: Int,
     val asmrItems: Int,
+    val movieItems: Int,
     val scanRunning: Boolean,
     val scanLastSuccess: Long?,
     val scanLastError: String?,
@@ -192,3 +275,9 @@ data class MediaSourceDraft(
 
 internal fun JSONObject.optNullableString(name: String): String? =
     if (isNull(name)) null else optString(name).takeIf { it.isNotBlank() }
+
+private fun JSONObject.optNullableInt(name: String): Int? =
+    if (!has(name) || isNull(name)) null else optInt(name)
+
+private fun JSONObject.optNullableDouble(name: String): Double? =
+    if (!has(name) || isNull(name)) null else optDouble(name).takeIf { it.isFinite() }
