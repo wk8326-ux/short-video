@@ -23,6 +23,7 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.IosShare
+import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Refresh
@@ -61,6 +62,7 @@ import you.deepfuck.shortvideo.AppUiState
 import you.deepfuck.shortvideo.data.LibrarySection
 import you.deepfuck.shortvideo.data.MediaLibrarySource
 import you.deepfuck.shortvideo.data.MediaSourceDraft
+import you.deepfuck.shortvideo.data.MovieMetadataStatus
 
 @Composable
 internal fun ManagementScreen(
@@ -68,6 +70,7 @@ internal fun ManagementScreen(
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onScanSource: (String) -> Unit,
+    onMovieMetadata: (String) -> Unit,
     onSaveSource: (String?, MediaSourceDraft) -> Unit,
     onFastStart: () -> Unit,
     onShowLogs: () -> Unit,
@@ -165,7 +168,10 @@ internal fun ManagementScreen(
                             MediaSourceRow(
                                 source = source,
                                 starting = "scan-${source.id}" in state.adminActions,
+                                metadataStatus = status.movieMetadata,
+                                metadataStarting = "metadata-${source.id}" in state.adminActions,
                                 onScan = onScanSource,
+                                onMovieMetadata = onMovieMetadata,
                                 onEdit = {
                                     editingSource = source
                                     sourceDialogOpen = true
@@ -274,10 +280,17 @@ internal fun ManagementScreen(
 private fun MediaSourceRow(
     source: MediaLibrarySource,
     starting: Boolean,
+    metadataStatus: MovieMetadataStatus,
+    metadataStarting: Boolean,
     onScan: (String) -> Unit,
+    onMovieMetadata: (String) -> Unit,
     onEdit: () -> Unit,
 ) {
     val busy = source.scan.running || starting
+    val metadataBusy = metadataStarting || (
+        metadataStatus.running && metadataStatus.sourceId == source.id
+    )
+    val otherMetadataBusy = metadataStatus.running && metadataStatus.sourceId != source.id
     val statusLabel = when {
         busy -> "扫描中"
         !source.enabled -> "已停用"
@@ -347,12 +360,60 @@ private fun MediaSourceRow(
                 style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
             )
         }
+        if (source.section == LibrarySection.MOVIE) {
+            val metadata = source.movieMetadata
+            HorizontalDivider(Modifier.padding(top = 14.dp, bottom = 12.dp), color = Line)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                SourceMetric("已匹配", (metadata?.matched ?: 0).toString(), Modifier.weight(1f))
+                SourceMetric("待处理", (metadata?.pending ?: 0).toString(), Modifier.weight(1f))
+                SourceMetric("需确认", (metadata?.needsReview ?: 0).toString(), Modifier.weight(1f))
+            }
+            if (metadataBusy) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "正在刮削 ${metadataStatus.checked} / ${metadataStatus.total}",
+                    color = TextSecondary,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                )
+            } else if ((metadata?.total ?: 0) == 0) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "先扫描媒体源，再刮削封面和资料。",
+                    color = TextFaint,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                )
+            } else {
+                metadata?.lastSuccess?.let {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "上次刮削 ${formatTimestamp(it)}",
+                        color = TextFaint,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                    )
+                }
+                metadataStatus.lastError.takeIf { metadataStatus.sourceId == source.id }?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        it,
+                        color = androidx.compose.material3.MaterialTheme.colorScheme.error,
+                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        }
         Spacer(Modifier.height(10.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onEdit, modifier = Modifier.heightIn(min = 48.dp)) {
+            TextButton(
+                onClick = onEdit,
+                enabled = !busy && !metadataBusy,
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) {
                 Icon(Icons.Outlined.Edit, contentDescription = null)
                 Spacer(Modifier.size(6.dp))
                 Text("编辑")
@@ -360,7 +421,7 @@ private fun MediaSourceRow(
             Spacer(Modifier.weight(1f))
             OutlinedButton(
                 onClick = { onScan(source.id) },
-                enabled = source.enabled && !busy,
+                enabled = source.enabled && !busy && !metadataBusy,
                 modifier = Modifier.heightIn(min = 48.dp),
                 shape = ControlShape,
             ) {
@@ -371,6 +432,23 @@ private fun MediaSourceRow(
                 }
                 Spacer(Modifier.size(7.dp))
                 Text(if (busy) "扫描中" else "扫描")
+            }
+            if (source.section == LibrarySection.MOVIE) {
+                Spacer(Modifier.size(8.dp))
+                OutlinedButton(
+                    onClick = { onMovieMetadata(source.id) },
+                    enabled = source.enabled && !busy && !metadataBusy && !otherMetadataBusy && source.videos > 0,
+                    modifier = Modifier.heightIn(min = 48.dp),
+                    shape = ControlShape,
+                ) {
+                    if (metadataBusy) {
+                        CircularProgressIndicator(Modifier.size(17.dp), color = TextSecondary, strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Outlined.ImageSearch, contentDescription = null)
+                    }
+                    Spacer(Modifier.size(7.dp))
+                    Text(if (metadataBusy) "刮削中" else "刮削")
+                }
             }
         }
     }

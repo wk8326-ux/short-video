@@ -151,6 +151,7 @@ fun ShortVideoApp(
                 onBack = viewModel::hideManagement,
                 onRefresh = viewModel::loadAdminStatus,
                 onScanSource = viewModel::startLibraryScan,
+                onMovieMetadata = viewModel::startMovieMetadata,
                 onSaveSource = viewModel::saveMediaSource,
                 onFastStart = viewModel::startFastStartCheck,
                 onShowLogs = viewModel::showRuntimeLogs,

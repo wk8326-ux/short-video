@@ -647,6 +647,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun startMovieMetadata(sourceId: String) {
+        val action = "metadata-$sourceId"
+        val state = mutableState.value
+        if (action in state.adminActions || state.adminStatus?.movieMetadata?.running == true) return
+        mutableState.update {
+            it.copy(adminActions = it.adminActions + action, adminError = null)
+        }
+        viewModelScope.launch {
+            val start = runApi { api.startMovieMetadata(sourceId) }
+            if (start.isFailure) {
+                finishMovieMetadataAction(action, start.exceptionOrNull())
+                return@launch
+            }
+            if (!start.getOrDefault(false)) {
+                finishMovieMetadataAction(
+                    action,
+                    IllegalStateException("已有电影刮削任务正在运行"),
+                )
+                loadAdminStatus()
+                return@launch
+            }
+            monitorMovieMetadata(action, sourceId)
+        }
+    }
+
     fun saveMediaSource(sourceId: String?, draft: MediaSourceDraft) =
         runAdminAction("source-${sourceId ?: "new"}") {
             api.saveMediaSource(sourceId, draft)
@@ -1337,6 +1362,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun monitorMovieMetadata(action: String, sourceId: String) {
+        while (viewModelScope.isActive) {
+            delay(750)
+            val statusResult = runApi { api.adminStatus() }
+            if (statusResult.isFailure) {
+                val error = statusResult.exceptionOrNull()
+                if (error != null && handleUnauthorized(error)) return
+                logs.warning("movie_metadata_status_failed", "source=$sourceId")
+                delay(1_500)
+                continue
+            }
+            val status = statusResult.getOrThrow()
+            mutableState.update { it.copy(adminStatus = status, adminLoading = false) }
+            val metadata = status.movieMetadata
+            if (metadata.sourceId != sourceId) {
+                if (metadata.running) continue
+                finishMovieMetadataAction(
+                    action,
+                    IllegalStateException("刮削任务状态已失效"),
+                )
+                return
+            }
+            if (metadata.running) continue
+
+            mutableState.update { current ->
+                current.copy(
+                    adminActions = current.adminActions - action,
+                    adminError = metadata.lastError,
+                )
+            }
+            refreshMovieLibrary()
+            return
+        }
+    }
+
     private fun finishScanAction(action: String, error: Throwable?) {
         if (error != null && handleUnauthorized(error)) return
         error?.let { logs.error("source_scan_failed", "action=$action", it) }
@@ -1344,6 +1404,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 adminActions = it.adminActions - action,
                 adminError = error?.message ?: "扫描失败，请稍后重试",
+            )
+        }
+    }
+
+    private fun finishMovieMetadataAction(action: String, error: Throwable?) {
+        if (error != null && handleUnauthorized(error)) return
+        error?.let { logs.error("movie_metadata_failed", "action=$action", it) }
+        mutableState.update {
+            it.copy(
+                adminActions = it.adminActions - action,
+                adminError = error?.message ?: "电影资料刮削失败，请稍后重试",
             )
         }
     }

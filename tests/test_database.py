@@ -394,12 +394,30 @@ def test_movie_index_keeps_metadata_across_rescans_and_removes_missing_rows(tmp_
     assert [item["display_title"] for item in first] == ["另一部", "流浪地球2"]
     assert first[1]["year"] == 2023
     matched_id = first[1]["id"]
+    assert database.movie_metadata_summary(sources=("movies",)) == {
+        "total": 2,
+        "pending": 2,
+        "matched": 0,
+        "ambiguous": 0,
+        "unmatched": 0,
+        "lastSuccess": None,
+    }
     database.update_movie_metadata(
         matched_id,
         display_title="流浪地球 2",
         match_status="matched",
         tmdb_id=123,
     )
+    metadata_summary = database.movie_metadata_summary(sources=("movies",))
+    last_success = metadata_summary.pop("lastSuccess")
+    assert metadata_summary == {
+        "total": 2,
+        "pending": 1,
+        "matched": 1,
+        "ambiguous": 0,
+        "unmatched": 0,
+    }
+    assert last_success is not None
 
     database.replace_scan(records[:1], source="movies")
     database.sync_movie_index("movies", parse_movie_filename)

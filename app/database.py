@@ -424,6 +424,45 @@ class LibraryDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def movie_metadata_summary(
+        self,
+        *,
+        sources: Sequence[str] = (),
+    ) -> dict[str, int | None]:
+        if not sources:
+            return {
+                "total": 0,
+                "pending": 0,
+                "matched": 0,
+                "ambiguous": 0,
+                "unmatched": 0,
+                "lastSuccess": None,
+            }
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN m.match_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                    SUM(CASE WHEN m.match_status IN ('matched', 'manual') THEN 1 ELSE 0 END) AS matched,
+                    SUM(CASE WHEN m.match_status = 'ambiguous' THEN 1 ELSE 0 END) AS ambiguous,
+                    SUM(CASE WHEN m.match_status = 'unmatched' THEN 1 ELSE 0 END) AS unmatched,
+                    MAX(CAST(strftime('%s', m.scraped_at) AS INTEGER)) AS last_success
+                FROM movies m
+                JOIN videos v ON v.id = m.video_id
+                WHERE v.active = 1 AND {source_clause}
+                """,
+                source_params,
+            ).fetchone()
+        summary: dict[str, int | None] = {
+            key: int(row[key] or 0)
+            for key in ("total", "pending", "matched", "ambiguous", "unmatched")
+        }
+        summary["lastSuccess"] = int(row["last_success"]) if row["last_success"] else None
+        return summary
+
     def update_movie_metadata(self, movie_id: int, **values: Any) -> None:
         allowed = {
             "display_title", "normalized_title", "original_title", "year", "overview",

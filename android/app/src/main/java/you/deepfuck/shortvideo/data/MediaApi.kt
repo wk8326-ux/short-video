@@ -197,6 +197,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         val payload = getJson("/api/admin/status")
         val library = payload.getJSONObject("library")
         val scan = payload.getJSONObject("scan")
+        val movieMetadata = payload.optJSONObject("movieMetadata")
         val fastStart = payload.getJSONObject("fastStart")
         val summary = fastStart.getJSONObject("summary")
         val sources = payload.optJSONArray("sources")
@@ -214,6 +215,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
                     sources.optJSONObject(index)?.let { add(MediaLibrarySource.fromJson(it)) }
                 }
             },
+            movieMetadata = MovieMetadataStatus.fromJson(movieMetadata),
             fastStartRunning = fastStart.optBoolean("running"),
             fastStartOptimized = summary.optInt("optimized"),
             fastStartIssues = summary.optInt("notOptimized") + summary.optInt("errors"),
@@ -223,6 +225,9 @@ class MediaApi(private val preferences: PlaybackPreferences) {
 
     fun startScan(sourceId: String): Boolean =
         post("/api/admin/sources/$sourceId/scan").optBoolean("started")
+
+    fun startMovieMetadata(sourceId: String): Boolean =
+        post("/api/admin/sources/$sourceId/metadata").optBoolean("started")
 
     fun saveMediaSource(sourceId: String?, draft: MediaSourceDraft) {
         val body = JSONObject()

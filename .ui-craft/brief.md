@@ -1,6 +1,6 @@
 # Product purpose
 
-Play private Guangya short/long video feeds and browse a separate author-organized ASMR library in a native Android client or fallback PWA, all with direct origin delivery.
+Play private Guangya short/long video feeds, browse an author-organized ASMR library, and maintain a lightweight poster-first movie library in a native Android client or fallback PWA, all with direct origin delivery.
 
 # Primary user
 
@@ -22,9 +22,11 @@ The user resumes media at the saved position, sees no recent repeats in shuffle 
 - Does not proxy or transcode media.
 - Does not add recommendations, social features, or registration.
 - Does not change AList anonymous-access policy.
-- Does not become a general media-library manager or recommendation surface.
+- Does not become a full Emby replacement: no transcoding, recommendation engine, episode management, or automatic library maintenance.
 
 # Learned constraints
+
+- **2026-08-21** - Keep movie source scanning and TMDB metadata scraping as two separate, manual, source-scoped actions. *Why:* Large OpenList libraries change infrequently; scanning or scraping one source must never refresh another library or start playback.
 
 - **2026-08-21** - Persistent ASMR playback occupies a real bottom layout region rather than overlaying the scroll viewport. *Why:* Backdrop blur is not reliable across supported Android versions, and list text or hit targets must never bleed through a fixed player.
 

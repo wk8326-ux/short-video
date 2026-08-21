@@ -70,12 +70,15 @@ class MovieModelsTest {
     fun movieSourcesKeepTheirOwnSectionAndTreeScanRule() {
         val source = MediaLibrarySource.fromJson(
             JSONObject(
-                """{"id":"movie-1","name":"Movies","provider":"alist","baseUrl":"https://alist.example","rootPath":"/movies","section":"movie","scanMode":"tree","anonymous":false,"enabled":true,"videos":12,"bytes":100,"scan":{}}""",
+                """{"id":"movie-1","name":"Movies","provider":"alist","baseUrl":"https://alist.example","rootPath":"/movies","section":"movie","scanMode":"tree","anonymous":false,"enabled":true,"videos":12,"bytes":100,"scan":{},"movieMetadata":{"total":12,"pending":3,"matched":7,"ambiguous":1,"unmatched":1,"lastSuccess":1787280000}}""",
             ),
         )
 
         assertEquals(LibrarySection.MOVIE, source.section)
         assertTrue(source.section.usesTreeScan)
         assertFalse(MediaSurface.MOVIE.isFeed)
+        assertEquals(7, source.movieMetadata?.matched)
+        assertEquals(2, source.movieMetadata?.needsReview)
+        assertEquals(1787280000L, source.movieMetadata?.lastSuccess)
     }
 }

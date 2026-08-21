@@ -60,6 +60,7 @@ metadata_state: dict[str, Any] = {
 metadata_lock = asyncio.Lock()
 movie_metadata_state: dict[str, Any] = {
     "running": False,
+    "source": None,
     "checked": 0,
     "total": 0,
     "matched": 0,
@@ -337,14 +338,20 @@ async def check_media_metadata(*, force: bool) -> None:
 async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
     if movie_metadata_lock.locked():
         return
-    if not settings.tmdb_api_read_token and not settings.tmdb_api_key:
-        movie_metadata_state["lastError"] = "TMDB 未配置 API 令牌"
-        return
     async with movie_metadata_lock:
         movie_metadata_state.update(
-            {"running": True, "checked": 0, "total": 0, "matched": 0, "lastError": None}
+            {
+                "running": True,
+                "source": source,
+                "checked": 0,
+                "total": 0,
+                "matched": 0,
+                "lastError": None,
+            }
         )
         try:
+            if not settings.tmdb_api_read_token and not settings.tmdb_api_key:
+                raise RuntimeError("TMDB 未配置 API 令牌")
             source_ids = (source,)
             movies = await asyncio.to_thread(
                 database.movie_metadata_candidates,
@@ -486,12 +493,16 @@ def normalize_source_payload(payload: MediaSourceRequest) -> dict[str, Any]:
     }
 
 
-def public_source(source: dict[str, Any]) -> dict[str, Any]:
+def public_source(
+    source: dict[str, Any],
+    *,
+    movie_metadata: dict[str, int | None] | None = None,
+) -> dict[str, Any]:
     state = scan_state["sources"].get(
         source["id"],
         {"running": False, "lastSuccess": None, "lastError": None, "directories": 0},
     )
-    return {
+    payload = {
         "id": source["id"],
         "name": source["name"],
         "provider": source["provider"],
@@ -507,6 +518,9 @@ def public_source(source: dict[str, Any]) -> dict[str, Any]:
         "bytes": int(source.get("bytes") or 0),
         "scan": state,
     }
+    if movie_metadata is not None:
+        payload["movieMetadata"] = movie_metadata
+    return payload
 
 
 def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
@@ -643,10 +657,32 @@ async def admin_status() -> dict[str, Any]:
         asyncio.to_thread(database.fast_start_summary, sources=feed_sources),
         asyncio.to_thread(database.fast_start_issues, limit=20, sources=feed_sources),
     )
+    movie_sources_with_config = [source for source in sources if source["section"] == "movie"]
+    movie_source_summaries = {
+        source["id"]: source_summary
+        for source, source_summary in zip(
+            movie_sources_with_config,
+            await asyncio.gather(
+                *(
+                    asyncio.to_thread(
+                        database.movie_metadata_summary,
+                        sources=(source["id"],),
+                    )
+                    for source in movie_sources_with_config
+                )
+            ),
+        )
+    }
     return {
         "library": {**library, "guangya": feed_library, "asmr": asmr_library, "movie": movie_library},
         "scan": dict(scan_state),
-        "sources": [public_source(source) for source in sources],
+        "sources": [
+            public_source(
+                source,
+                movie_metadata=movie_source_summaries.get(source["id"]),
+            )
+            for source in sources
+        ],
         "metadata": dict(metadata_state),
         "movieMetadata": dict(movie_metadata_state),
         "fastStart": {**fast_start_state, "summary": summary},
@@ -660,6 +696,8 @@ async def start_scan(
 ) -> dict[str, Any]:
     if source not in source_registry.ids():
         raise HTTPException(status_code=404, detail="媒体源不存在或已停用")
+    if movie_metadata_state["running"] and movie_metadata_state["source"] == source:
+        raise HTTPException(status_code=409, detail="电影资料正在刮削，请完成后再扫描")
     source_state = scan_state["sources"][source]
     started = not scan_locks[source].locked() and not source_state["running"]
     if started:
@@ -698,6 +736,8 @@ async def update_source(source_id: str, payload: MediaSourceRequest) -> dict[str
         raise HTTPException(status_code=404, detail="媒体源不存在")
     if scan_locks.get(source_id) and scan_locks[source_id].locked():
         raise HTTPException(status_code=409, detail="媒体源正在扫描，请完成后再编辑")
+    if movie_metadata_state["running"] and movie_metadata_state["source"] == source_id:
+        raise HTTPException(status_code=409, detail="电影资料正在刮削，请完成后再编辑")
     values = normalize_source_payload(payload)
     if not values["token"]:
         values["token"] = existing["token"]
@@ -724,8 +764,28 @@ async def scan_one_source(source_id: str) -> dict[str, Any]:
 async def start_movie_metadata(source_id: str, force: bool = False) -> dict[str, Any]:
     if source_id not in source_registry.ids("movie"):
         raise HTTPException(status_code=404, detail="电影媒体源不存在或已停用")
+    if not settings.tmdb_api_read_token and not settings.tmdb_api_key:
+        raise HTTPException(status_code=503, detail="TMDB 未配置 API 令牌")
+    if scan_locks.get(source_id) and scan_locks[source_id].locked():
+        raise HTTPException(status_code=409, detail="媒体源正在扫描，请完成后再刮削")
+    source_summary = await asyncio.to_thread(
+        database.movie_metadata_summary,
+        sources=(source_id,),
+    )
+    if not source_summary["total"]:
+        raise HTTPException(status_code=409, detail="请先扫描电影媒体源")
     started = not movie_metadata_lock.locked() and not movie_metadata_state["running"]
     if started:
+        movie_metadata_state.update(
+            {
+                "running": True,
+                "source": source_id,
+                "checked": 0,
+                "total": 0,
+                "matched": 0,
+                "lastError": None,
+            }
+        )
         spawn_background(
             scrape_movie_metadata(source_id, force=force),
             name=f"movie-metadata-{source_id}",

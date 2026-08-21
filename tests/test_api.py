@@ -15,6 +15,7 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     monkeypatch.setenv("STATIC_DIR", str(tmp_path / "static"))
     monkeypatch.setenv("AUTH_PASSWORD_HASH", "scrypt:test")
     monkeypatch.setenv("SESSION_SECRET", "test-session-secret-with-at-least-32-characters")
+    monkeypatch.setenv("TMDB_API_KEY", "test-tmdb-key")
 
     sys.modules.pop("app.main", None)
     main = importlib.import_module("app.main")
@@ -182,6 +183,41 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
             f"/api/admin/sources/{source_id}/scan",
             headers=headers,
         )
+        movie_source = client.post(
+            "/api/admin/sources",
+            headers=headers,
+            json={
+                "name": "电影测试库",
+                "provider": "openlist",
+                "baseUrl": "https://movies.example",
+                "rootPath": "/movies",
+                "section": "movie",
+                "anonymous": True,
+                "enabled": True,
+            },
+        )
+        movie_source_id = movie_source.json()["id"]
+        main.database.replace_scan(
+            [
+                {
+                    "path": "/movies/test.mp4",
+                    "name": "test.mp4",
+                    "size": 100,
+                    "media_format": "mp4",
+                }
+            ],
+            source=movie_source_id,
+        )
+        main.database.sync_movie_index(movie_source_id, main.parse_movie_filename)
+        admin_status = client.get("/api/admin/status", headers=headers)
+        movie_metadata = client.post(
+            f"/api/admin/sources/{movie_source_id}/metadata",
+            headers=headers,
+        )
+        scan_during_metadata = client.post(
+            f"/api/admin/sources/{movie_source_id}/scan",
+            headers=headers,
+        )
 
     assert [item["title"] for item in short.json()["items"]] == ["short"]
     assert [item["title"] for item in long.json()["items"]] == ["long"]
@@ -223,4 +259,21 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     assert len(source_list.json()["items"]) == 4
     assert disabled_source.json()["enabled"] is False
     assert disabled_scan.status_code == 404
+    assert movie_source.status_code == 201
+    movie_status = next(
+        source for source in admin_status.json()["sources"] if source["id"] == movie_source_id
+    )
+    assert movie_status["movieMetadata"] == {
+        "total": 1,
+        "pending": 1,
+        "matched": 0,
+        "ambiguous": 0,
+        "unmatched": 0,
+        "lastSuccess": None,
+    }
+    assert movie_metadata.status_code == 202
+    assert movie_metadata.json()["started"] is True
+    assert movie_metadata.json()["movieMetadata"]["source"] == movie_source_id
+    assert f"movie-metadata-{movie_source_id}" in spawned_names
+    assert scan_during_metadata.status_code == 409
     assert any(name.startswith("prewarm-asmr-play-") for name in spawned_names)

@@ -199,11 +199,58 @@ data class AdminStatus(
     val scanLastSuccess: Long?,
     val scanLastError: String?,
     val sources: List<MediaLibrarySource>,
+    val movieMetadata: MovieMetadataStatus,
     val fastStartRunning: Boolean,
     val fastStartOptimized: Int,
     val fastStartIssues: Int,
     val fastStartPending: Int,
 )
+
+data class MovieMetadataStatus(
+    val running: Boolean,
+    val sourceId: String?,
+    val checked: Int,
+    val total: Int,
+    val matched: Int,
+    val lastSuccess: Long?,
+    val lastError: String?,
+) {
+    companion object {
+        fun fromJson(value: JSONObject?): MovieMetadataStatus = MovieMetadataStatus(
+            running = value?.optBoolean("running") == true,
+            sourceId = value?.optNullableString("source"),
+            checked = value?.optInt("checked") ?: 0,
+            total = value?.optInt("total") ?: 0,
+            matched = value?.optInt("matched") ?: 0,
+            lastSuccess = value?.optLong("lastSuccess")?.takeIf { it > 0L },
+            lastError = value?.optNullableString("lastError"),
+        )
+    }
+}
+
+data class MovieMetadataSummary(
+    val total: Int,
+    val pending: Int,
+    val matched: Int,
+    val ambiguous: Int,
+    val unmatched: Int,
+    val lastSuccess: Long?,
+) {
+    val needsReview: Int get() = ambiguous + unmatched
+
+    companion object {
+        fun fromJson(value: JSONObject?): MovieMetadataSummary? = value?.let {
+            MovieMetadataSummary(
+                total = it.optInt("total"),
+                pending = it.optInt("pending"),
+                matched = it.optInt("matched"),
+                ambiguous = it.optInt("ambiguous"),
+                unmatched = it.optInt("unmatched"),
+                lastSuccess = it.optLong("lastSuccess").takeIf { value -> value > 0L },
+            )
+        }
+    }
+}
 
 data class LibraryScanStatus(
     val running: Boolean,
@@ -236,6 +283,7 @@ data class MediaLibrarySource(
     val videos: Int,
     val bytes: Long,
     val scan: LibraryScanStatus,
+    val movieMetadata: MovieMetadataSummary?,
 ) {
     companion object {
         fun fromJson(value: JSONObject): MediaLibrarySource = MediaLibrarySource(
@@ -255,6 +303,7 @@ data class MediaLibrarySource(
             videos = value.optInt("videos"),
             bytes = value.optLong("bytes"),
             scan = LibraryScanStatus.fromJson(value.optJSONObject("scan")),
+            movieMetadata = MovieMetadataSummary.fromJson(value.optJSONObject("movieMetadata")),
         )
     }
 }

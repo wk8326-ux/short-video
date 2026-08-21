@@ -11,4 +11,4 @@
 - Elevation: low-alpha white rings and top highlights replace dark shadows.
 - Overlay controls: transparent 44-48px hit areas with white glyphs; no default circular fill or frame.
 - Progress: 2px white track, 9px circular thumb, buffered segment at 38% white, and a restrained playing pulse.
-- Top tabs: three equal 72px modules, 24px active underline, 200ms same-layer movement; screen exit completes in 150ms.
+- Top tabs: four equal modules, 24px active underline, 200ms same-layer movement; screen exit completes in 150ms.
