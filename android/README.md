@@ -41,4 +41,4 @@ JDK 17 and Android SDK 35 are required.
 
 Output: `app/build/outputs/apk/debug/app-debug.apk`.
 
-The debug APK is suitable for private installation. Keep the signing key used for any future release APK stable, otherwise Android will require uninstalling the previous build before an upgrade.
+The debug APK is suitable for private installation. The local `signing.properties` points at the stable key copied from the previous installed build; provision it from `signing.properties.example` before building on another machine. Keep this key stable, otherwise Android will require uninstalling the previous build before an upgrade.

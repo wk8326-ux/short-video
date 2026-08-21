@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.5.1] - 2026-08-21
+
+### Fixed
+
+- Keep the ASMR mini-player in the page layout instead of overlaying the media list, so rows no longer show through or receive touches beneath the liquid-glass surface.
+- Pin Android debug and release builds to the existing stable signing certificate so in-app updates can replace previously installed versions without removing local data.
+
 ## [1.5.0] - 2026-08-21
 
 ### Added

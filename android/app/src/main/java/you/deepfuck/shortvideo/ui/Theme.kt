@@ -24,6 +24,7 @@ val AccentSoft = Color(0xFFFF727A)
 val Line = Color(0x24FFFFFF)
 val GlassFill = Color(0x8F0C0D0F)
 val GlassFillSoft = Color(0x7015171A)
+val MiniPlayerGlassFill = Color(0xD60C0D0F)
 val GlassLine = Color(0x2EFFFFFF)
 val GlassHighlight = Color(0x1FFFFFFF)
 

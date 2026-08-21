@@ -22,6 +22,8 @@ android/local.properties
 android/**/build/
 android/*.jks
 android/*.keystore
+android/signing.properties
+android/signing/
 
 .playwright-cli/
 playwright-report/

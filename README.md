@@ -57,12 +57,12 @@ Android updates are published from `/data/app-update`, which is inside the exist
 
 ```json
 {
-  "versionCode": 150,
-  "versionName": "1.5.0",
-  "apkFile": "short-video-android-v1.5.0-debug.apk",
-  "sha256": "b334f5f4b4acb37932df40e5d07b89f6b5921455000018f446cb02a1799a0e63",
+  "versionCode": 151,
+  "versionName": "1.5.1",
+  "apkFile": "short-video-android-v1.5.1-debug.apk",
+  "sha256": "b93cd45c7c30567f79a2e336bfaecd8b47d53486a89dec37f5b45a75346279b7",
   "size": 22691092,
-  "notes": "升级原生 Android 克制液态玻璃界面，并将 ASMR 视频竖屏状态下的横屏与后台播放控制移至右下方。"
+  "notes": "修复 ASMR 底部液态玻璃播放器遮挡列表，以及旧版覆盖安装时的签名不一致问题。"
 }
 ```
 

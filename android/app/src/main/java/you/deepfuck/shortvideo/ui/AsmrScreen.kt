@@ -125,52 +125,58 @@ internal fun AsmrScreen(
     onMediaListPosition: (String, ListPosition) -> Unit,
 ) {
     val miniPlayerVisible = state.nowPlaying != null && state.expandedMedia == null
-    val listBottomPadding = if (miniPlayerVisible) 102.dp else 16.dp
     Box(Modifier.fillMaxSize().background(Canvas)) {
-        Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+        ) {
             Spacer(Modifier.height(52.dp))
-            val selectedAuthor = state.selectedAuthor
-            if (selectedAuthor == null) {
-                AuthorLibrary(
-                    authors = state.asmrAuthors,
-                    total = state.asmrAuthorsTotal,
-                    loading = state.asmrLoading,
-                    error = state.asmrError,
-                    initialPosition = authorListPosition,
-                    onPosition = onAuthorListPosition,
-                    filter = state.asmrFilter,
-                    onFilter = onFilter,
-                    onAuthor = onAuthor,
-                    bottomContentPadding = listBottomPadding,
-                )
-            } else {
-                key(selectedAuthor) {
-                    AuthorMedia(
-                        state = state,
-                        player = player,
-                        initialPosition = mediaListPosition,
-                        onPosition = { onMediaListPosition(selectedAuthor, it) },
-                        onBack = onBackAuthor,
-                        onLoadMore = onLoadMoreItems,
+            Box(Modifier.weight(1f)) {
+                val selectedAuthor = state.selectedAuthor
+                if (selectedAuthor == null) {
+                    AuthorLibrary(
+                        authors = state.asmrAuthors,
+                        total = state.asmrAuthorsTotal,
+                        loading = state.asmrLoading,
+                        error = state.asmrError,
+                        initialPosition = authorListPosition,
+                        onPosition = onAuthorListPosition,
+                        filter = state.asmrFilter,
                         onFilter = onFilter,
-                        onQuery = onQuery,
-                        onPlay = onPlay,
-                        bottomContentPadding = listBottomPadding,
+                        onAuthor = onAuthor,
+                        bottomContentPadding = 16.dp,
                     )
+                } else {
+                    key(selectedAuthor) {
+                        AuthorMedia(
+                            state = state,
+                            player = player,
+                            initialPosition = mediaListPosition,
+                            onPosition = { onMediaListPosition(selectedAuthor, it) },
+                            onBack = onBackAuthor,
+                            onLoadMore = onLoadMoreItems,
+                            onFilter = onFilter,
+                            onQuery = onQuery,
+                            onPlay = onPlay,
+                            bottomContentPadding = 16.dp,
+                        )
+                    }
                 }
             }
-        }
 
-        if (state.nowPlaying != null && state.expandedMedia == null) {
-            MiniPlayer(
-                entry = state.nowPlaying,
-                player = player,
-                onExpand = onExpand,
-                onToggle = onToggle,
-                onClose = onClose,
-                onSeek = onSeek,
-                modifier = Modifier.align(Alignment.BottomCenter).zIndex(1f),
-            )
+            if (miniPlayerVisible) {
+                MiniPlayer(
+                    entry = requireNotNull(state.nowPlaying),
+                    player = player,
+                    onExpand = onExpand,
+                    onToggle = onToggle,
+                    onClose = onClose,
+                    onSeek = onSeek,
+                    modifier = Modifier.zIndex(1f),
+                )
+            }
         }
 
         state.expandedMedia?.let { entry ->
@@ -280,7 +286,7 @@ private fun AuthorLibrary(
             error != null && authors.isEmpty() -> CenterMessage(error)
             else -> LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().navigationBarsPadding(),
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     start = 16.dp,
                     end = 16.dp,
@@ -469,7 +475,7 @@ private fun AuthorMedia(
             state.asmrError != null && state.asmrItems.isEmpty() -> CenterMessage(state.asmrError)
             else -> LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().navigationBarsPadding(),
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     start = 16.dp,
                     end = 16.dp,
@@ -539,9 +545,8 @@ private fun MiniPlayer(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .navigationBarsPadding()
             .padding(horizontal = 8.dp, vertical = 8.dp)
-            .glassSurface()
+            .glassSurface(fill = MiniPlayerGlassFill)
             .pointerInput(Unit) {
                 // Keep unhandled touches on the player plane instead of the media list below it.
                 awaitPointerEventScope {

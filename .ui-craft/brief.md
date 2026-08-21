@@ -26,6 +26,8 @@ The user resumes media at the saved position, sees no recent repeats in shuffle 
 
 # Learned constraints
 
+- **2026-08-21** - Persistent ASMR playback occupies a real bottom layout region rather than overlaying the scroll viewport. *Why:* Backdrop blur is not reliable across supported Android versions, and list text or hit targets must never bleed through a fixed player.
+
 - **2026-08-21** - Use direction A, "restrained liquid glass", as the production visual language. Glass belongs only to navigation, control clusters, floating playback, dialogs and actionable source cards; media and flat lists stay unframed. *Why:* The quiet, low-obstruction direction best matches the user's taste and remains comfortable during long viewing sessions.
 
 - **2026-08-16** - Keep the product lightweight and single-purpose. *Why:* Emby already handles long-form media; this surface exists specifically for short-video playback.
