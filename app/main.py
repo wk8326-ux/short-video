@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.6.0-beta.1"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -419,7 +419,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="Private short-video player",
+    title="deepfuck private media player",
     version=APP_VERSION,
     docs_url=None,
     redoc_url=None,

@@ -311,7 +311,7 @@ private fun LoginScreen(busy: Boolean, error: String?, onLogin: (String) -> Unit
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                 Box(Modifier.size(7.dp, 30.dp).clip(RoundedCornerShape(2.dp)).background(Accent))
-                Text("短片", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text("deepfuck", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(36.dp))
             GlassPanel(

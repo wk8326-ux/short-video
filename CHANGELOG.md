@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.1] - 2026-08-21
+
+### Added
+
+- Add a lightweight movie library backed by independently managed AList/OpenList sources.
+- Add source-scoped manual scanning and TMDB metadata scraping with progress and match summaries.
+- Add native Android and PWA movie walls, search, details, playback, seeking, landscape, and resume progress.
+
+### Changed
+
+- Rename the user-facing application from `短片` to `deepfuck` while retaining its existing package and local storage identities.
+- Keep movie scanning and metadata scraping manual and isolated from short-video, long-video, and ASMR playback state.
+
 ## [1.5.1] - 2026-08-21
 
 ### Fixed

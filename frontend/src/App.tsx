@@ -359,9 +359,9 @@ function LoginScreen({ initialError, onAuthenticated }: LoginScreenProps) {
 
   return (
     <main className="auth-shell">
-      <div className="auth-brand" aria-label="短片">
+      <div className="auth-brand" aria-label="deepfuck">
         <span aria-hidden="true" />
-        短片
+        deepfuck
       </div>
       <section className="auth-panel" aria-labelledby="auth-title">
         <LockKeyhole className="auth-mark" size={30} strokeWidth={1.8} aria-hidden="true" />

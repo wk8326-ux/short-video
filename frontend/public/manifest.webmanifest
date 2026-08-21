@@ -1,7 +1,7 @@
 {
-  "name": "私人媒体库",
-  "short_name": "短片",
-  "description": "私人短视频、长视频与 ASMR 播放器",
+  "name": "deepfuck",
+  "short_name": "deepfuck",
+  "description": "私人短视频、长视频、ASMR 与电影播放器",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

@@ -1,4 +1,4 @@
-const CACHE_NAME = "short-video-shell-v4";
+const CACHE_NAME = "short-video-shell-v5";
 const SHELL = ["/", "/manifest.webmanifest", "/icon.png"];
 
 async function cacheShell() {
