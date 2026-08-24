@@ -515,7 +515,11 @@ private fun MediaSourceDialog(
                 OutlinedTextField(rootPath, { rootPath = it }, Modifier.fillMaxWidth(), label = { Text("根目录") }, singleLine = true)
                 ChoiceRow(
                     label = "归属板块",
-                    choices = LibrarySection.entries.map { it.apiValue to it.label },
+                    choices = listOf(
+                        LibrarySection.FEED.apiValue to "Video",
+                        LibrarySection.ASMR.apiValue to "ASMR",
+                        LibrarySection.MOVIE.apiValue to "Movie",
+                    ),
                     selected = section.apiValue,
                     onSelected = { value ->
                         section = LibrarySection.entries.first { it.apiValue == value }

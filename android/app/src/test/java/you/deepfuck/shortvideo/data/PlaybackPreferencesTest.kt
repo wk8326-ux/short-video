@@ -2,7 +2,9 @@ package you.deepfuck.shortvideo.data
 
 import android.content.Context
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -13,6 +15,30 @@ import you.deepfuck.shortvideo.FeedSessionState
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class PlaybackPreferencesTest {
+    @Test
+    fun muteStateIsIsolatedByMediaSurfaceAndMigratesTheLegacyFeedValue() {
+        val context = RuntimeEnvironment.getApplication()
+        context.getSharedPreferences("short_video", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .putBoolean("muted", true)
+            .commit()
+        val preferences = PlaybackPreferences(context)
+
+        assertTrue(preferences.muted(MediaSurface.SHORT))
+        assertTrue(preferences.muted(MediaSurface.LONG))
+        assertFalse(preferences.muted(MediaSurface.ASMR))
+        assertFalse(preferences.muted(MediaSurface.MOVIE))
+
+        preferences.setMuted(MediaSurface.ASMR, true)
+        preferences.setMuted(MediaSurface.SHORT, false)
+
+        assertFalse(preferences.muted(MediaSurface.SHORT))
+        assertTrue(preferences.muted(MediaSurface.LONG))
+        assertTrue(preferences.muted(MediaSurface.ASMR))
+        assertFalse(preferences.muted(MediaSurface.MOVIE))
+    }
+
     @Test
     fun randomFeedRequestContextSurvivesProcessRestart() {
         val context = RuntimeEnvironment.getApplication()

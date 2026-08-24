@@ -10,17 +10,18 @@ import androidx.media3.common.C
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
-import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -80,12 +81,15 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     private val logs = AppLogStore.get(context)
     private val cache = MediaCacheStore.get(context)
     private val cacheKeyFactory = StableCacheKeyFactory()
+    private val resolvedPlayUrls = ResolvedPlayUrlCache(ttlMs = RESOLVED_URL_TTL_MS)
+    private val forceRefreshMediaIds = ConcurrentHashMap.newKeySet<Long>()
     private var currentEntry: MediaEntry? = null
     private val queueEntries = linkedMapOf<Long, MediaEntry>()
     private var prefetchJob: Job? = null
     private val prefetchLock = Any()
     private var prefetchGeneration = 0L
     private var activeCacheWriter: CacheWriter? = null
+    private var redirectRetryMediaId: Long? = null
     private val playbackIdentity = PlaybackIdentity()
     private var onPlaybackEnded: ((PlaybackEndedEvent) -> Unit)? = null
     private var onMediaTransition: ((MediaEntry) -> Unit)? = null
@@ -140,6 +144,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
                         return
                     }
                     playbackIdentity.activate(entry.id)
+                    redirectRetryMediaId = null
                     currentEntry = entry
                     publish()
                     logs.info("player_transition", "media=${entry.id} reason=$reason")
@@ -152,7 +157,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
                         "media=${currentEntry?.id} code=${error.errorCodeName}",
                         error,
                     )
-                    publish(error.errorCodeName)
+                    if (!retryWithFreshRedirect(error)) publish(error.errorCodeName)
                 }
             },
         )
@@ -173,6 +178,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
                 val changed = currentEntry?.id != entry.id || player.currentMediaItemIndex != targetIndex
                 if (changed) {
                     playbackIdentity.activate(entry.id)
+                    redirectRetryMediaId = null
                     currentEntry = entry
                     player.seekTo(targetIndex, resumePositionMs.coerceAtLeast(0L))
                     onMediaTransition?.invoke(entry)
@@ -185,6 +191,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         }
         return runCatching {
             playbackIdentity.activate(entry.id)
+            redirectRetryMediaId = null
             currentEntry = entry
             queueEntries.clear()
             normalizedQueue.forEach { queueEntries[it.id] = it }
@@ -288,7 +295,13 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             prefetchGeneration
         }
         prefetchJob = scope.launch {
-            entries.take(2).filterNot(MediaEntry::isHls).forEach { entry ->
+            val candidates = entries.take(3)
+            candidates.forEach { entry ->
+                ensureActive()
+                runCatching { resolvePlayEntry(entry) }
+                    .onFailure { logs.info("player_redirect_prewarm_failed", "media=${entry.id}") }
+            }
+            candidates.take(2).filterNot(MediaEntry::isHls).forEach { entry ->
                 ensureActive()
                 runCatching { cacheProgressive(surface, entry, generation) }
             }
@@ -347,8 +360,35 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     private fun resolveDataSpec(dataSpec: DataSpec): DataSpec {
         val uri = dataSpec.uri
         if (!uri.host.equals("short.deepfuck.you", ignoreCase = true)) return dataSpec
-        if (!uri.path.orEmpty().matches(PLAY_PATH)) return dataSpec
-        return dataSpec.withUri(Uri.parse(api.resolvePlayUrl(uri.toString())))
+        val match = PLAY_PATH.matchEntire(uri.path.orEmpty()) ?: return dataSpec
+        val mediaId = match.groupValues[1].toLong()
+        val cacheKey = "media:$mediaId"
+        val forceRefresh = forceRefreshMediaIds.remove(mediaId)
+        if (forceRefresh) resolvedPlayUrls.invalidate(cacheKey)
+        val target = if (forceRefresh) {
+            uri.buildUpon().appendQueryParameter("refresh", "true").build().toString()
+        } else {
+            uri.toString()
+        }
+        val resolved = resolvedPlayUrls.resolve(cacheKey) { api.resolvePlayUrl(target) }
+        return dataSpec.withUri(Uri.parse(resolved))
+    }
+
+    private fun resolvePlayEntry(entry: MediaEntry) {
+        resolveDataSpec(DataSpec(Uri.parse(api.absoluteUrl(entry.playUrl))))
+    }
+
+    private fun retryWithFreshRedirect(error: PlaybackException): Boolean {
+        val mediaId = currentEntry?.id ?: return false
+        if (redirectRetryMediaId == mediaId || !error.isRetryableRedirectFailure()) return false
+        redirectRetryMediaId = mediaId
+        resolvedPlayUrls.invalidate("media:$mediaId")
+        forceRefreshMediaIds.add(mediaId)
+        logs.info("player_redirect_retry", "media=$mediaId code=${error.errorCodeName}")
+        val resumePlayback = player.playWhenReady
+        player.prepare()
+        player.playWhenReady = resumePlayback
+        return true
     }
 
     private fun normalizeQueue(entry: MediaEntry, queue: List<MediaEntry>): List<MediaEntry> {
@@ -365,13 +405,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
                 .setArtist(entry.author)
                 .build(),
         )
-        .setMimeType(
-            when {
-                entry.isHls -> MimeTypes.APPLICATION_M3U8
-                entry.isAudio -> MimeTypes.AUDIO_MPEG
-                else -> null
-            },
-        )
+        .setMimeType(mediaMimeType(entry))
         .build()
 
     private fun publish(error: String? = null) {
@@ -392,9 +426,20 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     }
 
     private companion object {
-        val PLAY_PATH = Regex("^/api/videos/\\d+/play$")
+        val PLAY_PATH = Regex("^/api/videos/(\\d+)/play$")
+        const val RESOLVED_URL_TTL_MS = 120_000L
         const val MAX_FULL_SHORT_BYTES = 96L * 1024 * 1024
         const val SHORT_PREFIX_BYTES = 24L * 1024 * 1024
         const val LONG_PREFIX_BYTES = 12L * 1024 * 1024
     }
+}
+
+private fun PlaybackException.isRetryableRedirectFailure(): Boolean {
+    val responseCode = generateSequence(cause) { it.cause }
+        .filterIsInstance<HttpDataSource.InvalidResponseCodeException>()
+        .firstOrNull()
+        ?.responseCode
+    if (responseCode in setOf(401, 403, 404, 410)) return true
+    return errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+        errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT
 }

@@ -101,6 +101,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val workManager = WorkManager.getInstance(application)
     val playback: PlaybackEngine = PlaybackEngineProvider.get(application)
     private val restoredMedia = playback.currentMedia()
+    private val initialSurface = preferences.surface
 
     private val mutableState = MutableStateFlow(
         AppUiState(
@@ -109,14 +110,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 AuthenticationState.CHECKING
             },
-            surface = preferences.surface,
+            surface = initialSurface,
             mode = preferences.mode,
-            muted = preferences.muted,
+            muted = preferences.muted(initialSurface),
             asmrVideoBackgroundPlayback = preferences.asmrVideoBackgroundPlayback,
             selectedAuthor = preferences.selectedAsmrAuthor,
             nowPlaying = restoredMedia.takeIf {
                 shouldKeepPlayingInBackground(
-                    preferences.surface,
+                    initialSurface,
                     it,
                     preferences.asmrVideoBackgroundPlayback,
                 )
@@ -155,7 +156,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val movieImageLoader by lazy { api.movieImageLoader(application) }
 
     init {
-        playback.setMuted(preferences.muted)
+        playback.setMuted(preferences.muted(initialSurface))
         playback.setOnPlaybackEndedListener { event ->
             viewModelScope.launch { advanceAfterPlaybackEnded(event) }
         }
@@ -246,12 +247,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieRequestGeneration += 1L
         }
         preferences.surface = surface
+        val surfaceMuted = preferences.muted(surface)
+        playback.setMuted(surfaceMuted)
         activeFeedItemId = null
         asmrQueueKey = null
         asmrQueue = emptyList()
         pendingAsmrAdvanceId = null
         mutableState.value = mutableState.value.copy(
             surface = surface,
+            muted = surfaceMuted,
             feedItems = if (surface.isFeed) mutableState.value.feedItems else emptyList(),
             activeIndex = 0,
             expandedMedia = null,
@@ -285,7 +289,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setMuted(muted: Boolean) {
-        preferences.muted = muted
+        preferences.setMuted(mutableState.value.surface, muted)
         playback.setMuted(muted)
         mutableState.value = mutableState.value.copy(muted = muted)
     }

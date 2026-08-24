@@ -10,12 +10,21 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material3.Surface
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
@@ -47,8 +56,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
         setContent {
             ShortVideoTheme {
                 Surface(
@@ -56,14 +72,23 @@ class MainActivity : ComponentActivity() {
                     color = Canvas,
                     contentColor = TextPrimary,
                 ) {
-                    ShortVideoApp(
-                        viewModel = viewModel,
-                        onFullscreenChanged = ::setPlayerFullscreen,
-                        onBackgroundPlaybackRequested = ::requestMediaNotificationPermission,
-                        onDownloadAppUpdate = ::downloadAppUpdate,
-                        onInstallAppUpdate = ::installAppUpdate,
-                        onExportLogs = ::exportRuntimeLogs,
-                    )
+                    Box(Modifier.fillMaxSize()) {
+                        ShortVideoApp(
+                            viewModel = viewModel,
+                            onFullscreenChanged = ::setPlayerFullscreen,
+                            onBackgroundPlaybackRequested = ::requestMediaNotificationPermission,
+                            onDownloadAppUpdate = ::downloadAppUpdate,
+                            onInstallAppUpdate = ::installAppUpdate,
+                            onExportLogs = ::exportRuntimeLogs,
+                        )
+                        Spacer(
+                            Modifier
+                                .align(Alignment.TopCenter)
+                                .fillMaxWidth()
+                                .windowInsetsTopHeight(WindowInsets.statusBars)
+                                .background(Canvas),
+                        )
+                    }
                 }
             }
         }
@@ -87,6 +112,8 @@ class MainActivity : ComponentActivity() {
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 hide(WindowInsetsCompat.Type.systemBars())
             } else {
+                isAppearanceLightStatusBars = false
+                isAppearanceLightNavigationBars = false
                 show(WindowInsetsCompat.Type.systemBars())
             }
         }

@@ -61,6 +61,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -666,6 +667,8 @@ private fun ExpandedAsmrPlayer(
 ) {
     var seekTarget by remember { mutableStateOf<Long?>(null) }
     var drag by remember { mutableFloatStateOf(0f) }
+    var seekBaseMs by remember { mutableStateOf(0L) }
+    val latestPositionMs = rememberUpdatedState(player.positionMs)
     var chromeVisible by remember(fullscreen, entry.id) { mutableStateOf(true) }
     val controlsVisible = !fullscreen || chromeVisible
 
@@ -686,14 +689,22 @@ private fun ExpandedAsmrPlayer(
             )
             .pointerInput(entry.id, player.durationMs) {
                 detectHorizontalDragGestures(
-                    onDragStart = { drag = 0f; seekTarget = player.positionMs },
+                    onDragStart = {
+                        drag = 0f
+                        seekBaseMs = latestPositionMs.value
+                        seekTarget = seekBaseMs
+                    },
                     onHorizontalDrag = { change, amount ->
                         change.consume()
                         drag += amount
                         if (player.durationMs > 0L) {
-                            val delta = (drag / size.width * player.durationMs * 0.45f).toLong()
-                                .coerceIn(-90_000L, 90_000L)
-                            seekTarget = (player.positionMs + delta).coerceIn(0L, player.durationMs)
+                            seekTarget = calculateSeekTarget(
+                                basePositionMs = seekBaseMs,
+                                accumulatedDragPx = drag,
+                                widthPx = size.width,
+                                durationMs = player.durationMs,
+                                maxDeltaMs = 90_000L,
+                            )
                         }
                     },
                     onDragEnd = { seekTarget?.let(onSeek); seekTarget = null },

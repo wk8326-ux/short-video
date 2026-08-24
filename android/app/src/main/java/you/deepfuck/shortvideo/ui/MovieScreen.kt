@@ -67,6 +67,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -602,6 +603,8 @@ private fun MoviePlayer(
     var chromeVisible by remember(fullscreen) { mutableStateOf(true) }
     var dragPixels by remember { mutableFloatStateOf(0f) }
     var seekPreviewMs by remember { mutableStateOf<Long?>(null) }
+    var seekBaseMs by remember { mutableStateOf(0L) }
+    val latestPositionMs = rememberUpdatedState(player.positionMs)
 
     LaunchedEffect(fullscreen, chromeVisible, player.isPlaying, player.mediaId) {
         if (fullscreen && chromeVisible && player.isPlaying) {
@@ -615,16 +618,21 @@ private fun MoviePlayer(
             detectHorizontalDragGestures(
                 onDragStart = {
                     dragPixels = 0f
-                    seekPreviewMs = player.positionMs
+                    seekBaseMs = latestPositionMs.value
+                    seekPreviewMs = seekBaseMs
                     chromeVisible = true
                 },
                 onHorizontalDrag = { change, amount ->
                     change.consume()
                     dragPixels += amount
                     if (player.durationMs > 0L) {
-                        val delta = (dragPixels / size.width * player.durationMs * 0.45f).toLong()
-                            .coerceIn(-120_000L, 120_000L)
-                        seekPreviewMs = (player.positionMs + delta).coerceIn(0L, player.durationMs)
+                        seekPreviewMs = calculateSeekTarget(
+                            basePositionMs = seekBaseMs,
+                            accumulatedDragPx = dragPixels,
+                            widthPx = size.width,
+                            durationMs = player.durationMs,
+                            maxDeltaMs = 120_000L,
+                        )
                     }
                 },
                 onDragEnd = {

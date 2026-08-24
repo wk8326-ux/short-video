@@ -36,9 +36,15 @@ class PlaybackPreferences(context: Context) {
         }.getOrDefault(FeedMode.SHUFFLE)
         set(value) = preferences.edit().putString(KEY_MODE, value.name).apply()
 
-    var muted: Boolean
-        get() = preferences.getBoolean(KEY_MUTED, true)
-        set(value) = preferences.edit().putBoolean(KEY_MUTED, value).apply()
+    fun muted(surface: MediaSurface): Boolean {
+        val key = "$KEY_MUTED:${surface.name}"
+        if (preferences.contains(key)) return preferences.getBoolean(key, false)
+        return if (surface.isFeed) preferences.getBoolean(KEY_MUTED, true) else false
+    }
+
+    fun setMuted(surface: MediaSurface, muted: Boolean) {
+        preferences.edit().putBoolean("$KEY_MUTED:${surface.name}", muted).apply()
+    }
 
     var asmrVideoBackgroundPlayback: Boolean
         get() = preferences.getBoolean(KEY_ASMR_VIDEO_BACKGROUND, false)
