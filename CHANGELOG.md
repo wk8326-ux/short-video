@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.2] - 2026-08-24
+
+### Changed
+
+- Pre-resolve and briefly cache upcoming AList/OpenList 302 targets while retaining stable media-byte cache keys.
+- Use format-specific MIME types for common video and ASMR audio containers.
+- Use compact `Video`, `ASMR`, and `Movie` labels in the Android media-source editor.
+
+### Fixed
+
+- Refresh an expired signed media URL once without changing the active item or playback position.
+- Start each horizontal seek gesture from the latest playback position across feed, ASMR, and movie players.
+- Isolate mute preferences between short video, long video, ASMR, and movie surfaces.
+- Keep Android status-bar icons visible above media with an explicit dark safe-area background.
+
 ## [1.6.0-beta.1] - 2026-08-21
 
 ### Added

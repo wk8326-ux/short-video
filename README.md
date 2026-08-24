@@ -58,8 +58,8 @@ Android updates are published from `/data/app-update`, which is inside the exist
 ```json
 {
   "versionCode": 160,
-  "versionName": "1.6.0-beta.1",
-  "apkFile": "deepfuck-android-v1.6.0-beta.1.apk",
+  "versionName": "1.6.0-beta.2",
+  "apkFile": "deepfuck-android-v1.6.0-beta.2.apk",
   "sha256": "bf56c6098d8054e0c2b5f8709a0eb2c9a291a2a4f003251752a1ec130715593c",
   "size": 4194592,
   "notes": "deepfuck 电影库 Beta：新增 AList/OpenList 电影源、TMDB 刮削、电影墙、搜索、详情、播放和进度记忆。"
