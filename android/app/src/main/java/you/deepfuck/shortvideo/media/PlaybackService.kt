@@ -1,5 +1,6 @@
 package you.deepfuck.shortvideo.media
 
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import androidx.media3.session.MediaSession
@@ -14,7 +15,17 @@ class PlaybackService : MediaSessionService() {
         val logs = AppLogStore.get(this)
         runCatching {
             val engine = PlaybackEngineProvider.get(this)
-            val session = MediaSession.Builder(this, engine.player).build()
+            val openApp = PendingIntent.getActivity(
+                this,
+                0,
+                Intent(this, you.deepfuck.shortvideo.MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val session = MediaSession.Builder(this, engine.player)
+                .setSessionActivity(openApp)
+                .build()
             try {
                 addSession(session)
                 mediaSession = session
