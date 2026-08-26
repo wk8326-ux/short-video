@@ -362,7 +362,9 @@ def test_initialize_migrates_legacy_path_unique_without_changing_ids(tmp_path):
         source="second-source",
     )
 
-    assert database.get_video(41)["source"] == "guangya"
+    legacy_video = database.get_video(41)
+    assert legacy_video["source"] == "guangya"
+    assert legacy_video["hidden"] == 0
     assert database.stats()["videos"] == 2
 
 
@@ -427,6 +429,52 @@ def test_movie_index_keeps_metadata_across_rescans_and_removes_missing_rows(tmp_
     assert current[0]["id"] == matched_id
     assert current[0]["display_title"] == "流浪地球 2"
     assert database.movie_count(sources=("movies",)) == 1
+
+
+def test_hidden_movies_stay_hidden_across_scans(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    records = [
+        {
+            "path": "/movies/无封面A.2024.mkv",
+            "name": "无封面A.2024.mkv",
+            "size": 100,
+            "modified": "2026-08-26",
+            "thumb": "",
+            "media_format": "mkv",
+        },
+        {
+            "path": "/movies/正常B.2023.mp4",
+            "name": "正常B.2023.mp4",
+            "size": 200,
+            "modified": "2026-08-26",
+            "thumb": "",
+            "media_format": "mp4",
+        },
+    ]
+    database.replace_scan(records, source="movies")
+    database.sync_movie_index("movies", parse_movie_filename)
+    visible = database.movies(sources=("movies",), limit=10)
+    assert len(visible) == 2
+
+    hidden_video_id = visible[0]["video_id"]
+    assert database.hide_videos([hidden_video_id]) == 1
+    assert database.get_video(hidden_video_id) is None
+    assert database.movie_count(sources=("movies",)) == 1
+
+    # The source file still exists, so a later scan sees it again. A user
+    # deletion must therefore be remembered instead of being undone.
+    database.replace_scan(records, source="movies")
+    database.sync_movie_index("movies", parse_movie_filename)
+
+    remaining = database.movies(sources=("movies",), limit=10)
+    assert len(remaining) == 1
+    assert remaining[0]["video_id"] != hidden_video_id
+    with database._connect() as connection:
+        hidden = connection.execute(
+            "SELECT active, hidden FROM videos WHERE id = ?", (hidden_video_id,)
+    ).fetchone()
+    assert tuple(hidden) == (0, 1)
 
 
 def test_movie_filename_parser_is_conservative():

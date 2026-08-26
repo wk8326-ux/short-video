@@ -34,6 +34,7 @@ class LibraryDatabase:
                     modified TEXT,
                     thumb TEXT,
                     active INTEGER NOT NULL DEFAULT 1,
+                    hidden INTEGER NOT NULL DEFAULT 0,
                     last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     fast_start TEXT,
                     fast_start_checked_at TEXT,
@@ -77,6 +78,10 @@ class LibraryDatabase:
                 connection.execute("ALTER TABLE videos ADD COLUMN metadata_checked_at TEXT")
             if "metadata_detail" not in columns:
                 connection.execute("ALTER TABLE videos ADD COLUMN metadata_detail TEXT")
+            if "hidden" not in columns:
+                connection.execute(
+                    "ALTER TABLE videos ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"
+                )
             connection.commit()
             self._migrate_video_path_uniqueness(connection)
             connection.executescript(
@@ -166,6 +171,7 @@ class LibraryDatabase:
                 modified TEXT,
                 thumb TEXT,
                 active INTEGER NOT NULL DEFAULT 1,
+                hidden INTEGER NOT NULL DEFAULT 0,
                 last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 fast_start TEXT,
                 fast_start_checked_at TEXT,
@@ -181,13 +187,13 @@ class LibraryDatabase:
             );
             INSERT INTO videos_source_scoped(
                 id, path, name, size, modified, thumb, active, last_seen,
-                fast_start, fast_start_checked_at, fast_start_detail, source,
+                hidden, fast_start, fast_start_checked_at, fast_start_detail, source,
                 author, duration_seconds, media_format, media_kind,
                 metadata_checked_at, metadata_detail
             )
             SELECT
                 id, path, name, size, modified, thumb, active, last_seen,
-                fast_start, fast_start_checked_at, fast_start_detail, source,
+                hidden, fast_start, fast_start_checked_at, fast_start_detail, source,
                 author, duration_seconds, media_format, media_kind,
                 metadata_checked_at, metadata_detail
             FROM videos;
@@ -248,7 +254,7 @@ class LibraryDatabase:
                         WHEN videos.metadata_checked_at IS NOT NULL THEN videos.media_kind
                         ELSE excluded.media_kind
                     END,
-                    active = 1,
+                    active = CASE WHEN videos.hidden = 1 THEN 0 ELSE 1 END,
                     last_seen = excluded.last_seen
                 """,
                 records(),
@@ -263,6 +269,27 @@ class LibraryDatabase:
             )
             connection.commit()
         return count
+
+    def hide_videos(self, video_ids: Sequence[int]) -> int:
+        ids = sorted({int(video_id) for video_id in video_ids})
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE videos
+                SET active = 0, hidden = 1
+                WHERE id IN ({placeholders})
+                """,
+                ids,
+            )
+            connection.execute(
+                f"DELETE FROM movies WHERE video_id IN ({placeholders})",
+                ids,
+            )
+            connection.commit()
+        return cursor.rowcount
 
     def get_video(self, video_id: int) -> dict[str, Any] | None:
         with self._lock, self._connect() as connection:
