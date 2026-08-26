@@ -414,7 +414,7 @@ class LibraryDatabase:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT m.*
+                SELECT m.*, v.name
                 FROM movies m
                 JOIN videos v ON v.id = m.video_id
                 WHERE v.active = 1 AND {source_clause} {status_clause}
@@ -773,7 +773,7 @@ class LibraryDatabase:
             conditions = ["active = 1", source_clause]
             params: list[Any] = list(source_params)
             if category == "short":
-                conditions.append("(duration_seconds < ? OR duration_seconds IS NULL)")
+                conditions.append("duration_seconds < ?")
                 params.append(duration_boundary)
             elif category == "long":
                 conditions.append("duration_seconds >= ?")

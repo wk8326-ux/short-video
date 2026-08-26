@@ -194,7 +194,7 @@ def test_source_scans_are_isolated_and_duration_boundary_is_180_seconds(tmp_path
         limit=20, cursor=None, mode="oldest", category="long"
     )
 
-    assert short_total == 2  # 179.9 seconds plus one pending metadata row
+    assert short_total == 1  # Unknown duration is not misclassified as short
     assert [row["id"] for row in long] == [2]
     assert long_total == 1
     assert database.stats(source="asmr")["videos"] == 1

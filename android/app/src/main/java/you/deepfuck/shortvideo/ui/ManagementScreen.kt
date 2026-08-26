@@ -606,13 +606,27 @@ private fun ChoiceRow(
                         onClick = { onSelected(value) },
                         modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                         shape = ControlShape,
-                    ) { Text(text) }
+                    ) {
+                        Text(
+                            text,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                        )
+                    }
                 } else {
                     OutlinedButton(
                         onClick = { onSelected(value) },
                         modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                         shape = ControlShape,
-                    ) { Text(text) }
+                    ) {
+                        Text(
+                            text,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                        )
+                    }
                 }
             }
         }

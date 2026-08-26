@@ -72,3 +72,35 @@ async def test_search_movie_uses_requested_year_to_disambiguate_exact_titles():
     assert match is not None
     assert match.tmdb_id == 2
     assert match.status == "matched"
+
+@pytest.mark.asyncio
+async def test_movie_by_id_returns_exact_metadata_without_search():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/3/movie/32249"
+        return httpx.Response(
+            200,
+            json={
+                "id": 32249,
+                "title": "公元2000",
+                "original_title": "公元2000",
+                "release_date": "2000-01-01",
+                "runtime": 103,
+                "poster_path": "/poster.jpg",
+                "backdrop_path": "/backdrop.jpg",
+                "vote_average": 6.4,
+            },
+        )
+
+    http_client = httpx.AsyncClient(
+        base_url="https://api.themoviedb.org/3",
+        transport=httpx.MockTransport(handler),
+    )
+    client = TmdbClient(client=http_client)
+
+    match = await client.movie_by_id(32249)
+    await http_client.aclose()
+
+    assert match is not None
+    assert match.tmdb_id == 32249
+    assert match.status == "matched"
+    assert match.runtime_minutes == 103

@@ -21,7 +21,7 @@ from app.database import LibraryDatabase
 from app.faststart import inspect_mp4_prefix
 from app.media_metadata import mp4_duration_seconds
 from app.media_sources import MediaSourceRegistry
-from app.movie_metadata import parse_movie_filename
+from app.movie_metadata import movie_search_candidates, parse_movie_filename
 from app.tmdb import TmdbClient
 from app.settings import Settings
 
@@ -283,8 +283,7 @@ async def check_media_metadata(*, force: bool) -> None:
                 limit=settings.metadata_probe_batch_size,
                 sources=feed_sources,
             )
-            metadata_state["total"] = len(videos)
-            semaphore = asyncio.Semaphore(3)
+            semaphore = asyncio.Semaphore(6)
 
             async def inspect(video: dict[str, Any]) -> None:
                 duration: float | None = None
@@ -325,9 +324,19 @@ async def check_media_metadata(*, force: bool) -> None:
                 )
                 metadata_state["checked"] += 1
 
-            await asyncio.gather(*(inspect(video) for video in videos))
+            batch_count = 0
+            while videos and batch_count < 200:
+                batch_count += 1
+                metadata_state["total"] += len(videos)
+                await asyncio.gather(*(inspect(video) for video in videos))
+                videos = await asyncio.to_thread(
+                    database.duration_candidates,
+                    force=force,
+                    limit=settings.metadata_probe_batch_size,
+                    sources=feed_sources,
+                )
             metadata_state["lastSuccess"] = int(time.time())
-            logger.info("Checked media duration for %s videos", len(videos))
+            logger.info("Checked media duration for %s videos", metadata_state["checked"])
         except Exception as exc:
             metadata_state["lastError"] = str(exc)
             logger.exception("Media metadata check failed")
@@ -366,10 +375,28 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
             )
             try:
                 for movie in movies:
-                    match = await client.search_movie(
-                        str(movie.get("normalized_title") or movie.get("display_title") or ""),
-                        year=movie.get("year"),
-                    )
+                    parsed_name = parse_movie_filename(str(movie.get("name") or ""))
+                    match = None
+                    if parsed_name.tmdb_id:
+                        match = await client.movie_by_id(parsed_name.tmdb_id)
+                    if match is None:
+                        queries = movie_search_candidates(
+                            str(movie.get("normalized_title") or movie.get("display_title") or "")
+                        )
+                        attempts = []
+                        for query in queries:
+                            attempts.extend([(query, movie.get("year")), (query, None)])
+                        best = None
+                        for query, year in attempts:
+                            candidate = await client.search_movie(query, year=year)
+                            if candidate is None:
+                                continue
+                            if candidate.status == "matched":
+                                best = candidate
+                                break
+                            if best is None or candidate.confidence > best.confidence:
+                                best = candidate
+                        match = best
                     if match is None:
                         await asyncio.to_thread(
                             database.update_movie_metadata,
@@ -388,6 +415,7 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                             poster_url=match.poster_url,
                             backdrop_url=match.backdrop_url,
                             rating=match.rating,
+                            runtime_minutes=match.runtime_minutes,
                             tmdb_id=match.tmdb_id,
                             match_status=match.status,
                             match_confidence=match.confidence,

@@ -18,6 +18,7 @@ class TmdbMatch:
     rating: float | None
     status: str
     confidence: float
+    runtime_minutes: int | None = None
 
 
 class TmdbClient:
@@ -45,6 +46,25 @@ class TmdbClient:
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+    async def movie_by_id(self, tmdb_id: int) -> TmdbMatch | None:
+        params: dict[str, Any] = {"language": self._language}
+        if self._api_key and not self._read_token:
+            params["api_key"] = self._api_key
+        response = await self._client.get(f"/movie/{int(tmdb_id)}", params=params)
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        item = response.json()
+        if not isinstance(item, dict) or not item.get("id"):
+            return None
+        return _match_from_item(
+            item,
+            fallback_title="",
+            requested_year=None,
+            exact=True,
+            confidence=0.99,
+        )
 
     async def search_movie(self, title: str, *, year: int | None = None) -> TmdbMatch | None:
         params: dict[str, Any] = {"query": title, "language": self._language, "include_adult": "false"}
@@ -85,18 +105,41 @@ class TmdbClient:
         exact = exact_title and exact_year
         poster_path = str(candidate.get("poster_path") or "")
         backdrop_path = str(candidate.get("backdrop_path") or "")
-        return TmdbMatch(
-            tmdb_id=int(candidate.get("id") or 0),
-            title=str(candidate.get("title") or candidate.get("name") or title),
-            original_title=str(candidate.get("original_title") or ""),
-            year=candidate_year,
-            overview=str(candidate.get("overview") or ""),
-            poster_url=f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None,
-            backdrop_url=f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None,
-            rating=float(candidate["vote_average"]) if candidate.get("vote_average") is not None else None,
-            status="matched" if exact or year is None else "ambiguous",
+        return _match_from_item(
+            candidate,
+            fallback_title=title,
+            requested_year=year,
+            exact=exact,
             confidence=0.95 if exact else 0.7,
         )
+
+
+def _match_from_item(
+    item: dict[str, Any],
+    *,
+    fallback_title: str,
+    requested_year: int | None,
+    exact: bool,
+    confidence: float,
+) -> TmdbMatch:
+    release_date = str(item.get("release_date") or "")
+    candidate_year = int(release_date[:4]) if release_date[:4].isdigit() else None
+    poster_path = str(item.get("poster_path") or "")
+    backdrop_path = str(item.get("backdrop_path") or "")
+    runtime = item.get("runtime")
+    return TmdbMatch(
+        tmdb_id=int(item.get("id") or 0),
+        title=str(item.get("title") or item.get("name") or fallback_title),
+        original_title=str(item.get("original_title") or ""),
+        year=candidate_year,
+        overview=str(item.get("overview") or ""),
+        poster_url=f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None,
+        backdrop_url=f"https://image.tmdb.org/t/p/w1280{backdrop_path}" if backdrop_path else None,
+        rating=float(item["vote_average"]) if item.get("vote_average") is not None else None,
+        runtime_minutes=int(runtime) if isinstance(runtime, int) and runtime > 0 else None,
+        status="matched" if exact else "ambiguous",
+        confidence=confidence,
+    )
 
 
 def _normalize_title(value: str) -> str:
