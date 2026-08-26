@@ -59,6 +59,11 @@ async def test_movie_scan_can_index_provider_files_without_reliable_extensions()
             {"name": "《无间道》", "is_dir": False, "size": 3_612_015_764},
             {"name": "《蝙蝠侠.黑暗骑士》", "is_dir": False, "size": 7_725_900_519},
             {"name": "字幕.srt", "is_dir": False, "size": 1024},
+            {"name": "导航.html", "is_dir": False, "size": 2048},
+            {"name": "发布页.htm", "is_dir": False, "size": 2048},
+            {"name": "入口.url", "is_dir": False, "size": 128},
+            {"name": "帮助.chm", "is_dir": False, "size": 4096},
+            {"name": "说明.pdf", "is_dir": False, "size": 8192},
         ]
         return httpx.Response(
             200,
