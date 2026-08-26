@@ -526,7 +526,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         movieItems = state.movieItems.map { if (it.id == resolved.id) resolved else it },
                         movieDetailLoading = false,
                     )
-                    playback.prefetch(MediaSurface.MOVIE, listOf(resolved.asMediaEntry()))
                 }
                 .onFailure { error ->
                     if (!handleUnauthorized(error)) {
@@ -563,6 +562,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             nowPlaying = entry,
             movieError = null,
         )
+        playback.cancelBackgroundPrefetch()
         if (!playback.play(entry, resolved.resumePositionMs)) {
             mutableState.value = mutableState.value.copy(
                 nowPlaying = null,

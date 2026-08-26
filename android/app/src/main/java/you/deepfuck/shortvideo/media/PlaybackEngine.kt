@@ -308,6 +308,14 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         }
     }
 
+    fun cancelBackgroundPrefetch() {
+        prefetchJob?.cancel()
+        synchronized(prefetchLock) {
+            activeCacheWriter?.cancel()
+            activeCacheWriter = null
+        }
+    }
+
     fun cachedBytes(entry: MediaEntry): Long {
         val length = entry.size.takeIf { it > 0L } ?: return 0L
         return cache.getCachedBytes("media:${entry.id}", 0L, length)
@@ -334,6 +342,8 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         val target = when {
             surface == MediaSurface.SHORT && entry.size in 1..MAX_FULL_SHORT_BYTES -> entry.size
             surface == MediaSurface.SHORT -> SHORT_PREFIX_BYTES
+            surface == MediaSurface.MOVIE && entry.size > LARGE_MOVIE_SIZE_BYTES -> LARGE_MOVIE_PREFIX_BYTES
+            surface == MediaSurface.MOVIE -> MOVIE_PREFIX_BYTES
             else -> LONG_PREFIX_BYTES
         }
         val dataSpec = DataSpec.Builder()
@@ -427,10 +437,13 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     private companion object {
         val PLAY_PATH = Regex("^/api/videos/(\\d+)/play$")
-        const val RESOLVED_URL_TTL_MS = 120_000L
+        const val RESOLVED_URL_TTL_MS = 480_000L
         const val MAX_FULL_SHORT_BYTES = 96L * 1024 * 1024
         const val SHORT_PREFIX_BYTES = 24L * 1024 * 1024
         const val LONG_PREFIX_BYTES = 12L * 1024 * 1024
+        const val MOVIE_PREFIX_BYTES = 24L * 1024 * 1024
+        const val LARGE_MOVIE_PREFIX_BYTES = 32L * 1024 * 1024
+        const val LARGE_MOVIE_SIZE_BYTES = 8L * 1024 * 1024 * 1024
     }
 }
 

@@ -854,6 +854,17 @@ async def prewarm_play_url(video: dict[str, Any]) -> None:
         logger.warning("Direct URL prewarm failed for video %s: %s", video["id"], exc)
 
 
+async def prewarm_play_urls(videos: list[dict[str, Any]], *, limit: int = 6) -> None:
+    """Resolve the first visible items so a tap can skip the AList lookup."""
+    semaphore = asyncio.Semaphore(3)
+
+    async def warm(video: dict[str, Any]) -> None:
+        async with semaphore:
+            await prewarm_play_url(video)
+
+    await asyncio.gather(*(warm(video) for video in videos[:limit]))
+
+
 @app.get("/api/feed")
 async def feed(
     limit: int = Query(default=12, ge=1, le=30),
@@ -1059,6 +1070,11 @@ async def movies(
         asyncio.to_thread(database.movies, search=search, limit=limit, offset=offset, sources=sources),
         asyncio.to_thread(database.movie_count, search=search, sources=sources),
     )
+    if offset == 0 and rows:
+        spawn_background(
+            prewarm_play_urls(rows),
+            name="prewarm-movie-wall",
+        )
     return {
         "items": [public_movie(row) for row in rows],
         "total": total,
@@ -1076,6 +1092,10 @@ async def movie_detail(movie_id: int) -> dict[str, Any]:
     )
     if not row:
         raise HTTPException(status_code=404, detail="Movie not found")
+    spawn_background(
+        prewarm_play_url(row),
+        name=f"prewarm-movie-play-{row['id']}",
+    )
     return public_movie(row, detail=True)
 
 

@@ -214,6 +214,11 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
             f"/api/admin/sources/{movie_source_id}/metadata",
             headers=headers,
         )
+        movie_list = client.get("/api/movies", headers=headers)
+        movie_detail = client.get(
+            f"/api/movies/{movie_list.json()['items'][0]['id']}",
+            headers=headers,
+        )
         scan_during_metadata = client.post(
             f"/api/admin/sources/{movie_source_id}/scan",
             headers=headers,
@@ -277,3 +282,7 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     assert f"movie-metadata-{movie_source_id}" in spawned_names
     assert scan_during_metadata.status_code == 409
     assert any(name.startswith("prewarm-asmr-play-") for name in spawned_names)
+    assert movie_list.status_code == 200
+    assert movie_detail.status_code == 200
+    assert "prewarm-movie-wall" in spawned_names
+    assert any(name.startswith("prewarm-movie-play-") for name in spawned_names)
