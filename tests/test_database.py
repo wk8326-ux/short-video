@@ -477,6 +477,33 @@ def test_hidden_movies_stay_hidden_across_scans(tmp_path):
     assert tuple(hidden) == (0, 1)
 
 
+def test_delete_media_source_removes_its_index_and_prevents_default_reseed(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    source = {
+        "id": "removable",
+        "name": "可删除测试源",
+        "base_url": "https://movies.example",
+        "root_path": "/movies",
+        "section": "movie",
+        "anonymous": True,
+    }
+    database.add_media_source(source)
+    database.replace_scan(
+        [{"path": "/movies/test.mp4", "name": "test.mp4", "size": 100}],
+        source="removable",
+    )
+    database.sync_movie_index("removable", parse_movie_filename)
+
+    assert database.delete_media_source("removable") is True
+    assert database.get_media_source("removable") is None
+    assert database.stats(sources=("removable",))["videos"] == 0
+    assert database.movie_count(sources=("removable",)) == 0
+
+    database.seed_media_sources([source])
+    assert database.get_media_source("removable") is None
+
+
 def test_movie_filename_parser_is_conservative():
     parsed = parse_movie_filename("The.Dark.Knight.2008.1080p.BluRay.x264.mkv")
     assert parsed.display_title == "The Dark Knight"

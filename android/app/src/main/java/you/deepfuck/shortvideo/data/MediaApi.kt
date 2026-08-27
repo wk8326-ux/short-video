@@ -251,6 +251,14 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         executeJson(request)
     }
 
+    fun deleteMediaSource(sourceId: String) {
+        val request = Request.Builder()
+            .url(url("/api/admin/sources/$sourceId"))
+            .delete()
+            .build()
+        executeJson(request)
+    }
+
     fun startFastStartCheck() = post("/api/admin/fast-start")
 
     fun appUpdate(): AppUpdateInfo = AppUpdateInfo.fromJson(getJson("/api/app/update"))

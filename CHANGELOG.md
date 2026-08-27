@@ -319,3 +319,9 @@ All notable changes to this project are documented in this file.
 - Portrait and landscape playback with seek and video-navigation gestures.
 - Software-rotated landscape fallback for Android orientation-lock failures.
 - Transient playback controls with isolated volume and playback interactions.
+## [1.6.0-beta.3] - 2026-08-27
+
+- Add private MetaTube scraping for exact numbered media, with TMDB retained for ordinary movies.
+- Store and show metadata source, release date, studio, genres, and performers in movie details.
+- Add confirmed media-source deletion that removes only the local index, never the AList/OpenList files.
+- Include the pending Android player and management UI refinements in the next APK update.

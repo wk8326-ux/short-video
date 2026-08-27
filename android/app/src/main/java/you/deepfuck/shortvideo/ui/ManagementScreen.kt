@@ -72,6 +72,7 @@ internal fun ManagementScreen(
     onScanSource: (String) -> Unit,
     onMovieMetadata: (String) -> Unit,
     onSaveSource: (String?, MediaSourceDraft) -> Unit,
+    onDeleteSource: (String) -> Unit,
     onFastStart: () -> Unit,
     onShowLogs: () -> Unit,
     onDismissLogs: () -> Unit,
@@ -80,6 +81,7 @@ internal fun ManagementScreen(
 ) {
     var editingSource by remember { mutableStateOf<MediaLibrarySource?>(null) }
     var sourceDialogOpen by remember { mutableStateOf(false) }
+    var deletingSource by remember { mutableStateOf<MediaLibrarySource?>(null) }
     Column(Modifier.fillMaxSize().background(Canvas).safeDrawingPadding()) {
         Row(
             modifier = Modifier.fillMaxWidth().height(68.dp).padding(horizontal = 8.dp),
@@ -170,12 +172,14 @@ internal fun ManagementScreen(
                                 starting = "scan-${source.id}" in state.adminActions,
                                 metadataStatus = status.movieMetadata,
                                 metadataStarting = "metadata-${source.id}" in state.adminActions,
+                                deleting = "delete-source-${source.id}" in state.adminActions,
                                 onScan = onScanSource,
                                 onMovieMetadata = onMovieMetadata,
                                 onEdit = {
                                     editingSource = source
                                     sourceDialogOpen = true
                                 },
+                                onDelete = { deletingSource = source },
                             )
                         }
                         if (status.sources.isEmpty()) {
@@ -274,6 +278,29 @@ internal fun ManagementScreen(
             },
         )
     }
+    deletingSource?.let { source ->
+        AlertDialog(
+            onDismissRequest = { deletingSource = null },
+            title = { Text("删除媒体源？") },
+            text = {
+                Text(
+                    "将删除“${source.name}”及本地索引的 ${source.videos} 个媒体。网盘原始文件不会被删除。",
+                    color = TextSecondary,
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteSource(source.id)
+                        deletingSource = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = androidx.compose.material3.MaterialTheme.colorScheme.error),
+                ) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { deletingSource = null }) { Text("取消") } },
+            containerColor = Raised,
+        )
+    }
 }
 
 @Composable
@@ -282,9 +309,11 @@ private fun MediaSourceRow(
     starting: Boolean,
     metadataStatus: MovieMetadataStatus,
     metadataStarting: Boolean,
+    deleting: Boolean,
     onScan: (String) -> Unit,
     onMovieMetadata: (String) -> Unit,
     onEdit: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     val busy = source.scan.running || starting
     val metadataBusy = metadataStarting || (
@@ -417,6 +446,13 @@ private fun MediaSourceRow(
                 Icon(Icons.Outlined.Edit, contentDescription = null)
                 Spacer(Modifier.size(6.dp))
                 Text("编辑")
+            }
+            TextButton(
+                onClick = onDelete,
+                enabled = !busy && !metadataBusy && !deleting,
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) {
+                Icon(Icons.Outlined.DeleteOutline, contentDescription = "删除媒体源")
             }
             Spacer(Modifier.weight(1f))
             OutlinedButton(

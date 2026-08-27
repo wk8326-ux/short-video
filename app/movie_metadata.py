@@ -7,6 +7,7 @@ from pathlib import PurePath
 
 _YEAR = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 _TMDB_ID = re.compile(r"\[\s*tmdbid\s*[:=]\s*(\d+)\s*\]", re.IGNORECASE)
+_METATUBE_CODE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{2,12})[-_ ]?(\d{2,6})(?!\d)")
 _TECHNICAL = re.compile(
     r"\b(?:2160p|1080p|720p|576p|480p|4k|8k|uhd|hdr10?\+?|hdr|dv|dolby[ ._-]?vision"
     r"|web[ ._-]?dl|web[ ._-]?rip|blu[ ._-]?ray|brrip|remux|x26[45]|av1|hevc|aac|dts"
@@ -27,6 +28,7 @@ class MovieName:
     normalized_title: str
     year: int | None
     tmdb_id: int | None = None
+    metatube_code: str | None = None
 
 
 def movie_search_candidates(title: str) -> list[str]:
@@ -72,6 +74,12 @@ def parse_movie_filename(name: str) -> MovieName:
     tmdb_id = int(tmdb_match.group(1)) if tmdb_match else None
     if tmdb_match:
         stem = stem[: tmdb_match.start()] + stem[tmdb_match.end():]
+    metatube_match = _METATUBE_CODE.search(stem)
+    metatube_code = (
+        f"{metatube_match.group(1).upper()}-{int(metatube_match.group(2)):03d}"
+        if metatube_match
+        else None
+    )
     year_match = _YEAR.search(stem)
     year = int(year_match.group(1)) if year_match else None
     title = stem[: year_match.start()] if year_match else stem
@@ -86,4 +94,5 @@ def parse_movie_filename(name: str) -> MovieName:
         normalized_title=title.casefold(),
         year=year,
         tmdb_id=tmdb_id,
+        metatube_code=metatube_code,
     )

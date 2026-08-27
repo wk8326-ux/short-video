@@ -153,6 +153,7 @@ fun ShortVideoApp(
                 onScanSource = viewModel::startLibraryScan,
                 onMovieMetadata = viewModel::startMovieMetadata,
                 onSaveSource = viewModel::saveMediaSource,
+                onDeleteSource = viewModel::deleteMediaSource,
                 onFastStart = viewModel::startFastStartCheck,
                 onShowLogs = viewModel::showRuntimeLogs,
                 onDismissLogs = viewModel::dismissRuntimeLogs,

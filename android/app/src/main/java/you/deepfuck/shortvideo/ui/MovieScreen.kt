@@ -542,8 +542,45 @@ private fun MovieDetail(
                     Spacer(Modifier.height(4.dp))
                     Text(it, color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
                 }
+                val hasExtendedMetadata = movie.releaseDate != null || movie.studio != null ||
+                    movie.genres.isNotEmpty() || movie.performers.isNotEmpty() ||
+                    movie.metadataProvider != null
+                if (hasExtendedMetadata) {
+                    Spacer(Modifier.height(24.dp))
+                    Text("资料", color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                    movie.releaseDate?.let { MovieMetadataLine("发行", it) }
+                    movie.studio?.let { MovieMetadataLine("制作", it) }
+                    movie.genres.takeIf { it.isNotEmpty() }?.let {
+                        MovieMetadataLine("类型", it.joinToString(" · "))
+                    }
+                    movie.performers.takeIf { it.isNotEmpty() }?.let {
+                        MovieMetadataLine("演员", it.joinToString(" · "))
+                    }
+                    movie.metadataProvider?.let { provider ->
+                        MovieMetadataLine("资料来源", provider.uppercase())
+                    }
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun MovieMetadataLine(label: String, value: String) {
+    Spacer(Modifier.height(10.dp))
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Text(
+            label,
+            modifier = Modifier.width(64.dp),
+            color = TextFaint,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        Text(
+            value,
+            modifier = Modifier.weight(1f),
+            color = TextSecondary,
+            style = MaterialTheme.typography.bodyMedium,
+        )
     }
 }
 

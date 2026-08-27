@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 import time
@@ -22,6 +23,7 @@ from app.faststart import inspect_mp4_prefix
 from app.media_metadata import mp4_duration_seconds
 from app.media_sources import MediaSourceRegistry
 from app.movie_metadata import movie_search_candidates, parse_movie_filename
+from app.metatube import MetatubeClient
 from app.tmdb import TmdbClient
 from app.settings import Settings
 
@@ -29,7 +31,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.2"
+APP_VERSION = "1.6.0-beta.3"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -359,8 +361,10 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
             }
         )
         try:
-            if not settings.tmdb_api_read_token and not settings.tmdb_api_key:
-                raise RuntimeError("TMDB 未配置 API 令牌")
+            has_tmdb = bool(settings.tmdb_api_read_token or settings.tmdb_api_key)
+            has_metatube = bool(settings.metatube_base_url)
+            if not has_tmdb and not has_metatube:
+                raise RuntimeError("TMDB 或 MetaTube 未配置")
             source_ids = (source,)
             movies = await asyncio.to_thread(
                 database.movie_metadata_candidates,
@@ -372,14 +376,50 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                 read_token=settings.tmdb_api_read_token,
                 api_key=settings.tmdb_api_key,
                 language=settings.tmdb_language,
-            )
+            ) if has_tmdb else None
+            metatube = MetatubeClient(
+                base_url=settings.metatube_base_url,
+                token=settings.metatube_token,
+                provider=settings.metatube_provider,
+            ) if has_metatube else None
             try:
                 for movie in movies:
                     parsed_name = parse_movie_filename(str(movie.get("name") or ""))
                     match = None
-                    if parsed_name.tmdb_id:
+                    metatube_match = None
+                    if parsed_name.metatube_code and metatube:
+                        metatube_match = await metatube.lookup(parsed_name.metatube_code)
+                    if metatube_match is not None:
+                        await asyncio.to_thread(
+                            database.update_movie_metadata,
+                            int(movie["id"]),
+                            display_title=metatube_match.title or movie["display_title"],
+                            original_title=metatube_match.original_title,
+                            year=int(metatube_match.release_date[:4])
+                            if metatube_match.release_date and metatube_match.release_date[:4].isdigit()
+                            else movie.get("year"),
+                            overview=metatube_match.overview,
+                            poster_url=metatube_match.poster_url,
+                            backdrop_url=metatube_match.backdrop_url,
+                            rating=metatube_match.rating,
+                            runtime_minutes=metatube_match.runtime_minutes,
+                            tmdb_id=None,
+                            metadata_provider="metatube",
+                            metatube_provider=metatube_match.provider,
+                            metatube_id=metatube_match.movie_id,
+                            release_date=metatube_match.release_date,
+                            genres=json.dumps(metatube_match.genres, ensure_ascii=False),
+                            performers=json.dumps(metatube_match.performers, ensure_ascii=False),
+                            studio=metatube_match.studio,
+                            match_status="matched",
+                            match_confidence=metatube_match.confidence,
+                        )
+                        movie_metadata_state["matched"] += 1
+                        movie_metadata_state["checked"] += 1
+                        continue
+                    if parsed_name.tmdb_id and client:
                         match = await client.movie_by_id(parsed_name.tmdb_id)
-                    if match is None:
+                    if match is None and client:
                         queries = movie_search_candidates(
                             str(movie.get("normalized_title") or movie.get("display_title") or "")
                         )
@@ -417,13 +457,23 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                             rating=match.rating,
                             runtime_minutes=match.runtime_minutes,
                             tmdb_id=match.tmdb_id,
+                            metadata_provider="tmdb",
+                            metatube_provider=None,
+                            metatube_id=None,
+                            release_date=str(match.year) if match.year else None,
+                            genres="[]",
+                            performers="[]",
+                            studio=None,
                             match_status=match.status,
                             match_confidence=match.confidence,
                         )
                         movie_metadata_state["matched"] += 1
                     movie_metadata_state["checked"] += 1
             finally:
-                await client.close()
+                if client:
+                    await client.close()
+                if metatube:
+                    await metatube.close()
             movie_metadata_state["lastSuccess"] = int(time.time())
         except Exception as exc:
             movie_metadata_state["lastError"] = str(exc)
@@ -574,7 +624,22 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         payload["path"] = row.get("path")
         payload["size"] = row.get("size")
         payload["format"] = row.get("media_format")
+        payload["metadataProvider"] = row.get("metadata_provider")
+        payload["metatubeProvider"] = row.get("metatube_provider")
+        payload["metatubeId"] = row.get("metatube_id")
+        payload["releaseDate"] = row.get("release_date")
+        payload["genres"] = _metadata_list(row.get("genres"))
+        payload["performers"] = _metadata_list(row.get("performers"))
+        payload["studio"] = row.get("studio")
     return payload
+
+
+def _metadata_list(value: Any) -> list[str]:
+    try:
+        decoded = json.loads(str(value or "[]"))
+    except (TypeError, ValueError):
+        return []
+    return [str(item).strip() for item in decoded if str(item).strip()] if isinstance(decoded, list) else []
 
 
 def _client_key(request: Request) -> str:
@@ -783,6 +848,23 @@ async def update_source(source_id: str, payload: MediaSourceRequest) -> dict[str
     return public_source(source)
 
 
+@app.delete("/api/admin/sources/{source_id}")
+async def delete_source(source_id: str) -> dict[str, Any]:
+    existing = await asyncio.to_thread(database.get_media_source, source_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="媒体源不存在")
+    if scan_locks.get(source_id) and scan_locks[source_id].locked():
+        raise HTTPException(status_code=409, detail="媒体源正在扫描，请完成后再删除")
+    if movie_metadata_state["running"] and movie_metadata_state["source"] == source_id:
+        raise HTTPException(status_code=409, detail="电影资料正在刮削，请完成后再删除")
+    deleted = await asyncio.to_thread(database.delete_media_source, source_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="媒体源不存在")
+    await source_registry.reload()
+    await asyncio.to_thread(refresh_source_states)
+    return {"deleted": True, "source": source_id}
+
+
 @app.post("/api/admin/sources/{source_id}/scan", status_code=202)
 async def scan_one_source(source_id: str) -> dict[str, Any]:
     return await start_scan(source=source_id)
@@ -792,8 +874,8 @@ async def scan_one_source(source_id: str) -> dict[str, Any]:
 async def start_movie_metadata(source_id: str, force: bool = False) -> dict[str, Any]:
     if source_id not in source_registry.ids("movie"):
         raise HTTPException(status_code=404, detail="电影媒体源不存在或已停用")
-    if not settings.tmdb_api_read_token and not settings.tmdb_api_key:
-        raise HTTPException(status_code=503, detail="TMDB 未配置 API 令牌")
+    if not settings.tmdb_api_read_token and not settings.tmdb_api_key and not settings.metatube_base_url:
+        raise HTTPException(status_code=503, detail="TMDB 或 MetaTube 未配置")
     if scan_locks.get(source_id) and scan_locks[source_id].locked():
         raise HTTPException(status_code=409, detail="媒体源正在扫描，请完成后再刮削")
     source_summary = await asyncio.to_thread(

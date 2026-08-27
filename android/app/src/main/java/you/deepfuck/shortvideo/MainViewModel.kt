@@ -681,6 +681,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             api.saveMediaSource(sourceId, draft)
         }
 
+    fun deleteMediaSource(sourceId: String) {
+        val source = mutableState.value.adminStatus?.sources?.firstOrNull { it.id == sourceId } ?: return
+        val action = "delete-source-$sourceId"
+        if (action in mutableState.value.adminActions) return
+        mutableState.update { it.copy(adminActions = it.adminActions + action, adminError = null) }
+        viewModelScope.launch {
+            runApi { api.deleteMediaSource(sourceId) }
+                .onSuccess {
+                    if (source.section == LibrarySection.ASMR) {
+                        playback.stop()
+                        stopPlaybackService()
+                        mutableState.update { it.copy(nowPlaying = null, expandedMedia = null) }
+                    }
+                    when (source.section) {
+                        LibrarySection.FEED -> feedLibraryRefresh.markPending()
+                        LibrarySection.ASMR -> refreshAsmrLibrary()
+                        LibrarySection.MOVIE -> refreshMovieLibrary()
+                    }
+                    mutableState.update { it.copy(adminActions = it.adminActions - action) }
+                    loadAdminStatus()
+                }
+                .onFailure { error ->
+                    if (!handleUnauthorized(error)) {
+                        mutableState.update {
+                            it.copy(
+                                adminActions = it.adminActions - action,
+                                adminError = error.message ?: "删除媒体源失败",
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
     fun startFastStartCheck() = runAdminAction("fast-start") { api.startFastStartCheck() }
 
     fun checkForAppUpdate() {

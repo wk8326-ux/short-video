@@ -130,6 +130,13 @@ class LibraryDatabase:
                     rating REAL,
                     runtime_minutes INTEGER,
                     tmdb_id INTEGER,
+                    metadata_provider TEXT,
+                    metatube_provider TEXT,
+                    metatube_id TEXT,
+                    release_date TEXT,
+                    genres TEXT,
+                    performers TEXT,
+                    studio TEXT,
                     match_status TEXT NOT NULL DEFAULT 'pending',
                     match_confidence REAL,
                     scraped_at TEXT,
@@ -140,8 +147,27 @@ class LibraryDatabase:
                     ON movies(source, display_title COLLATE NOCASE);
                 CREATE INDEX IF NOT EXISTS idx_movies_match_status
                     ON movies(source, match_status, updated_at);
+                CREATE TABLE IF NOT EXISTS deleted_media_sources (
+                    id TEXT PRIMARY KEY,
+                    deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             )
+            movie_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(movies)").fetchall()
+            }
+            for name, definition in (
+                ("metadata_provider", "TEXT"),
+                ("metatube_provider", "TEXT"),
+                ("metatube_id", "TEXT"),
+                ("release_date", "TEXT"),
+                ("genres", "TEXT"),
+                ("performers", "TEXT"),
+                ("studio", "TEXT"),
+            ):
+                if name not in movie_columns:
+                    connection.execute(f"ALTER TABLE movies ADD COLUMN {name} {definition}")
 
     @staticmethod
     def _migrate_video_path_uniqueness(connection: sqlite3.Connection) -> None:
@@ -494,7 +520,8 @@ class LibraryDatabase:
         allowed = {
             "display_title", "normalized_title", "original_title", "year", "overview",
             "poster_url", "backdrop_url", "rating", "runtime_minutes", "tmdb_id",
-            "match_status", "match_confidence",
+            "metadata_provider", "metatube_provider", "metatube_id", "release_date",
+            "genres", "performers", "studio", "match_status", "match_confidence",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
@@ -515,6 +542,10 @@ class LibraryDatabase:
     def seed_media_sources(self, sources: Iterable[dict[str, Any]]) -> None:
         records = list(sources)
         with self._lock, self._connect() as connection:
+            deleted_ids = {
+                str(row["id"])
+                for row in connection.execute("SELECT id FROM deleted_media_sources").fetchall()
+            }
             connection.executemany(
                 """
                 INSERT INTO media_sources(
@@ -527,7 +558,7 @@ class LibraryDatabase:
                 )
                 ON CONFLICT(id) DO NOTHING
                 """,
-                [self._source_record(source) for source in records],
+                [self._source_record(source) for source in records if source["id"] not in deleted_ids],
             )
             asmr6 = next((source for source in records if source["id"] == "asmr6"), None)
             if asmr6:
@@ -589,6 +620,24 @@ class LibraryDatabase:
                 [*updates.values(), source_id],
             )
         return self.get_media_source(source_id)
+
+    def delete_media_source(self, source_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT id FROM media_sources WHERE id = ?", (source_id,)
+            ).fetchone()
+            if not existing:
+                connection.rollback()
+                return False
+            connection.execute("DELETE FROM movies WHERE source = ?", (source_id,))
+            connection.execute("DELETE FROM videos WHERE source = ?", (source_id,))
+            connection.execute(
+                "INSERT OR REPLACE INTO deleted_media_sources(id) VALUES(?)", (source_id,)
+            )
+            connection.execute("DELETE FROM media_sources WHERE id = ?", (source_id,))
+            connection.commit()
+        return True
 
     def get_media_source(self, source_id: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as connection:

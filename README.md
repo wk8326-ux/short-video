@@ -11,7 +11,7 @@ The application server never proxies or transcodes media bytes. Both Android and
 
 ## Features
 
-- Three top-level surfaces: short video, long video, and ASMR
+- Four top-level surfaces: short video, long video, ASMR, and movies
 - Guangya duration split at 180 seconds (`< 180` short, `>= 180` long)
 - Vertical swipe playback with adjacent-video preload for Guangya media
 - First-item direct URL prewarming with concurrent AList request deduplication
@@ -24,7 +24,7 @@ The application server never proxies or transcodes media bytes. Both Android and
 - Independent ASMR audio/video background toggles with lock-screen and notification controls
 - Progressive ASMR list rendering, inline sequential audio playback, and remembered list positions
 - ASMR video landscape playback with five-second chrome fade and horizontal seeking
-- Authenticated management view for library rescans and MP4 Fast Start checks
+- Authenticated management view for library rescans, source deletion, movie metadata scraping, and MP4 Fast Start checks
 - Authenticated Android in-app updates with download progress and SHA-256 verification
 - Redacted on-device runtime logs with management-page view, clear, and export actions
 
@@ -110,3 +110,4 @@ Key source settings:
 - `DURATION_BOUNDARY_SECONDS`: Guangya short/long boundary, default `180`.
 - `METADATA_PROBE_BATCH_SIZE`: maximum MP4 duration probes per scan, default `30`.
 - `ASMR_EXTENSIONS`: direct files indexed inside each author directory.
+- `METATUBE_BASE_URL` / `METATUBE_TOKEN`: optional private MetaTube service. Exact numbered media uses it before TMDB; ordinary films remain on TMDB.

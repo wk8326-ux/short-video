@@ -135,6 +135,13 @@ data class MovieItem(
     val path: String? = null,
     val size: Long = 0L,
     val format: String? = null,
+    val metadataProvider: String? = null,
+    val metatubeProvider: String? = null,
+    val metatubeId: String? = null,
+    val releaseDate: String? = null,
+    val genres: List<String> = emptyList(),
+    val performers: List<String> = emptyList(),
+    val studio: String? = null,
     val resumePositionMs: Long = 0L,
 ) {
     val resumeFraction: Float
@@ -178,6 +185,13 @@ data class MovieItem(
             path = value.optNullableString("path"),
             size = value.optLong("size"),
             format = value.optNullableString("format"),
+            metadataProvider = value.optNullableString("metadataProvider"),
+            metatubeProvider = value.optNullableString("metatubeProvider"),
+            metatubeId = value.optNullableString("metatubeId"),
+            releaseDate = value.optNullableString("releaseDate"),
+            genres = value.optStringList("genres"),
+            performers = value.optStringList("performers"),
+            studio = value.optNullableString("studio"),
         )
     }
 }
@@ -324,6 +338,15 @@ data class MediaSourceDraft(
 
 internal fun JSONObject.optNullableString(name: String): String? =
     if (isNull(name)) null else optString(name).takeIf { it.isNotBlank() }
+
+private fun JSONObject.optStringList(name: String): List<String> =
+    optJSONArray(name)?.let { array ->
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optString(index).trim().takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
+    }.orEmpty()
 
 private fun JSONObject.optNullableInt(name: String): Int? =
     if (!has(name) || isNull(name)) null else optInt(name)
