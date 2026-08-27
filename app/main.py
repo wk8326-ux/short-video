@@ -382,13 +382,53 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                 token=settings.metatube_token,
                 provider=settings.metatube_provider,
             ) if has_metatube else None
+            metatube_cache: dict[str, Any] = {}
             try:
                 for movie in movies:
                     parsed_name = parse_movie_filename(str(movie.get("name") or ""))
                     match = None
                     metatube_match = None
                     if parsed_name.metatube_code and metatube:
-                        metatube_match = await metatube.lookup(parsed_name.metatube_code)
+                        code = parsed_name.metatube_code
+                        if code not in metatube_cache:
+                            try:
+                                metatube_cache[code] = await metatube.lookup(code)
+                            except Exception as exc:
+                                logger.warning(
+                                    "MetaTube lookup failed for %s (%s): %s",
+                                    movie.get("name") or movie.get("display_title"),
+                                    code,
+                                    exc,
+                                )
+                                metatube_cache[code] = None
+                        metatube_match = metatube_cache[code]
+                        if metatube_match is None:
+                            # A coded title belongs to MetaTube. Do not send it to
+                            # TMDB, where a coincidental title could be mis-matched.
+                            await asyncio.to_thread(
+                                database.update_movie_metadata,
+                                int(movie["id"]),
+                                display_title=parsed_name.display_title,
+                                normalized_title=parsed_name.normalized_title,
+                                original_title=None,
+                                overview=None,
+                                poster_url=None,
+                                backdrop_url=None,
+                                rating=None,
+                                runtime_minutes=None,
+                                tmdb_id=None,
+                                metadata_provider=None,
+                                metatube_provider=None,
+                                metatube_id=None,
+                                release_date=None,
+                                genres="[]",
+                                performers="[]",
+                                studio=None,
+                                match_status="unmatched",
+                                match_confidence=0.0,
+                            )
+                            movie_metadata_state["checked"] += 1
+                            continue
                     if metatube_match is not None:
                         await asyncio.to_thread(
                             database.update_movie_metadata,

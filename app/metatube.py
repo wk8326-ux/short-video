@@ -67,6 +67,8 @@ class MetatubeClient:
             params={"q": normalized, "provider": self._provider},
             headers=self._headers,
         )
+        if self._is_soft_failure(response.status_code):
+            return None
         response.raise_for_status()
         payload = response.json()
         results = payload.get("data") if isinstance(payload, dict) else payload
@@ -86,12 +88,17 @@ class MetatubeClient:
             f"/v1/movies/{provider}/{encoded_id}",
             headers=self._headers,
         )
-        if response.status_code == 404:
+        if self._is_soft_failure(response.status_code):
             return None
         response.raise_for_status()
         payload = response.json()
         item = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
         return item if isinstance(item, dict) and not item.get("error") else None
+
+    @staticmethod
+    def _is_soft_failure(status_code: int) -> bool:
+        """Treat provider misses/outages as a miss so one title cannot abort a scan."""
+        return status_code == 404 or status_code >= 500
 
 
 def normalize_code(value: str) -> str:

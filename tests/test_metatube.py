@@ -46,6 +46,38 @@ async def test_metatube_lookup_requires_an_exact_number_match():
     assert match.genres == ("剧情", "测试")
 
 
+@pytest.mark.asyncio
+async def test_metatube_lookup_treats_provider_errors_as_an_unmatched_item():
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path.endswith("/HHD-800"):
+            return httpx.Response(500, json={"message": "provider parser failed"})
+        assert request.url.path == "/v1/movies/search"
+        return httpx.Response(404, json={"message": "not found"})
+
+    http_client = httpx.AsyncClient(
+        base_url="http://metatube.test",
+        transport=httpx.MockTransport(handler),
+    )
+    client = MetatubeClient(
+        base_url="http://metatube.test",
+        token="test-token",
+        provider="JavBus",
+        client=http_client,
+    )
+
+    match = await client.lookup("HHD-800")
+    await http_client.aclose()
+
+    assert match is None
+    assert requests == [
+        "/v1/movies/JavBus/HHD-800",
+        "/v1/movies/search",
+    ]
+
+
 def test_movie_filename_extracts_metatube_number_without_affecting_tmdb_id():
     parsed = parse_movie_filename("ABP-485.2024.[tmdbid=32249].mkv")
 
