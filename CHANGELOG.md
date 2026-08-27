@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.4] - 2026-08-27
+
+### Fixed
+
+- Proxy MetaTube movie posters and backdrops through the authenticated application host so JavBus/DMM hotlink protection and mobile-network differences no longer leave matched movies without artwork.
+- Follow image redirects, add provider-compatible request headers, validate image content and size, and cache successful artwork on the client for 24 hours.
+
 ## [1.6.0-beta.2] - 2026-08-24
 
 ### Changed

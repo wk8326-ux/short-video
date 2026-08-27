@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import sqlite3
@@ -10,8 +11,9 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -31,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.3"
+APP_VERSION = "1.6.0-beta.4"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -79,6 +81,10 @@ fast_start_state: dict[str, Any] = {
 }
 fast_start_lock = asyncio.Lock()
 background_tasks: set[asyncio.Task[Any]] = set()
+movie_image_client: httpx.AsyncClient | None = None
+MOVIE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
+MOVIE_IMAGE_CACHE_SECONDS = 24 * 60 * 60
+MOVIE_IMAGE_USER_AGENT = "deepfuck-movie-library/1"
 
 
 def spawn_background(coroutine: Any, *, name: str) -> None:
@@ -524,15 +530,26 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global movie_image_client
     await asyncio.to_thread(database.initialize)
     await source_registry.initialize()
     await asyncio.to_thread(refresh_source_states)
+    movie_image_client = httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=httpx.Timeout(12.0, connect=5.0),
+        limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+        headers={"User-Agent": MOVIE_IMAGE_USER_AGENT},
+    )
     try:
         yield
     finally:
         for task in list(background_tasks):
             task.cancel()
         await asyncio.gather(*background_tasks, return_exceptions=True)
+        image_client = movie_image_client
+        movie_image_client = None
+        if image_client is not None:
+            await image_client.aclose()
         await source_registry.close()
 
 
@@ -642,15 +659,28 @@ def public_source(
 
 
 def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
+    movie_id = int(row["id"])
+    has_metadata_poster = bool(str(row.get("poster_url") or "").strip())
+    has_thumb = bool(str(row.get("thumb") or "").strip())
+    has_backdrop = bool(str(row.get("backdrop_url") or "").strip())
     payload = {
-        "id": int(row["id"]),
+        "id": movie_id,
         "videoId": int(row["video_id"]),
         "title": str(row.get("display_title") or Path(row["name"]).stem),
         "originalTitle": row.get("original_title"),
         "year": row.get("year"),
         "overview": row.get("overview") or "",
-        "posterUrl": row.get("poster_url") or (f"/api/videos/{row['video_id']}/poster" if row.get("thumb") else None),
-        "backdropUrl": row.get("backdrop_url"),
+        # Keep third-party image URLs server-side.  Mobile clients frequently
+        # cannot reach JavBus/DMM CDNs directly or are rejected by hotlink
+        # protection, while the API host is already authenticated and reachable.
+        "posterUrl": (
+            f"/api/movies/{movie_id}/poster"
+            if has_metadata_poster
+            else f"/api/videos/{row['video_id']}/poster"
+            if has_thumb
+            else None
+        ),
+        "backdropUrl": f"/api/movies/{movie_id}/backdrop" if has_backdrop else None,
         "rating": row.get("rating"),
         "runtimeMinutes": row.get("runtime_minutes"),
         "matchStatus": row.get("match_status") or "pending",
@@ -672,6 +702,114 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         payload["performers"] = _metadata_list(row.get("performers"))
         payload["studio"] = row.get("studio")
     return payload
+
+
+def _movie_image_headers(source_url: str) -> dict[str, str]:
+    try:
+        parsed = urlsplit(source_url)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        host = ""
+    headers = {
+        "Accept": "image/avif,image/webp,image/apng,image/jpeg,image/png,image/*;q=0.8",
+        "User-Agent": MOVIE_IMAGE_USER_AGENT,
+    }
+    if host.endswith("javbus.com"):
+        headers["Referer"] = "https://www.javbus.com/"
+    elif host.endswith("dmm.co.jp") or host.endswith("dmm.com"):
+        headers["Referer"] = "https://www.dmm.co.jp/"
+    return headers
+
+
+def _image_media_type(content_type: str, content: bytes) -> str | None:
+    normalized = content_type.split(";", 1)[0].strip().lower()
+    if normalized.startswith("image/"):
+        return normalized
+    # A few CDNs omit Content-Type or return application/octet-stream.  Accept
+    # only well-known image signatures in that case; HTML/error pages remain
+    # rejected instead of being cached as a poster.
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+async def _proxy_movie_image(source_url: Any) -> Response:
+    url = str(source_url or "").strip()
+    try:
+        parsed = urlsplit(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Movie image not found") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=404, detail="Movie image not found")
+
+    client = movie_image_client
+    owns_client = client is None
+    if client is None:
+        client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(12.0, connect=5.0),
+            limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+        )
+    try:
+        try:
+            async with client.stream(
+                "GET",
+                url,
+                headers=_movie_image_headers(url),
+            ) as upstream:
+                if upstream.status_code == 404:
+                    raise HTTPException(status_code=404, detail="Movie image not found")
+                if upstream.status_code >= 400:
+                    raise HTTPException(status_code=502, detail="Movie image upstream failed")
+                content_length = upstream.headers.get("content-length")
+                try:
+                    declared_size = int(content_length) if content_length else None
+                except ValueError:
+                    declared_size = None
+                if declared_size is not None and declared_size > MOVIE_IMAGE_MAX_BYTES:
+                    raise HTTPException(status_code=502, detail="Movie image is too large")
+
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in upstream.aiter_bytes(64 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > MOVIE_IMAGE_MAX_BYTES:
+                        raise HTTPException(status_code=502, detail="Movie image is too large")
+                    chunks.append(chunk)
+                content = b"".join(chunks)
+                media_type = _image_media_type(
+                    upstream.headers.get("content-type", ""),
+                    content,
+                )
+                if not media_type:
+                    raise HTTPException(status_code=502, detail="Movie image upstream returned non-image data")
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            logger.info("Movie image proxy failed for %s: %s", url, exc)
+            raise HTTPException(status_code=502, detail="Movie image upstream unavailable") from exc
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    etag = hashlib.sha256(content).hexdigest()
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Cache-Control": f"private, max-age={MOVIE_IMAGE_CACHE_SECONDS}",
+            "ETag": f'"{etag}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 def _metadata_list(value: Any) -> list[str]:
@@ -1219,6 +1357,32 @@ async def movie_detail(movie_id: int) -> dict[str, Any]:
         name=f"prewarm-movie-play-{row['id']}",
     )
     return public_movie(row, detail=True)
+
+
+async def _movie_image(movie_id: int, field: str) -> Response:
+    row = await asyncio.to_thread(
+        database.get_movie,
+        movie_id,
+        sources=source_registry.ids("movie"),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    source_url = row.get(field)
+    if field == "poster_url" and not source_url:
+        source_url = row.get("thumb")
+    if not source_url:
+        raise HTTPException(status_code=404, detail="Movie image not found")
+    return await _proxy_movie_image(source_url)
+
+
+@app.get("/api/movies/{movie_id}/poster")
+async def movie_poster(movie_id: int) -> Response:
+    return await _movie_image(movie_id, "poster_url")
+
+
+@app.get("/api/movies/{movie_id}/backdrop")
+async def movie_backdrop(movie_id: int) -> Response:
+    return await _movie_image(movie_id, "backdrop_url")
 
 
 @app.get("/api/videos/{video_id}/poster")
