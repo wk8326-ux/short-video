@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.5] - 2026-08-28
+
+### Added
+
+- Use landscape artwork as the primary movie-wall cover, with portrait artwork as a fallback.
+- Persist proxied movie artwork on the server and prewarm the first visible wall items.
+
+### Fixed
+
+- Keep movie-wall artwork requests on the authenticated application origin for reliable mobile loading.
+
 ## [1.6.0-beta.4] - 2026-08-27
 
 ### Fixed

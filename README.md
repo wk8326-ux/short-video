@@ -57,12 +57,12 @@ Android updates are published from `/data/app-update`, which is inside the exist
 
 ```json
 {
-  "versionCode": 163,
-  "versionName": "1.6.0-beta.4",
-  "apkFile": "deepfuck-android-v1.6.0-beta.4.apk",
-  "sha256": "47719a65f40e61394db353a700f948cb9bc40af690dfd5ad1f993632e2321c1f",
+  "versionCode": 164,
+  "versionName": "1.6.0-beta.5",
+  "apkFile": "deepfuck-android-v1.6.0-beta.5.apk",
+  "sha256": "5384ad5a587846f4a838e2dd8b44805f40e7366b26e489920c28d6a92fc2adb3",
   "size": 4211000,
-  "notes": "修复 MetaTube 电影封面在移动端无法加载的问题，并增加同源图片代理和缓存。"
+  "notes": "电影墙优先使用横版封面，并增加服务端封面持久化缓存与首屏预热。"
 }
 ```
 
