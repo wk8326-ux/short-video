@@ -285,7 +285,7 @@ private fun MovieCatalog(
                 onAction = { onQuery("") },
             )
             else -> LazyVerticalGrid(
-                columns = GridCells.Adaptive(104.dp),
+                columns = GridCells.Adaptive(148.dp),
                 state = gridState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 34.dp),
@@ -329,7 +329,7 @@ private fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () 
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(2f / 3f)
+                    .aspectRatio(16f / 9f)
                     .clip(RoundedCornerShape(6.dp))
                     .background(Raised)
                     .border(1.dp, Line, RoundedCornerShape(6.dp)),
@@ -341,7 +341,7 @@ private fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () 
                     tint = TextFaint,
                     modifier = Modifier.size(28.dp),
                 )
-                movie.posterUrl?.let { url ->
+                (movie.wallUrl ?: movie.posterUrl)?.let { url ->
                     AsyncImage(
                         model = url,
                         imageLoader = imageLoader,
@@ -382,7 +382,7 @@ private fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () 
 @Composable
 private fun MovieSkeletonGrid() {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(104.dp),
+        columns = GridCells.Adaptive(148.dp),
         modifier = Modifier.fillMaxSize(),
         userScrollEnabled = false,
         contentPadding = PaddingValues(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 34.dp),
@@ -391,7 +391,7 @@ private fun MovieSkeletonGrid() {
     ) {
         items(9) {
             Column {
-                Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(6.dp)).background(Raised))
+                Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(6.dp)).background(Raised))
                 Spacer(Modifier.height(8.dp))
                 Box(Modifier.fillMaxWidth(0.78f).height(12.dp).clip(RoundedCornerShape(3.dp)).background(RaisedStrong))
                 Spacer(Modifier.height(6.dp))

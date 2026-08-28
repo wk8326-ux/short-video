@@ -42,6 +42,10 @@ def test_movie_images_use_same_origin_proxy_and_follow_redirects(monkeypatch, tm
             follow_redirects=True,
             transport=httpx.MockTransport(image_handler),
         )
+        async def skip_wall_prewarm(rows):
+            return None
+
+        monkeypatch.setattr(main, "prewarm_movie_wall_images", skip_wall_prewarm)
         source_response = client.post(
             "/api/admin/sources",
             headers=headers,
@@ -83,15 +87,26 @@ def test_movie_images_use_same_origin_proxy_and_follow_redirects(monkeypatch, tm
         item = listing.json()["items"][0]
         assert item["posterUrl"] == f"/api/movies/{movie['id']}/poster"
         assert item["backdropUrl"] == f"/api/movies/{movie['id']}/backdrop"
+        assert item["wallUrl"] == item["backdropUrl"]
 
+        requests.clear()
         image = client.get(item["posterUrl"], headers=headers)
         assert image.status_code == 200
         assert image.headers["content-type"] == "image/jpeg"
         assert image.headers["cache-control"] == "private, max-age=86400"
+        assert image.headers["x-movie-image-cache"] == "miss"
         assert image.content.startswith(b"\xff\xd8\xff")
-        assert [request.url.host for request in requests] == ["www.javbus.com", "cdn.example"]
-        assert requests[0].headers["referer"] == "https://www.javbus.com/"
+        poster_requests = [
+            request for request in requests if request.url.host in {"www.javbus.com", "cdn.example"}
+        ]
+        assert [request.url.host for request in poster_requests] == ["www.javbus.com", "cdn.example"]
+        assert poster_requests[0].headers["referer"] == "https://www.javbus.com/"
+        assert list((tmp_path / "movie-images").glob("*.bin"))
 
+        poster_request_count = len(poster_requests)
         mode["value"] = "invalid"
-        invalid = client.get(item["posterUrl"], headers=headers)
-        assert invalid.status_code == 502
+        cached = client.get(item["posterUrl"], headers=headers)
+        assert cached.status_code == 200
+        assert cached.headers["x-movie-image-cache"] == "hit"
+        assert cached.content == image.content
+        assert len([request for request in requests if request.url.host in {"www.javbus.com", "cdn.example"}]) == poster_request_count

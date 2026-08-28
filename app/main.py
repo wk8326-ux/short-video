@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import sqlite3
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -85,6 +87,10 @@ movie_image_client: httpx.AsyncClient | None = None
 MOVIE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 MOVIE_IMAGE_CACHE_SECONDS = 24 * 60 * 60
 MOVIE_IMAGE_USER_AGENT = "deepfuck-movie-library/1"
+MOVIE_IMAGE_CACHE_MAX_BYTES = 128 * 1024 * 1024
+movie_image_cache_dir = Path(settings.database_path).resolve().parent / "movie-images"
+movie_image_cache_locks: dict[str, asyncio.Lock] = {}
+movie_image_cache_guard = threading.RLock()
 
 
 def spawn_background(coroutine: Any, *, name: str) -> None:
@@ -663,6 +669,14 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
     has_metadata_poster = bool(str(row.get("poster_url") or "").strip())
     has_thumb = bool(str(row.get("thumb") or "").strip())
     has_backdrop = bool(str(row.get("backdrop_url") or "").strip())
+    poster_url = (
+        f"/api/movies/{movie_id}/poster"
+        if has_metadata_poster
+        else f"/api/videos/{row['video_id']}/poster"
+        if has_thumb
+        else None
+    )
+    backdrop_url = f"/api/movies/{movie_id}/backdrop" if has_backdrop else None
     payload = {
         "id": movie_id,
         "videoId": int(row["video_id"]),
@@ -673,14 +687,11 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         # Keep third-party image URLs server-side.  Mobile clients frequently
         # cannot reach JavBus/DMM CDNs directly or are rejected by hotlink
         # protection, while the API host is already authenticated and reachable.
-        "posterUrl": (
-            f"/api/movies/{movie_id}/poster"
-            if has_metadata_poster
-            else f"/api/videos/{row['video_id']}/poster"
-            if has_thumb
-            else None
-        ),
-        "backdropUrl": f"/api/movies/{movie_id}/backdrop" if has_backdrop else None,
+        "posterUrl": poster_url,
+        "backdropUrl": backdrop_url,
+        # The wall is intentionally landscape-first. Keep posterUrl and
+        # backdropUrl separate so detail screens retain their existing layout.
+        "wallUrl": backdrop_url or poster_url,
         "rating": row.get("rating"),
         "runtimeMinutes": row.get("runtime_minutes"),
         "matchStatus": row.get("match_status") or "pending",
@@ -739,6 +750,102 @@ def _image_media_type(content_type: str, content: bytes) -> str | None:
     return None
 
 
+def _movie_image_cache_key(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
+def _movie_image_cache_paths(url: str) -> tuple[Path, Path]:
+    key = _movie_image_cache_key(url)
+    return movie_image_cache_dir / f"{key}.bin", movie_image_cache_dir / f"{key}.json"
+
+
+def _read_movie_image_cache(url: str) -> tuple[bytes, str, str] | None:
+    content_path, metadata_path = _movie_image_cache_paths(url)
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        content = content_path.read_bytes()
+        media_type = str(metadata["mediaType"])
+        etag = str(metadata["etag"])
+        if not media_type.startswith("image/") or len(content) > MOVIE_IMAGE_MAX_BYTES:
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    try:
+        os.utime(content_path, None)
+        os.utime(metadata_path, None)
+    except OSError:
+        pass
+    return content, media_type, etag
+
+
+def _prune_movie_image_cache() -> None:
+    try:
+        movie_image_cache_dir.mkdir(parents=True, exist_ok=True)
+        files = list(movie_image_cache_dir.glob("*.bin"))
+        total = sum(path.stat().st_size for path in files if path.is_file())
+        if total <= MOVIE_IMAGE_CACHE_MAX_BYTES:
+            return
+        for path in sorted(files, key=lambda item: item.stat().st_mtime):
+            if total <= MOVIE_IMAGE_CACHE_MAX_BYTES:
+                break
+            try:
+                size = path.stat().st_size
+                path.unlink(missing_ok=True)
+                path.with_suffix(".json").unlink(missing_ok=True)
+                total -= size
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
+def _write_movie_image_cache(url: str, content: bytes, media_type: str, etag: str) -> None:
+    content_path, metadata_path = _movie_image_cache_paths(url)
+    content_tmp: Path | None = None
+    metadata_tmp: Path | None = None
+    try:
+        movie_image_cache_dir.mkdir(parents=True, exist_ok=True)
+        suffix = f".{os.getpid()}.{time.time_ns()}.tmp"
+        content_tmp = content_path.with_name(content_path.name + suffix)
+        metadata_tmp = metadata_path.with_name(metadata_path.name + suffix)
+        content_tmp.write_bytes(content)
+        metadata_tmp.write_text(
+            json.dumps({"mediaType": media_type, "etag": etag}, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(content_tmp, content_path)
+        os.replace(metadata_tmp, metadata_path)
+        _prune_movie_image_cache()
+    except OSError as exc:
+        logger.info("Movie image cache write failed for %s: %s", url, exc)
+    finally:
+        for temporary in (content_tmp, metadata_tmp):
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
+def _movie_image_response(
+    content: bytes,
+    media_type: str,
+    etag: str,
+    *,
+    cache_status: str,
+) -> Response:
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Cache-Control": f"private, max-age={MOVIE_IMAGE_CACHE_SECONDS}",
+            "ETag": f'"{etag}"',
+            "X-Content-Type-Options": "nosniff",
+            "X-Movie-Image-Cache": cache_status,
+        },
+    )
+
+
 async def _proxy_movie_image(source_url: Any) -> Response:
     url = str(source_url or "").strip()
     try:
@@ -748,68 +855,69 @@ async def _proxy_movie_image(source_url: Any) -> Response:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=404, detail="Movie image not found")
 
-    client = movie_image_client
-    owns_client = client is None
-    if client is None:
-        client = httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=httpx.Timeout(12.0, connect=5.0),
-            limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
-        )
-    try:
+    with movie_image_cache_guard:
+        lock = movie_image_cache_locks.setdefault(url, asyncio.Lock())
+    async with lock:
+        cached = await asyncio.to_thread(_read_movie_image_cache, url)
+        if cached:
+            content, media_type, etag = cached
+            return _movie_image_response(content, media_type, etag, cache_status="hit")
+
+        client = movie_image_client
+        owns_client = client is None
+        if client is None:
+            client = httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=httpx.Timeout(12.0, connect=5.0),
+                limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+            )
         try:
-            async with client.stream(
-                "GET",
-                url,
-                headers=_movie_image_headers(url),
-            ) as upstream:
-                if upstream.status_code == 404:
-                    raise HTTPException(status_code=404, detail="Movie image not found")
-                if upstream.status_code >= 400:
-                    raise HTTPException(status_code=502, detail="Movie image upstream failed")
-                content_length = upstream.headers.get("content-length")
-                try:
-                    declared_size = int(content_length) if content_length else None
-                except ValueError:
-                    declared_size = None
-                if declared_size is not None and declared_size > MOVIE_IMAGE_MAX_BYTES:
-                    raise HTTPException(status_code=502, detail="Movie image is too large")
-
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in upstream.aiter_bytes(64 * 1024):
-                    if not chunk:
-                        continue
-                    total += len(chunk)
-                    if total > MOVIE_IMAGE_MAX_BYTES:
+            try:
+                async with client.stream(
+                    "GET",
+                    url,
+                    headers=_movie_image_headers(url),
+                ) as upstream:
+                    if upstream.status_code == 404:
+                        raise HTTPException(status_code=404, detail="Movie image not found")
+                    if upstream.status_code >= 400:
+                        raise HTTPException(status_code=502, detail="Movie image upstream failed")
+                    content_length = upstream.headers.get("content-length")
+                    try:
+                        declared_size = int(content_length) if content_length else None
+                    except ValueError:
+                        declared_size = None
+                    if declared_size is not None and declared_size > MOVIE_IMAGE_MAX_BYTES:
                         raise HTTPException(status_code=502, detail="Movie image is too large")
-                    chunks.append(chunk)
-                content = b"".join(chunks)
-                media_type = _image_media_type(
-                    upstream.headers.get("content-type", ""),
-                    content,
-                )
-                if not media_type:
-                    raise HTTPException(status_code=502, detail="Movie image upstream returned non-image data")
-        except HTTPException:
-            raise
-        except httpx.HTTPError as exc:
-            logger.info("Movie image proxy failed for %s: %s", url, exc)
-            raise HTTPException(status_code=502, detail="Movie image upstream unavailable") from exc
-    finally:
-        if owns_client:
-            await client.aclose()
 
-    etag = hashlib.sha256(content).hexdigest()
-    return Response(
-        content=content,
-        media_type=media_type,
-        headers={
-            "Cache-Control": f"private, max-age={MOVIE_IMAGE_CACHE_SECONDS}",
-            "ETag": f'"{etag}"',
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in upstream.aiter_bytes(64 * 1024):
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        if total > MOVIE_IMAGE_MAX_BYTES:
+                            raise HTTPException(status_code=502, detail="Movie image is too large")
+                        chunks.append(chunk)
+                    content = b"".join(chunks)
+                    media_type = _image_media_type(
+                        upstream.headers.get("content-type", ""),
+                        content,
+                    )
+                    if not media_type:
+                        raise HTTPException(status_code=502, detail="Movie image upstream returned non-image data")
+            except HTTPException:
+                raise
+            except httpx.HTTPError as exc:
+                logger.info("Movie image proxy failed for %s: %s", url, exc)
+                raise HTTPException(status_code=502, detail="Movie image upstream unavailable") from exc
+        finally:
+            if owns_client:
+                await client.aclose()
+
+        etag = hashlib.sha256(content).hexdigest()
+        await asyncio.to_thread(_write_movie_image_cache, url, content, media_type, etag)
+        return _movie_image_response(content, media_type, etag, cache_status="miss")
 
 
 def _metadata_list(value: Any) -> list[str]:
@@ -1125,6 +1233,28 @@ async def prewarm_play_urls(videos: list[dict[str, Any]], *, limit: int = 6) -> 
     await asyncio.gather(*(warm(video) for video in videos[:limit]))
 
 
+async def prewarm_movie_image(source_url: str | None) -> None:
+    if not source_url:
+        return
+    try:
+        await _proxy_movie_image(source_url)
+    except Exception as exc:
+        logger.warning("Movie image prewarm failed for %s: %s", source_url, exc)
+
+
+async def prewarm_movie_wall_images(rows: list[dict[str, Any]], *, limit: int = 6) -> None:
+    """Fill the persistent image cache for the first visible wall items."""
+    semaphore = asyncio.Semaphore(3)
+
+    async def warm(row: dict[str, Any]) -> None:
+        async with semaphore:
+            await prewarm_movie_image(
+                row.get("backdrop_url") or row.get("poster_url") or row.get("thumb")
+            )
+
+    await asyncio.gather(*(warm(row) for row in rows[:limit]))
+
+
 @app.get("/api/feed")
 async def feed(
     limit: int = Query(default=12, ge=1, le=30),
@@ -1332,7 +1462,7 @@ async def movies(
     )
     if offset == 0 and rows:
         spawn_background(
-            prewarm_play_urls(rows),
+            prewarm_movie_wall_images(rows),
             name="prewarm-movie-wall",
         )
     return {

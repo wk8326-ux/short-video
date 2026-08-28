@@ -11,6 +11,7 @@ type MovieItem = {
   overview: string;
   posterUrl: string | null;
   backdropUrl: string | null;
+  wallUrl: string | null;
   rating: number | null;
   runtimeMinutes: number | null;
   matchStatus: "pending" | "matched" | "ambiguous" | "unmatched" | "manual";
@@ -137,10 +138,14 @@ export default function MovieLibrary({ positions, onProgress, onWatched, onUnaut
 
 function MovieCard({ item, onOpen, position }: { item: MovieItem; onOpen: () => void; position?: SavedPosition }) {
   const progress = position && position.duration > 0 ? Math.min(1, position.time / position.duration) : 0;
+  const [imageUrl, setImageUrl] = useState(item.wallUrl ?? item.posterUrl);
+  useEffect(() => {
+    setImageUrl(item.wallUrl ?? item.posterUrl);
+  }, [item.wallUrl, item.posterUrl]);
   return (
     <button className="movie-card" type="button" onClick={onOpen} aria-label={`打开 ${item.title}`}>
       <span className="movie-poster">
-        {item.posterUrl ? <img src={item.posterUrl} alt="" loading="lazy" decoding="async" /> : <span className="movie-poster-placeholder"><Film size={28} aria-hidden="true" /></span>}
+        {imageUrl ? <img src={imageUrl} alt="" loading="lazy" decoding="async" onError={() => { if (imageUrl !== item.posterUrl) setImageUrl(item.posterUrl); else setImageUrl(null); }} /> : <span className="movie-poster-placeholder"><Film size={28} aria-hidden="true" /></span>}
         {progress > 0 && <span className="movie-progress"><span style={{ width: `${progress * 100}%` }} /></span>}
       </span>
       <span className="movie-card-copy"><strong>{item.title}</strong><small>{item.year ?? "年份未知"}</small></span>

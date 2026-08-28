@@ -1142,6 +1142,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         copy(
             posterUrl = posterUrl?.let(api::absoluteUrl),
             backdropUrl = backdropUrl?.let(api::absoluteUrl),
+            wallUrl = wallUrl?.let(api::absoluteUrl),
             resumePositionMs = preferences.position(videoId),
         )
 

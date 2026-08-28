@@ -433,7 +433,7 @@ select:focus-visible {
 
 .movie-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(116px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(208px, 1fr));
   gap: 22px 12px;
   width: min(100%, 1120px);
   margin: 0 auto;
@@ -455,12 +455,18 @@ select:focus-visible {
   position: relative;
   display: block;
   overflow: hidden;
-  aspect-ratio: 2 / 3;
+  aspect-ratio: 16 / 9;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 7px;
   background: #17181b;
   box-shadow: 0 10px 22px rgba(0, 0, 0, 0.22);
   transition: transform 160ms ease-out, border-color 160ms ease-out;
+}
+
+@media (max-width: 640px) {
+  .movie-grid {
+    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  }
 }
 
 .movie-card:active .movie-poster,
