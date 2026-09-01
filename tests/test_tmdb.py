@@ -44,7 +44,7 @@ async def test_search_movie_prefers_exact_title_over_first_result():
     assert match is not None
     assert match.tmdb_id == 10775
     assert match.status == "matched"
-    assert match.poster_url == "https://image.tmdb.org/t/p/w500/poster.jpg"
+    assert match.poster_url == "https://image.tmdb.org/t/p/w780/poster.jpg"
 
 
 @pytest.mark.asyncio

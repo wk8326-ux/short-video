@@ -157,6 +157,7 @@ function MovieDetail({ movie, position, onBack, onProgress, onWatched }: { movie
   const videoRef = useRef<HTMLVideoElement>(null);
   const restored = useRef(false);
   const [playing, setPlaying] = useState(false);
+  const wallUrl = movie.backdropUrl ?? movie.wallUrl;
   useEffect(() => {
     if (!restored.current && videoRef.current && position?.time) {
       videoRef.current.currentTime = position.time;
@@ -166,6 +167,8 @@ function MovieDetail({ movie, position, onBack, onProgress, onWatched }: { movie
   const duration = movie.duration ?? position?.duration ?? 0;
   return (
     <section className="movie-detail" aria-labelledby="movie-detail-title">
+      {wallUrl && <img className="movie-detail-wall" src={wallUrl} alt="" />}
+      <div className="movie-detail-veil" aria-hidden="true" />
       <button className="movie-back" type="button" onClick={onBack}><ArrowLeft size={19} aria-hidden="true" />返回片库</button>
       <div className="movie-detail-hero">
         {movie.backdropUrl && <img className="movie-backdrop" src={movie.backdropUrl} alt="" />}

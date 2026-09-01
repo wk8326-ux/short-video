@@ -318,13 +318,13 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         }
         .memoryCache {
             MemoryCache.Builder(context)
-                .maxSizePercent(0.12)
+                .maxSizePercent(0.18)
                 .build()
         }
         .diskCache {
             DiskCache.Builder()
                 .directory(context.cacheDir.resolve("movie-posters"))
-                .maxSizeBytes(96L * 1024 * 1024)
+                .maxSizeBytes(256L * 1024 * 1024)
                 .build()
         }
         .crossfade(180)

@@ -72,8 +72,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
@@ -323,16 +326,16 @@ private fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () 
             },
         color = Color.Transparent,
         contentColor = TextPrimary,
-        shape = RoundedCornerShape(6.dp),
+        shape = RoundedCornerShape(10.dp),
     ) {
         Column {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(6.dp))
+                    .clip(RoundedCornerShape(10.dp))
                     .background(Raised)
-                    .border(1.dp, Line, RoundedCornerShape(6.dp)),
+                    .border(1.dp, GlassLine, RoundedCornerShape(10.dp)),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -454,6 +457,36 @@ private fun MovieDetail(
         return
     }
 
+    Box(Modifier.fillMaxSize().background(Canvas)) {
+        val wallUrl = movie.backdropUrl ?: movie.wallUrl
+        wallUrl?.let { url ->
+            AsyncImage(
+                model = url,
+                imageLoader = imageLoader,
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = 1.16f
+                        scaleY = 1.16f
+                        alpha = 0.82f
+                    }
+                    .blur(28.dp),
+                contentScale = ContentScale.Crop,
+            )
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to Color.Black.copy(alpha = 0.42f),
+                        0.36f to Canvas.copy(alpha = 0.86f),
+                        0.72f to Canvas,
+                        1f to Canvas,
+                    ),
+                ),
+        )
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(Canvas).safeDrawingPadding(),
         contentPadding = PaddingValues(bottom = 40.dp),
@@ -563,6 +596,7 @@ private fun MovieDetail(
             }
         }
     }
+    }
 }
 
 @Composable
@@ -587,7 +621,7 @@ private fun MovieMetadataLine(label: String, value: String) {
 @Composable
 private fun MovieHero(movie: MovieItem, imageLoader: ImageLoader) {
     Box(
-        modifier = Modifier.fillMaxWidth().height(252.dp).background(CanvasSoft),
+        modifier = Modifier.fillMaxWidth().height(300.dp).background(CanvasSoft),
         contentAlignment = Alignment.Center,
     ) {
         val heroUrl = movie.backdropUrl ?: movie.posterUrl
@@ -599,7 +633,7 @@ private fun MovieHero(movie: MovieItem, imageLoader: ImageLoader) {
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
             )
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.48f)))
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.30f)))
         }
         Box(
             modifier = Modifier

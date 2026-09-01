@@ -35,7 +35,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.5"
+APP_VERSION = "1.6.0-beta.6"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -84,10 +84,10 @@ fast_start_state: dict[str, Any] = {
 fast_start_lock = asyncio.Lock()
 background_tasks: set[asyncio.Task[Any]] = set()
 movie_image_client: httpx.AsyncClient | None = None
-MOVIE_IMAGE_MAX_BYTES = 8 * 1024 * 1024
-MOVIE_IMAGE_CACHE_SECONDS = 24 * 60 * 60
+MOVIE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
+MOVIE_IMAGE_CACHE_SECONDS = 7 * 24 * 60 * 60
 MOVIE_IMAGE_USER_AGENT = "deepfuck-movie-library/1"
-MOVIE_IMAGE_CACHE_MAX_BYTES = 128 * 1024 * 1024
+MOVIE_IMAGE_CACHE_MAX_BYTES = 256 * 1024 * 1024
 movie_image_cache_dir = Path(settings.database_path).resolve().parent / "movie-images"
 movie_image_cache_locks: dict[str, asyncio.Lock] = {}
 movie_image_cache_guard = threading.RLock()
@@ -677,6 +677,12 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         else None
     )
     backdrop_url = f"/api/movies/{movie_id}/backdrop" if has_backdrop else None
+    # A video frame is better than a portrait poster for a landscape wall.
+    wall_url = backdrop_url or (
+        f"/api/videos/{movie_id}/poster"
+        if has_thumb
+        else poster_url
+    )
     payload = {
         "id": movie_id,
         "videoId": int(row["video_id"]),
@@ -691,7 +697,7 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         "backdropUrl": backdrop_url,
         # The wall is intentionally landscape-first. Keep posterUrl and
         # backdropUrl separate so detail screens retain their existing layout.
-        "wallUrl": backdrop_url or poster_url,
+        "wallUrl": wall_url,
         "rating": row.get("rating"),
         "runtimeMinutes": row.get("runtime_minutes"),
         "matchStatus": row.get("match_status") or "pending",
@@ -833,20 +839,26 @@ def _movie_image_response(
     etag: str,
     *,
     cache_status: str,
+    if_none_match: str | None = None,
 ) -> Response:
+    headers = {
+        "Cache-Control": f"private, max-age={MOVIE_IMAGE_CACHE_SECONDS}",
+        "ETag": f'"{etag}"',
+        "X-Content-Type-Options": "nosniff",
+        "X-Movie-Image-Cache": cache_status,
+    }
+    if if_none_match:
+        client_etags = {value.strip().removeprefix("W/").strip('"') for value in if_none_match.split(",")}
+        if etag in client_etags:
+            return Response(status_code=304, headers=headers)
     return Response(
         content=content,
         media_type=media_type,
-        headers={
-            "Cache-Control": f"private, max-age={MOVIE_IMAGE_CACHE_SECONDS}",
-            "ETag": f'"{etag}"',
-            "X-Content-Type-Options": "nosniff",
-            "X-Movie-Image-Cache": cache_status,
-        },
+        headers=headers,
     )
 
 
-async def _proxy_movie_image(source_url: Any) -> Response:
+async def _proxy_movie_image(source_url: Any, if_none_match: str | None = None) -> Response:
     url = str(source_url or "").strip()
     try:
         parsed = urlsplit(url)
@@ -861,7 +873,13 @@ async def _proxy_movie_image(source_url: Any) -> Response:
         cached = await asyncio.to_thread(_read_movie_image_cache, url)
         if cached:
             content, media_type, etag = cached
-            return _movie_image_response(content, media_type, etag, cache_status="hit")
+            return _movie_image_response(
+                content,
+                media_type,
+                etag,
+                cache_status="hit",
+                if_none_match=if_none_match,
+            )
 
         client = movie_image_client
         owns_client = client is None
@@ -917,7 +935,13 @@ async def _proxy_movie_image(source_url: Any) -> Response:
 
         etag = hashlib.sha256(content).hexdigest()
         await asyncio.to_thread(_write_movie_image_cache, url, content, media_type, etag)
-        return _movie_image_response(content, media_type, etag, cache_status="miss")
+        return _movie_image_response(
+            content,
+            media_type,
+            etag,
+            cache_status="miss",
+            if_none_match=if_none_match,
+        )
 
 
 def _metadata_list(value: Any) -> list[str]:
@@ -1489,7 +1513,7 @@ async def movie_detail(movie_id: int) -> dict[str, Any]:
     return public_movie(row, detail=True)
 
 
-async def _movie_image(movie_id: int, field: str) -> Response:
+async def _movie_image(movie_id: int, field: str, request: Request) -> Response:
     row = await asyncio.to_thread(
         database.get_movie,
         movie_id,
@@ -1502,17 +1526,17 @@ async def _movie_image(movie_id: int, field: str) -> Response:
         source_url = row.get("thumb")
     if not source_url:
         raise HTTPException(status_code=404, detail="Movie image not found")
-    return await _proxy_movie_image(source_url)
+    return await _proxy_movie_image(source_url, request.headers.get("if-none-match"))
 
 
 @app.get("/api/movies/{movie_id}/poster")
-async def movie_poster(movie_id: int) -> Response:
-    return await _movie_image(movie_id, "poster_url")
+async def movie_poster(movie_id: int, request: Request) -> Response:
+    return await _movie_image(movie_id, "poster_url", request)
 
 
 @app.get("/api/movies/{movie_id}/backdrop")
-async def movie_backdrop(movie_id: int) -> Response:
-    return await _movie_image(movie_id, "backdrop_url")
+async def movie_backdrop(movie_id: int, request: Request) -> Response:
+    return await _movie_image(movie_id, "backdrop_url", request)
 
 
 @app.get("/api/videos/{video_id}/poster")

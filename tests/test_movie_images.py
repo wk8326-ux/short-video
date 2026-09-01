@@ -89,11 +89,17 @@ def test_movie_images_use_same_origin_proxy_and_follow_redirects(monkeypatch, tm
         assert item["backdropUrl"] == f"/api/movies/{movie['id']}/backdrop"
         assert item["wallUrl"] == item["backdropUrl"]
 
+        row = main.database.movies(sources=(source_id,))[0]
+        row["backdrop_url"] = ""
+        row["thumb"] = "https://thumbs.example/frame.jpg"
+        fallback_payload = main.public_movie(row)
+        assert fallback_payload["wallUrl"] == f"/api/videos/{movie['video_id']}/poster"
+
         requests.clear()
         image = client.get(item["posterUrl"], headers=headers)
         assert image.status_code == 200
         assert image.headers["content-type"] == "image/jpeg"
-        assert image.headers["cache-control"] == "private, max-age=86400"
+        assert image.headers["cache-control"] == "private, max-age=604800"
         assert image.headers["x-movie-image-cache"] == "miss"
         assert image.content.startswith(b"\xff\xd8\xff")
         poster_requests = [
@@ -102,6 +108,13 @@ def test_movie_images_use_same_origin_proxy_and_follow_redirects(monkeypatch, tm
         assert [request.url.host for request in poster_requests] == ["www.javbus.com", "cdn.example"]
         assert poster_requests[0].headers["referer"] == "https://www.javbus.com/"
         assert list((tmp_path / "movie-images").glob("*.bin"))
+
+        not_modified = client.get(
+            item["posterUrl"],
+            headers={**headers, "If-None-Match": image.headers["etag"]},
+        )
+        assert not_modified.status_code == 304
+        assert not_modified.headers["x-movie-image-cache"] == "hit"
 
         poster_request_count = len(poster_requests)
         mode["value"] = "invalid"

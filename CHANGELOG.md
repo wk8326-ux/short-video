@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.6] - 2026-09-01
+
+### Changed
+
+- Use higher-resolution TMDB posters and original-quality backdrops for the movie detail experience.
+- Render the Android and PWA movie detail pages with a full-screen blurred backdrop and softer content veil.
+- Keep the landscape-first movie wall on video-frame artwork when no backdrop is available.
+- Increase movie artwork caches on the server and Android client, with ETag revalidation for PWA image requests.
+
 ## [1.6.0-beta.5] - 2026-08-28
 
 ### Added
