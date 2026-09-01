@@ -35,7 +35,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.6"
+APP_VERSION = "1.6.0-beta.7"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -677,12 +677,10 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         else None
     )
     backdrop_url = f"/api/movies/{movie_id}/backdrop" if has_backdrop else None
-    # A video frame is better than a portrait poster for a landscape wall.
-    wall_url = backdrop_url or (
-        f"/api/videos/{movie_id}/poster"
-        if has_thumb
-        else poster_url
-    )
+    # JavBus cover_url is the primary landscape wall image. The tiny
+    # thumb_url remains separately available as backdrop_url and is used
+    # only as the blurred detail-page background.
+    wall_url = poster_url or backdrop_url
     payload = {
         "id": movie_id,
         "videoId": int(row["video_id"]),

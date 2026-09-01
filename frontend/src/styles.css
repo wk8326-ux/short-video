@@ -559,9 +559,9 @@ select:focus-visible {
   width: 100vw;
   height: 100lvh;
   object-fit: cover;
-  opacity: 0.82;
-  filter: blur(28px) saturate(0.92);
-  transform: scale(1.16);
+  opacity: 0.72;
+  filter: blur(34px) saturate(0.94);
+  transform: scale(1.24);
   pointer-events: none;
 }
 
@@ -600,23 +600,7 @@ select:focus-visible {
   margin: 8px auto 0;
   border: 1px solid var(--line);
   border-radius: 9px;
-  background: #151619;
-}
-
-.movie-backdrop {
-  position: absolute;
-  z-index: -1;
-  inset: 0;
-  opacity: 0.34;
-  filter: saturate(0.82);
-}
-
-.movie-detail-hero::after {
-  position: absolute;
-  z-index: -1;
-  inset: 0;
-  background: linear-gradient(90deg, rgba(10, 11, 12, 0.96), rgba(10, 11, 12, 0.62) 60%, rgba(10, 11, 12, 0.82));
-  content: "";
+  background: rgba(14, 15, 17, 0.56);
 }
 
 .movie-detail-copy {
@@ -628,9 +612,9 @@ select:focus-visible {
 }
 
 .movie-detail-poster {
-  flex: 0 0 88px;
-  width: 88px;
-  aspect-ratio: 2 / 3;
+  flex: 0 0 168px;
+  width: 168px;
+  aspect-ratio: 16 / 9;
   overflow: hidden;
   display: grid;
   place-items: center;

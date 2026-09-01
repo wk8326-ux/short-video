@@ -458,8 +458,8 @@ private fun MovieDetail(
     }
 
     Box(Modifier.fillMaxSize().background(Canvas)) {
-        val wallUrl = movie.backdropUrl ?: movie.wallUrl
-        wallUrl?.let { url ->
+        val detailBackgroundUrl = movie.backdropUrl ?: movie.wallUrl ?: movie.posterUrl
+        detailBackgroundUrl?.let { url ->
             AsyncImage(
                 model = url,
                 imageLoader = imageLoader,
@@ -467,11 +467,11 @@ private fun MovieDetail(
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
-                        scaleX = 1.16f
-                        scaleY = 1.16f
-                        alpha = 0.82f
+                        scaleX = 1.24f
+                        scaleY = 1.24f
+                        alpha = 0.72f
                     }
-                    .blur(28.dp),
+                    .blur(34.dp),
                 contentScale = ContentScale.Crop,
             )
         }
@@ -488,7 +488,7 @@ private fun MovieDetail(
                 ),
         )
     LazyColumn(
-        modifier = Modifier.fillMaxSize().background(Canvas).safeDrawingPadding(),
+        modifier = Modifier.fillMaxSize().safeDrawingPadding(),
         contentPadding = PaddingValues(bottom = 40.dp),
     ) {
         item {
@@ -621,27 +621,17 @@ private fun MovieMetadataLine(label: String, value: String) {
 @Composable
 private fun MovieHero(movie: MovieItem, imageLoader: ImageLoader) {
     Box(
-        modifier = Modifier.fillMaxWidth().height(300.dp).background(CanvasSoft),
+        modifier = Modifier.fillMaxWidth().background(CanvasSoft.copy(alpha = 0.62f)),
         contentAlignment = Alignment.Center,
     ) {
-        val heroUrl = movie.backdropUrl ?: movie.posterUrl
-        heroUrl?.let {
-            AsyncImage(
-                model = it,
-                imageLoader = imageLoader,
-                contentDescription = null,
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop,
-            )
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.30f)))
-        }
         Box(
             modifier = Modifier
-                .height(176.dp)
-                .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(6.dp))
+                .fillMaxWidth(0.72f)
+                .aspectRatio(16f / 9f)
+                .padding(vertical = 18.dp)
+                .clip(RoundedCornerShape(8.dp))
                 .background(Raised)
-                .border(1.dp, GlassLine, RoundedCornerShape(6.dp)),
+                .border(1.dp, GlassLine, RoundedCornerShape(8.dp)),
             contentAlignment = Alignment.Center,
         ) {
             Icon(Icons.Outlined.Movie, contentDescription = null, tint = TextFaint, modifier = Modifier.size(30.dp))

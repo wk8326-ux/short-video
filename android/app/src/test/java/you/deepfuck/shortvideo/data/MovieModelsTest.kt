@@ -27,7 +27,7 @@ class MovieModelsTest {
                   "overview": "First contact.",
                   "posterUrl": "/poster.jpg",
                   "backdropUrl": "https://image.example/backdrop.jpg",
-                  "wallUrl": "/api/movies/7/backdrop",
+                  "wallUrl": "/api/movies/7/poster",
                   "rating": 7.6,
                   "runtimeMinutes": 116,
                   "matchStatus": "matched",
@@ -49,7 +49,7 @@ class MovieModelsTest {
         assertEquals(2016, movie.year)
         assertEquals(7.6, movie.rating ?: 0.0, 0.001)
         assertEquals("mkv", movie.format)
-        assertEquals("/api/movies/7/backdrop", movie.wallUrl)
+        assertEquals("/api/movies/7/poster", movie.wallUrl)
         assertEquals(42L, movie.asMediaEntry().id)
         assertFalse(movie.asMediaEntry().isAudio)
     }

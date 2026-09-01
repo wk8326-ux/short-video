@@ -87,10 +87,11 @@ def test_movie_images_use_same_origin_proxy_and_follow_redirects(monkeypatch, tm
         item = listing.json()["items"][0]
         assert item["posterUrl"] == f"/api/movies/{movie['id']}/poster"
         assert item["backdropUrl"] == f"/api/movies/{movie['id']}/backdrop"
-        assert item["wallUrl"] == item["backdropUrl"]
+        assert item["wallUrl"] == item["posterUrl"]
 
         row = main.database.movies(sources=(source_id,))[0]
         row["backdrop_url"] = ""
+        row["poster_url"] = ""
         row["thumb"] = "https://thumbs.example/frame.jpg"
         fallback_payload = main.public_movie(row)
         assert fallback_payload["wallUrl"] == f"/api/videos/{movie['video_id']}/poster"

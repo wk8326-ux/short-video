@@ -157,7 +157,7 @@ function MovieDetail({ movie, position, onBack, onProgress, onWatched }: { movie
   const videoRef = useRef<HTMLVideoElement>(null);
   const restored = useRef(false);
   const [playing, setPlaying] = useState(false);
-  const wallUrl = movie.backdropUrl ?? movie.wallUrl;
+  const detailBackgroundUrl = movie.backdropUrl ?? movie.wallUrl ?? movie.posterUrl;
   useEffect(() => {
     if (!restored.current && videoRef.current && position?.time) {
       videoRef.current.currentTime = position.time;
@@ -167,11 +167,10 @@ function MovieDetail({ movie, position, onBack, onProgress, onWatched }: { movie
   const duration = movie.duration ?? position?.duration ?? 0;
   return (
     <section className="movie-detail" aria-labelledby="movie-detail-title">
-      {wallUrl && <img className="movie-detail-wall" src={wallUrl} alt="" />}
+      {detailBackgroundUrl && <img className="movie-detail-wall" src={detailBackgroundUrl} alt="" />}
       <div className="movie-detail-veil" aria-hidden="true" />
       <button className="movie-back" type="button" onClick={onBack}><ArrowLeft size={19} aria-hidden="true" />返回片库</button>
       <div className="movie-detail-hero">
-        {movie.backdropUrl && <img className="movie-backdrop" src={movie.backdropUrl} alt="" />}
         <div className="movie-detail-copy">
           <div className="movie-detail-poster">{movie.posterUrl ? <img src={movie.posterUrl} alt="" /> : <Film size={34} aria-hidden="true" />}</div>
           <div><p className="section-label">电影详情</p><h1 id="movie-detail-title">{movie.title}</h1><p className="movie-meta">{movie.year ?? "年份未知"}{movie.rating ? ` · ${movie.rating.toFixed(1)} 分` : ""}</p></div>

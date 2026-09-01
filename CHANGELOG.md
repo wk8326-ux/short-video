@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.7] - 2026-09-01
+
+### Changed
+
+- Use the higher-resolution JavBus `cover_url` as the primary landscape movie-wall image.
+- Use the smaller `thumb_url` only as the blurred detail-page background, removing image overlap and blurry wall artwork.
+- Strip duplicate backdrop layers from the Android and PWA detail heroes for a single clean visual layer.
+
 ## [1.6.0-beta.6] - 2026-09-01
 
 ### Changed
