@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>deepfuck · 电影墙示意</title>
+  <style>
+    :root{color-scheme:dark;--ink:#f3f5f4;--muted:#9da6a4;--line:rgba(255,255,255,.14);--glass:rgba(22,27,28,.72);--accent:#e15b62}*{box-sizing:border-box}body{margin:0;background:#080a0b;color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}button{font:inherit;color:inherit} .page{min-height:100vh;padding:28px clamp(18px,5vw,76px) 70px;background:radial-gradient(900px 500px at 80% -10%,rgba(128,64,70,.22),transparent 65%),#080a0b}.top{display:flex;align-items:center;justify-content:space-between;gap:18px;max-width:1380px;margin:auto}.brand{letter-spacing:.18em;font-size:12px;color:#c8cfcc}.tabs{display:flex;gap:26px;color:var(--muted);font-size:14px}.tabs b{color:#fff;position:relative}.tabs b:after{content:"";position:absolute;left:0;right:0;height:2px;bottom:-11px;background:var(--accent);border-radius:2px}.tools{display:flex;gap:10px}.tool{border:1px solid var(--line);background:rgba(255,255,255,.06);border-radius:10px;padding:9px 12px;color:var(--muted);cursor:pointer}.heading{max-width:1380px;margin:68px auto 28px}.eyebrow{color:var(--accent);font-size:11px;letter-spacing:.2em;text-transform:uppercase}.heading h1{font-size:clamp(32px,5vw,64px);font-weight:500;letter-spacing:-.04em;margin:9px 0}.heading p{color:var(--muted);max-width:520px;margin:0;line-height:1.6}.wall{max-width:1380px;margin:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:18px}.movie{border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.045);padding:7px;border-radius:12px;cursor:pointer;transition:transform .25s,border-color .25s,background .25s}.movie:hover{transform:translateY(-5px);border-color:rgba(225,91,98,.7);background:rgba(255,255,255,.08)}.cover{aspect-ratio:16/10;overflow:hidden;border-radius:8px;background:linear-gradient(135deg,#24292a,#101314);position:relative}.cover img{width:100%;height:100%;object-fit:cover;display:block}.cover .empty{position:absolute;inset:0;display:grid;place-items:center;color:#707876;font-size:12px;letter-spacing:.08em}.movie h3{font-size:14px;font-weight:500;margin:12px 8px 3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.movie small{display:block;color:var(--muted);font-size:12px;margin:0 8px 9px}.detail{display:none;position:relative;min-height:100vh;overflow:hidden}.detail.show{display:block}.detail-bg{position:absolute;inset:-30px;background:center/cover no-repeat;filter:blur(30px);transform:scale(1.14);opacity:.48}.detail:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(8,10,11,.96) 0%,rgba(8,10,11,.75) 48%,rgba(8,10,11,.4) 100%)}.detail-content{position:relative;z-index:1;max-width:1200px;margin:auto;padding:42px clamp(20px,6vw,90px);min-height:100vh;display:flex;flex-direction:column;justify-content:center}.back{align-self:flex-start;border:1px solid var(--line);background:rgba(255,255,255,.08);border-radius:10px;padding:9px 14px;cursor:pointer;margin-bottom:clamp(60px,12vh,130px)}.detail-grid{display:grid;grid-template-columns:minmax(250px,430px) 1fr;gap:clamp(28px,6vw,90px);align-items:center}.detail-cover{aspect-ratio:16/10;border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.2);box-shadow:0 24px 70px rgba(0,0,0,.45)}.detail-cover img{width:100%;height:100%;object-fit:cover}.detail-copy .eyebrow{margin-bottom:14px}.detail-copy h2{font-size:clamp(30px,5vw,58px);font-weight:500;letter-spacing:-.04em;margin:0 0 15px}.facts{color:#c1c8c5;font-size:13px;display:flex;gap:14px;flex-wrap:wrap}.overview{color:#b2bbb8;line-height:1.75;max-width:600px;margin:26px 0 30px}.play{border:0;background:var(--accent);border-radius:10px;padding:13px 21px;cursor:pointer;font-weight:600}.note{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);color:#85908c;font-size:12px}@media(max-width:680px){.top{align-items:flex-start}.tabs{gap:12px}.tools{display:none}.heading{margin-top:52px}.wall{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.detail-grid{grid-template-columns:1fr}.detail-content{padding-top:28px}.back{margin-bottom:32px}.detail-cover{max-width:520px}}
+    /* Direction B: artwork-first wall and portrait detail backdrop. */
+    .movie{border:0;background:transparent;padding:0;border-radius:0}
+    .movie:hover{transform:translateY(-4px);background:transparent}
+    .movie .cover{border-radius:12px}
+    .movie h3,.movie small{margin-left:2px;margin-right:2px}
+    .detail-bg{inset:0;opacity:1;filter:none;transform:none;background-position:center top}
+    .detail:after{display:none}
+    .detail:before{content:"";position:absolute;inset:0;z-index:0;background:linear-gradient(to bottom,rgba(8,10,11,0) 18%,rgba(8,10,11,.04) 34%,rgba(8,10,11,.78) 65%,rgba(8,10,11,.99) 94%);pointer-events:none}
+    .detail-content{max-width:760px;padding:28px clamp(20px,6vw,54px) 42px;justify-content:flex-end}
+    .detail-grid{display:block}.detail-cover{display:none}
+    .back{top:28px;left:clamp(20px,6vw,54px);border-color:rgba(255,255,255,.24);background:rgba(8,10,11,.28);backdrop-filter:blur(14px)}
+    .detail-copy h2{font-size:clamp(30px,8vw,58px)}
+    @media(max-width:680px){.wall{gap:16px}.detail-content{padding-top:28px}}
+    .detail{isolation:isolate}
+    .detail-bg{z-index:0}
+    .detail:before{z-index:1}
+    .detail-content{z-index:2;min-height:100svh;padding-top:48vh}
+    .back{position:absolute;margin:0;min-height:48px}
+    .detail-copy h2{font-size:36px;letter-spacing:0}
+    .detail-copy .play,.detail-copy .tool{min-height:48px;margin-bottom:8px}
+    body:has(.detail.show) .note{display:none}
+    @media(min-width:681px){.detail.show{max-width:480px;margin:auto;min-height:100svh}}
+  </style>
+</head>
+<body>
+  <section id="wallPage" class="page">
+    <header class="top"><span class="brand">DEEPFUCK / LIBRARY</span><nav class="tabs"><b>电影</b><span>短视频</span><span>长视频</span><span>ASMR</span></nav><div class="tools"><button class="tool">⌕ 搜索</button><button class="tool">↕ 排序</button></div></header>
+    <div class="heading"><div class="eyebrow">MOVIE WALL · 42 TITLES</div><h1>今晚看什么</h1><p>有封面的影片优先呈现。没有匹配到封面的媒体保留在墙面末尾，以统一占位保持版面完整。</p></div>
+    <main class="wall">
+      <article class="movie" data-title="SMA-554"><div class="cover"><img src="../metatube-images/sma554-cover.jpg" alt="SMA-554"></div><h3>SMA-554</h3><small>2024 · 影片</small></article>
+      <article class="movie" data-title="夜航之后"><div class="cover"><img src="../metatube-images/sma554-cover.jpg" alt="夜航之后"></div><h3>夜航之后</h3><small>2023 · 7.8 分</small></article>
+      <article class="movie" data-title="潮汐房间"><div class="cover"><img src="../metatube-images/sma554-cover.jpg" alt="潮汐房间"></div><h3>潮汐房间</h3><small>2022 · 6.9 分</small></article>
+      <article class="movie" data-title="未匹配影片"><div class="cover"><span class="empty">NO ARTWORK</span></div><h3>未匹配影片</h3><small>等待刮削</small></article>
+    </main>
+  </section>
+  <section id="detailPage" class="detail"><div id="detailBg" class="detail-bg"></div><div class="detail-content"><button class="back" id="back">← 返回电影墙</button><div class="detail-grid"><div class="detail-copy"><div class="eyebrow">MOVIE DETAIL · METATUBE · COVER CROP</div><h2 id="detailTitle">SMA-554</h2><div class="facts"><span>2024</span><span>片长 01:58:42</span><span>JavBus</span></div><p class="overview">详情页采用 cover 的右半区域做全屏裁剪，避免 147×200 的 thumb 放大后模糊。文字位于下方渐变遮罩之上，遮罩从画面中部自然加深，保证可读性。</p><button class="play">▷ 播放影片</button><button class="tool" id="compare" style="margin-left:10px">切换 thumb 对照</button></div></div></div></section>
+  <div class="note">示意稿 · 点击任意电影卡片查看详情页</div>
+  <script>const wall=document.querySelector('#wallPage'),detail=document.querySelector('#detailPage'),title=document.querySelector('#detailTitle'),bg=document.querySelector('#detailBg'),compare=document.querySelector('#compare');let thumbMode=false;function setDetailImage(){bg.style.backgroundImage=`url("../metatube-images/${thumbMode?'sma554-thumb.jpg':'sma554-cover.jpg'}")`;bg.style.backgroundPosition=thumbMode?'center top':'75% center';bg.style.backgroundSize='cover';document.querySelector('.eyebrow').textContent=thumbMode?'MOVIE DETAIL · THUMB ORIGINAL 147×200':'MOVIE DETAIL · COVER CROP · 800×537';compare.textContent=thumbMode?'切换 cover 裁剪':'切换 thumb 对照'}document.querySelectorAll('.movie').forEach(card=>card.addEventListener('click',()=>{title.textContent=card.dataset.title;thumbMode=false;setDetailImage();wall.style.display='none';detail.classList.add('show')}));compare.addEventListener('click',()=>{thumbMode=!thumbMode;setDetailImage()});document.querySelector('#back').addEventListener('click',()=>{detail.classList.remove('show');wall.style.display='block'});</script>
+  <script>
+    // Keep the detail label local and focus on the front of the wraparound cover.
+    setDetailImage = function () {
+      bg.style.backgroundImage = `url("../metatube-images/${thumbMode ? 'sma554-thumb.jpg' : 'sma554-cover.jpg'}")`;
+      bg.style.backgroundPosition = thumbMode ? 'center top' : 'right center';
+      bg.style.backgroundSize = 'cover';
+      detail.querySelector('.eyebrow').textContent = thumbMode ? 'THUMB · 147 × 200' : 'COVER · 右侧取景';
+      compare.textContent = thumbMode ? '切换 cover 裁剪' : '切换 thumb 对照';
+    };
+  </script>
+</body>
+</html>

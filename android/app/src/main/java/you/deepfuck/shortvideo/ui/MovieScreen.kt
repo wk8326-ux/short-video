@@ -458,7 +458,9 @@ private fun MovieDetail(
     }
 
     Box(Modifier.fillMaxSize().background(Canvas)) {
-        val detailBackgroundUrl = movie.backdropUrl ?: movie.wallUrl ?: movie.posterUrl
+        // Use the high-resolution landscape cover as the detail artwork. The
+        // small thumb/backdrop image is not suitable for full-screen scaling.
+        val detailBackgroundUrl = movie.wallUrl ?: movie.posterUrl ?: movie.backdropUrl
         detailBackgroundUrl?.let { url ->
             AsyncImage(
                 model = url,
@@ -467,12 +469,11 @@ private fun MovieDetail(
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
-                        scaleX = 1.24f
-                        scaleY = 1.24f
-                        alpha = 0.72f
-                    }
-                    .blur(34.dp),
+                        scaleX = 1.16f
+                        scaleY = 1.16f
+                    },
                 contentScale = ContentScale.Crop,
+                alignment = Alignment.CenterEnd,
             )
         }
         Box(
@@ -480,9 +481,10 @@ private fun MovieDetail(
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
-                        0f to Color.Black.copy(alpha = 0.42f),
-                        0.36f to Canvas.copy(alpha = 0.86f),
-                        0.72f to Canvas,
+                        0f to Color.Transparent,
+                        0.32f to Color.Black.copy(alpha = 0.04f),
+                        0.66f to Canvas.copy(alpha = 0.78f),
+                        0.94f to Canvas.copy(alpha = 0.98f),
                         1f to Canvas,
                     ),
                 ),
@@ -621,29 +623,24 @@ private fun MovieMetadataLine(label: String, value: String) {
 @Composable
 private fun MovieHero(movie: MovieItem, imageLoader: ImageLoader) {
     Box(
-        modifier = Modifier.fillMaxWidth().background(CanvasSoft.copy(alpha = 0.62f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+            .background(Color.Transparent),
         contentAlignment = Alignment.Center,
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(0.72f)
-                .aspectRatio(16f / 9f)
-                .padding(vertical = 18.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Raised)
-                .border(1.dp, GlassLine, RoundedCornerShape(8.dp)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(Icons.Outlined.Movie, contentDescription = null, tint = TextFaint, modifier = Modifier.size(30.dp))
-            movie.posterUrl?.let {
-                AsyncImage(
-                    model = it,
-                    imageLoader = imageLoader,
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
-                )
-            }
+        Icon(Icons.Outlined.Movie, contentDescription = null, tint = TextFaint, modifier = Modifier.size(30.dp))
+        (movie.wallUrl ?: movie.posterUrl)?.let {
+            AsyncImage(
+                model = it,
+                imageLoader = imageLoader,
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { scaleX = 1.16f; scaleY = 1.16f },
+                contentScale = ContentScale.Crop,
+                alignment = Alignment.CenterEnd,
+            )
         }
     }
 }
