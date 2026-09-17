@@ -27,6 +27,7 @@ from app.database import LibraryDatabase
 from app.faststart import inspect_mp4_prefix
 from app.media_metadata import mp4_duration_seconds
 from app.media_sources import MediaSourceRegistry
+from app.scanner import ResumableScanner, initial_steps
 from app.movie_metadata import movie_search_candidates, parse_movie_filename
 from app.metatube import MetatubeClient
 from app.tmdb import TmdbClient
@@ -124,23 +125,73 @@ def refresh_scan_summary() -> None:
     )
 
 
+def empty_source_scan_state() -> dict[str, Any]:
+    return {
+        "running": False,
+        "lastSuccess": None,
+        "lastError": None,
+        "directories": 0,
+        "status": None,
+        "resumed": False,
+        "directoriesTotal": 0,
+        "directoriesPending": 0,
+        "directoriesFailed": 0,
+        "filesDiscovered": 0,
+        "pendingErrors": [],
+    }
+
+
+def apply_scan_progress(state: dict[str, Any], progress: dict[str, Any]) -> None:
+    state["directories"] = int(progress.get("directories_completed") or 0)
+    state["directoriesTotal"] = int(progress.get("directories_total") or 0)
+    state["directoriesPending"] = int(progress.get("directories_pending") or 0)
+    state["directoriesFailed"] = int(progress.get("directories_failed") or 0)
+    state["filesDiscovered"] = int(progress.get("files_discovered") or 0)
+    errors = progress.get("errors")
+    if errors:
+        state["pendingErrors"] = [str(error) for error in errors][:5]
+
+
 def refresh_source_states() -> None:
     current_ids: set[str] = set()
+    jobs = database.source_scan_states()
     for source in database.list_media_sources():
         source_id = str(source["id"])
         current_ids.add(source_id)
         previous = scan_state["sources"].get(source_id, {})
-        scan_state["sources"][source_id] = {
-            "running": bool(previous.get("running", False)),
-            "lastSuccess": source.get("last_scan_success"),
-            "lastError": source.get("last_scan_error"),
-            "directories": int(source.get("directories") or 0),
-        }
+        state = empty_source_scan_state()
+        state["running"] = bool(previous.get("running", False))
+        state["lastSuccess"] = source.get("last_scan_success")
+        job = jobs.get(source_id) or {}
+        error = job.get("error") or source.get("last_scan_error")
+        state["status"] = job.get("status")
+        state["lastError"] = error
+        state["directories"] = int(source.get("directories") or 0)
+        if error:
+            state["pendingErrors"] = [str(error)]
+        if job and not state["running"]:
+            apply_scan_progress(
+                state,
+                database.scan_step_progress(
+                    job_id=str(job["id"]),
+                    source=source_id,
+                    marker=str(job["marker"]),
+                ),
+            )
+        scan_state["sources"][source_id] = state
         scan_locks.setdefault(source_id, asyncio.Lock())
     for source_id in set(scan_state["sources"]) - current_ids:
         scan_state["sources"].pop(source_id, None)
         scan_locks.pop(source_id, None)
     refresh_scan_summary()
+
+
+def _scan_job_matches(job: dict[str, Any], config: dict[str, Any]) -> bool:
+    return (
+        str(job["base_url"]) == str(config["base_url"])
+        and str(job["root_path"]) == str(config["root_path"])
+        and str(job["scan_mode"]) == str(config["scan_mode"])
+    )
 
 
 async def scan_source(source: str) -> bool:
@@ -152,74 +203,122 @@ async def scan_source(source: str) -> bool:
     if lock.locked():
         return False
     async with lock:
+        config = runtime.config
         source_state = scan_state["sources"].setdefault(
-            source,
-            {"running": False, "lastSuccess": None, "lastError": None, "directories": 0},
+            source, empty_source_scan_state()
         )
         source_state["running"] = True
+        source_state["pendingErrors"] = []
         refresh_scan_summary()
+        job: dict[str, Any] | None = None
         try:
-            count = 0
-            scan_mode = runtime.config["scan_mode"]
-            if scan_mode in {"authors", "authors_recursive"}:
-                videos, directories = await runtime.client.scan_authors(
-                    search_paths=(runtime.config["root_path"],)
-                    if scan_mode == "authors_recursive"
-                    else (),
-                    author_group_paths=settings.asmr_author_group_paths
-                    if source == "asmr"
-                    else frozenset(),
-                    search_result_limit=settings.asmr_search_result_limit,
+            job = await asyncio.to_thread(
+                database.latest_incomplete_scan_job, source=source
+            )
+            if job and not _scan_job_matches(job, config):
+                # The source definition itself changed, so a half-finished
+                # traversal no longer describes the intended library.
+                await asyncio.to_thread(
+                    database.update_scan_job_status, str(job["id"]), "superseded"
                 )
-                count = await asyncio.to_thread(
-                    database.replace_scan,
-                    videos,
+                job = None
+            resumed = job is not None
+            if job is None:
+                job = await asyncio.to_thread(
+                    database.create_scan_job,
                     source=source,
+                    root_path=str(config["root_path"]),
+                    base_url=str(config["base_url"]),
+                    scan_mode=str(config["scan_mode"]),
+                    section=str(config["section"]),
+                )
+                await asyncio.to_thread(
+                    database.seed_scan_directories,
+                    str(job["id"]),
+                    initial_steps(
+                        str(config["scan_mode"]),
+                        str(config["root_path"]),
+                        search_paths=settings.asmr_search_paths
+                        if source == "asmr"
+                        else (),
+                    ),
                 )
             else:
-                scan_marker = secrets.token_hex(16)
-                directories = 0
-                batch: list[dict[str, Any]] = []
-
-                def write_batch(items: list[dict[str, Any]], *, finalize: bool = False) -> int:
-                    nonlocal count
-                    count += database._replace_scan_locked(
-                        items,
-                        source=source,
-                        scan_marker=scan_marker,
-                        deactivate_stale=finalize,
-                    )
-                    return count
-
-                async for event, value in runtime.client.iter_scan():
-                    if event == "directories":
-                        directories = value
-                    else:
-                        batch.append(value)
-                        if len(batch) >= 200:
-                            await asyncio.to_thread(write_batch, batch)
-                            batch.clear()
-                if batch:
-                    await asyncio.to_thread(write_batch, batch)
+                await asyncio.to_thread(database.resume_scan_job, str(job["id"]))
+            job_id = str(job["id"])
+            marker = str(job["marker"])
+            await asyncio.to_thread(
+                database.update_scan_job_status,
+                job_id,
+                "running",
+                count_attempt=not resumed,
+            )
+            source_state["resumed"] = resumed
+            source_state["status"] = "running"
+            scanner = ResumableScanner(
+                database=database,
+                client=runtime.client,
+                job_id=job_id,
+                source=source,
+                marker=marker,
+                author_group_paths=settings.asmr_author_group_paths
+                if source == "asmr"
+                else frozenset(),
+                search_result_limit=settings.asmr_search_result_limit,
+                on_progress=lambda progress: apply_scan_progress(source_state, progress),
+            )
+            progress = await scanner.run()
+            apply_scan_progress(source_state, progress)
+            errors = [str(error) for error in progress.get("errors") or []]
+            if progress["directories_pending"] or progress["directories_failed"]:
+                message = "; ".join(errors[:3]) or "scan incomplete"
                 await asyncio.to_thread(
-                    database._replace_scan_locked,
-                    [],
-                    source=source,
-                    scan_marker=scan_marker,
-                    deactivate_stale=True,
+                    database.update_scan_job_status,
+                    job_id,
+                    "interrupted",
+                    error=message[:400],
+                    count_attempt=False,
                 )
-            if runtime.config["section"] == "movie":
                 await asyncio.to_thread(
-                    database.sync_movie_index,
+                    database.update_source_scan_state,
                     source,
-                    parse_movie_filename,
+                    last_success=source_state["lastSuccess"],
+                    last_error=message[:400],
+                    directories=source_state["directories"],
                 )
+                source_state["status"] = "interrupted"
+                source_state["lastError"] = (
+                    f"{progress['directories_failed']} 个目录读取失败，再次扫描即可续扫"
+                )
+                logger.warning(
+                    "%s scan paused with %s unfinished directories",
+                    source,
+                    progress["directories_pending"] + progress["directories_failed"],
+                )
+                return False
+            retired = await asyncio.to_thread(
+                database.finalize_scan, source=source, marker=marker
+            )
+            await asyncio.to_thread(
+                database.update_scan_job_status,
+                job_id,
+                "completed",
+                error=None,
+                count_attempt=False,
+            )
+            if config["section"] == "movie":
+                await asyncio.to_thread(
+                    database.sync_movie_index, source, parse_movie_filename
+                )
+            active = await asyncio.to_thread(database.active_media_count, source=source)
             now = int(time.time())
             source_state.update(
                 {
+                    "status": "completed",
                     "lastSuccess": now,
                     "lastError": None,
-                    "directories": directories,
+                    "resumed": False,
+                    "pendingErrors": [],
                 }
             )
             await asyncio.to_thread(
@@ -227,28 +326,38 @@ async def scan_source(source: str) -> bool:
                 source,
                 last_success=now,
                 last_error=None,
-                directories=directories,
+                directories=source_state["directories"],
             )
             runtime.direct_urls.clear()
             logger.info(
-                "Indexed %s %s media items across %s directories",
-                count,
+                "Indexed %s active %s media items across %s directories (%s retired)",
+                active,
                 source,
-                directories,
+                source_state["directories"],
+                retired,
             )
-            if runtime.config["section"] == "feed" and not metadata_lock.locked():
+            if config["section"] == "feed" and not metadata_lock.locked():
                 spawn_background(
                     check_media_metadata(force=False),
                     name="media-metadata-check",
                 )
             return True
         except Exception as exc:
+            if job:
+                await asyncio.to_thread(
+                    database.update_scan_job_status,
+                    str(job["id"]),
+                    "interrupted",
+                    error=str(exc)[:400],
+                    count_attempt=False,
+                )
+            source_state["status"] = "interrupted"
             source_state["lastError"] = str(exc)
             await asyncio.to_thread(
                 database.update_source_scan_state,
                 source,
                 last_success=source_state["lastSuccess"],
-                last_error=str(exc),
+                last_error=str(exc)[:400],
                 directories=source_state["directories"],
             )
             logger.exception("%s library scan failed", source)
@@ -256,7 +365,6 @@ async def scan_source(source: str) -> bool:
         finally:
             source_state["running"] = False
             refresh_scan_summary()
-
 
 async def scan_library(sources: tuple[str, ...] | None = None) -> None:
     for source in sources if sources is not None else source_registry.ids():

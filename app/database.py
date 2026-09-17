@@ -36,6 +36,7 @@ class LibraryDatabase:
                     active INTEGER NOT NULL DEFAULT 1,
                     hidden INTEGER NOT NULL DEFAULT 0,
                     last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    scan_id TEXT,
                     fast_start TEXT,
                     fast_start_checked_at TEXT,
                     fast_start_detail TEXT,
@@ -83,7 +84,43 @@ class LibraryDatabase:
                     "ALTER TABLE videos ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"
                 )
             connection.commit()
+            if "scan_id" not in columns:
+                connection.execute("ALTER TABLE videos ADD COLUMN scan_id TEXT")
             self._migrate_video_path_uniqueness(connection)
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS media_scan_jobs (
+                    id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    marker TEXT NOT NULL,
+                    root_path TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    scan_mode TEXT NOT NULL,
+                    section TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    error TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_media_scan_jobs_source
+                    ON media_scan_jobs(source, status, updated_at);
+                CREATE TABLE IF NOT EXISTS media_scan_directories (
+                    job_id TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'dir',
+                    path TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    items INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(job_id, kind, path),
+                    FOREIGN KEY(job_id) REFERENCES media_scan_jobs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_media_scan_directories_job
+                    ON media_scan_directories(job_id, status, path);
+            """);
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS media_sources (
@@ -199,6 +236,7 @@ class LibraryDatabase:
                 active INTEGER NOT NULL DEFAULT 1,
                 hidden INTEGER NOT NULL DEFAULT 0,
                 last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                scan_id TEXT,
                 fast_start TEXT,
                 fast_start_checked_at TEXT,
                 fast_start_detail TEXT,
@@ -234,9 +272,392 @@ class LibraryDatabase:
         return connection
 
     def replace_scan(self, videos: Iterable[dict[str, Any]], *, source: str = "guangya") -> int:
-        count = 0
+        """Atomically replace a source with a complete listing.
+
+        Only valid when the caller already holds the *whole* listing in memory;
+        streaming scans stage batches through :meth:`commit_scan_step` and call
+        :meth:`finalize_scan` once every directory succeeded.
+        """
         scan_marker = secrets.token_hex(16)
-        return self._replace_scan_locked(videos, source=source, scan_marker=scan_marker)
+        return self._replace_scan_locked(
+            videos, source=source, scan_marker=scan_marker, finalize=True
+        )
+
+    def _set_scan_id(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source: str,
+        marker: str,
+    ) -> None:
+        connection.execute(
+            "UPDATE videos SET scan_id = ? WHERE source = ? AND last_seen = ?",
+            (marker, source, marker),
+        )
+
+    def finalize_scan(self, *, source: str, marker: str) -> int:
+        """Retire media this source no longer reports after a complete scan."""
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            retired = self._finalize_locked(connection, source=source, marker=marker)
+            connection.commit()
+        return retired
+
+    def _finalize_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source: str,
+        marker: str,
+    ) -> int:
+        self._set_scan_id(connection, source=source, marker=marker)
+        cursor = connection.execute(
+            """
+            UPDATE videos
+            SET active = 0
+            WHERE source = ? AND active = 1 AND scan_id IS NOT ?
+            """,
+            (source, marker),
+        )
+        return int(cursor.rowcount)
+
+    def abort_scan(self, *, source: str, marker: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._set_scan_id(connection, source=source, marker=marker)
+            connection.execute(
+                """
+                UPDATE videos
+                SET active = 0, scan_id = NULL
+                WHERE source = ? AND active = 1 AND scan_id = ?
+                """,
+                (source, marker),
+            )
+            connection.commit()
+
+    def create_scan_job(
+        self,
+        *,
+        source: str,
+        root_path: str,
+        base_url: str,
+        scan_mode: str,
+        section: str,
+    ) -> dict[str, Any]:
+        job_id = secrets.token_hex(12)
+        marker = secrets.token_hex(16)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE media_scan_jobs
+                SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
+                WHERE source = ? AND status != 'superseded'
+                """,
+                (source,),
+            )
+            connection.execute(
+                """
+                DELETE FROM media_scan_directories
+                WHERE job_id IN (
+                    SELECT id FROM media_scan_jobs
+                    WHERE source = ? AND status = 'superseded'
+                )
+                """,
+                (source,),
+            )
+            connection.execute(
+                """
+                INSERT INTO media_scan_jobs(
+                    id, source, marker, root_path, base_url, scan_mode, section, status
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, 'queued')
+                """,
+                (job_id, source, marker, root_path, base_url, scan_mode, section),
+            )
+            connection.commit()
+        return self.get_scan_job(job_id)
+
+    def get_scan_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM media_scan_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def latest_incomplete_scan_job(self, *, source: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM media_scan_jobs
+                WHERE source = ? AND status IN ('queued', 'running', 'interrupted')
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """,
+                (source,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def latest_scan_job(self, *, source: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM media_scan_jobs
+                WHERE source = ? AND status != 'superseded'
+                ORDER BY created_at DESC, id DESC LIMIT 1
+                """,
+                (source,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_scan_job_status(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        error: str | None = None,
+        count_attempt: bool = True,
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE media_scan_jobs
+                SET status = ?, error = ?,
+                    attempts = attempts + ?,
+                    updated_at = CURRENT_TIMESTAMP,
+                    completed_at = CASE
+                        WHEN ? = 'completed' THEN CURRENT_TIMESTAMP
+                        ELSE completed_at
+                    END
+                WHERE id = ?
+                """,
+                (status, error, 1 if count_attempt else 0, status, job_id),
+            )
+
+    def resume_scan_job(self, job_id: str) -> int:
+        """Requeue claimed and previously failed steps for a manual rescan.
+
+        Failed steps are left alone while a run is in progress, so one bad
+        directory ends the run instead of being retried in a tight loop; the
+        next manual scan of the source requeues them here.
+        """
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE media_scan_directories
+                SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ? AND status IN ('working', 'failed')
+                """,
+                (job_id,),
+            )
+        return int(cursor.rowcount)
+
+    def seed_scan_directories(self, job_id: str, steps: Sequence[tuple[str, str]]) -> int:
+        records = [(job_id, kind, path) for kind, path in steps if path]
+        if not records:
+            return 0
+        with self._lock, self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO media_scan_directories(job_id, kind, path, status)
+                VALUES(?, ?, ?, 'pending')
+                ON CONFLICT(job_id, kind, path) DO UPDATE SET
+                    status = CASE
+                        WHEN media_scan_directories.status = 'completed'
+                            THEN media_scan_directories.status
+                        ELSE 'pending'
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                records,
+            )
+        return len(records)
+
+    def next_scan_step(self, job_id: str) -> dict[str, Any] | None:
+        """Claim the next pending step, never a step that already failed."""
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM media_scan_directories
+                WHERE job_id = ? AND status = 'pending'
+                ORDER BY path LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+            if not row:
+                connection.commit()
+                return None
+            claimed = dict(row)
+            connection.execute(
+                """
+                UPDATE media_scan_directories
+                SET status = 'working', attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ? AND kind = ? AND path = ?
+                """,
+                (job_id, claimed["kind"], claimed["path"]),
+            )
+            connection.commit()
+        return claimed
+
+    def commit_scan_step(
+        self,
+        job_id: str,
+        *,
+        source: str,
+        marker: str,
+        kind: str,
+        path: str,
+        videos: Iterable[dict[str, Any]] = (),
+        steps: Sequence[tuple[str, str]] = (),
+    ) -> int:
+        """Persist one finished directory atomically.
+
+        Writes the discovered media, enqueues child steps and marks the step
+        complete in a single transaction, so a crash never loses progress and a
+        resumed run never re-lists a directory that already committed cleanly.
+        """
+        count = 0
+
+        def records():
+            nonlocal count
+            for video in videos:
+                count += 1
+                yield {
+                    **video,
+                    "name": str(video.get("name") or ""),
+                    "size": int(video.get("size") or 0),
+                    "modified": video.get("modified"),
+                    "thumb": str(video.get("thumb") or ""),
+                    "source": source,
+                    "author": video.get("author"),
+                    "duration_seconds": video.get("duration_seconds"),
+                    "media_format": video.get("media_format"),
+                    "media_kind": video.get("media_kind") or "video",
+                    "scan_marker": marker,
+                }
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = list(records())
+            if rows:
+                connection.executemany(
+                    """
+                    INSERT INTO videos(
+                        path, name, size, modified, thumb, source, author,
+                        duration_seconds, media_format, media_kind, active, last_seen
+                    )
+                    VALUES(
+                        :path, :name, :size, :modified, :thumb, :source, :author,
+                        :duration_seconds, :media_format, :media_kind, 1, :scan_marker
+                    )
+                    ON CONFLICT(source, path) DO UPDATE SET
+                        name = excluded.name,
+                        size = excluded.size,
+                        modified = excluded.modified,
+                        thumb = excluded.thumb,
+                        author = excluded.author,
+                        duration_seconds = COALESCE(
+                            videos.duration_seconds, excluded.duration_seconds
+                        ),
+                        media_format = excluded.media_format,
+                        media_kind = CASE
+                            WHEN LOWER(COALESCE(excluded.media_format, '')) = 'm3u8' THEN 'video'
+                            WHEN videos.metadata_checked_at IS NOT NULL THEN videos.media_kind
+                            ELSE excluded.media_kind
+                        END,
+                        active = CASE WHEN videos.hidden = 1 THEN 0 ELSE 1 END,
+                        last_seen = excluded.last_seen
+                    """,
+                    rows,
+                )
+                self._set_scan_id(connection, source=source, marker=marker)
+            connection.executemany(
+                """
+                INSERT INTO media_scan_directories(job_id, kind, path, status)
+                VALUES(?, ?, ?, 'pending')
+                ON CONFLICT(job_id, kind, path) DO NOTHING
+                """,
+                [(job_id, step_kind, step_path) for step_kind, step_path in steps if step_path],
+            )
+            connection.execute(
+                """
+                UPDATE media_scan_directories
+                SET status = 'completed', items = ?, error = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ? AND kind = ? AND path = ?
+                """,
+                (count, job_id, kind, path),
+            )
+            connection.commit()
+        return count
+
+    def fail_scan_step(self, job_id: str, kind: str, path: str, error: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE media_scan_directories
+                SET status = 'failed', error = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = ? AND kind = ? AND path = ?
+                """,
+                (error, job_id, kind, path),
+            )
+
+    def scan_step_progress(self, *, job_id: str, source: str, marker: str) -> dict[str, int]:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM media_scan_directories WHERE job_id = ?) AS total,
+                    (SELECT COUNT(*) FROM media_scan_directories WHERE job_id = ? AND status = 'completed') AS completed,
+                    (SELECT COUNT(*) FROM media_scan_directories WHERE job_id = ? AND status = 'pending') AS pending,
+                    (SELECT COUNT(*) FROM media_scan_directories WHERE job_id = ? AND status = 'failed') AS failed,
+                    (SELECT COUNT(*) FROM videos WHERE source = ? AND last_seen = ?) AS files
+                """,
+                (job_id, job_id, job_id, job_id, source, marker),
+            ).fetchone()
+        return {
+            "directories_total": int(row["total"]),
+            "directories_completed": int(row["completed"]),
+            "directories_pending": int(row["pending"]),
+            "directories_failed": int(row["failed"]),
+            "files_discovered": int(row["files"]),
+        }
+
+    def pending_scan_step_count(self, job_id: str) -> int:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) FROM media_scan_directories
+                WHERE job_id = ? AND status IN ('pending', 'working', 'failed')
+                """,
+                (job_id,),
+            ).fetchone()
+        return int(row[0])
+
+    def active_media_count(self, *, source: str) -> int:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM videos WHERE source = ? AND active = 1",
+                (source,),
+            ).fetchone()
+        return int(row[0])
+
+    def source_scan_states(self) -> dict[str, dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM media_scan_jobs
+                WHERE status != 'superseded'
+                ORDER BY created_at DESC, id DESC
+                """
+            ).fetchall()
+        states: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            source = str(row["source"])
+            if source in states:
+                continue
+            states[source] = dict(row)
+        return states
+
 
     def _replace_scan_locked(
         self,
@@ -244,8 +665,15 @@ class LibraryDatabase:
         *,
         source: str,
         scan_marker: str,
-        deactivate_stale: bool = True,
+        commit: bool = True,
+        finalize: bool = False,
     ) -> int:
+        """Insert or refresh every record for one scan pass.
+
+        ``last_seen`` holds ``scan_marker`` for every row touched by this pass, so
+        callers can stage rows in batches. Batches never retire rows: only an
+        explicit :meth:`finalize_scan` (or ``finalize=True`` here) may do that.
+        """
 
         count = 0
 
@@ -297,15 +725,12 @@ class LibraryDatabase:
                 """,
                 records(),
             )
-            connection.execute(
-                """
-                UPDATE videos
-                SET active = 0
-                WHERE source = ? AND active = 1 AND last_seen != ?
-                """,
-                (source, scan_marker) if deactivate_stale else (source, ""),
-            )
-            connection.commit()
+            if finalize:
+                self._finalize_locked(connection, source=source, marker=scan_marker)
+            else:
+                self._set_scan_id(connection, source=source, marker=scan_marker)
+            if commit:
+                connection.commit()
         return count
 
     def hide_videos(self, video_ids: Sequence[int]) -> int:

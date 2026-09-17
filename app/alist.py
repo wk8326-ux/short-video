@@ -17,6 +17,9 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36"
 )
 TRANSIENT_DATABASE_RETRIES = 4
+AUDIO_EXTENSIONS = frozenset({".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus"})
+TRANSIENT_HTTP_STATUS = frozenset({500, 502, 503, 504, 520, 521, 522, 524, 529})
+TRANSIENT_HTTP_RETRIES = 4
 NON_MEDIA_EXTENSIONS = frozenset(
     {
         ".7z",
@@ -129,6 +132,7 @@ class AListClient:
         retry: bool = True,
         rate_limit_retries: int = 3,
         transient_database_retries: int = TRANSIENT_DATABASE_RETRIES,
+        transient_http_retries: int = TRANSIENT_HTTP_RETRIES,
     ) -> dict[str, Any]:
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         if self._token:
@@ -150,6 +154,20 @@ class AListClient:
         except httpx.HTTPError as exc:
             raise AListError(f"AList request failed: {exc}") from exc
 
+        if (
+            response.status_code in TRANSIENT_HTTP_STATUS
+            and transient_http_retries > 0
+        ):
+            await asyncio.sleep(self._transient_http_delay(transient_http_retries))
+            return await self._post(
+                endpoint,
+                body,
+                retry=retry,
+                rate_limit_retries=rate_limit_retries,
+                transient_database_retries=transient_database_retries,
+                transient_http_retries=transient_http_retries - 1,
+            )
+
         if response.status_code == 429 and rate_limit_retries > 0:
             await asyncio.sleep(self._retry_after(response, rate_limit_retries))
             return await self._post(
@@ -158,6 +176,7 @@ class AListClient:
                 retry=retry,
                 rate_limit_retries=rate_limit_retries - 1,
                 transient_database_retries=transient_database_retries,
+                transient_http_retries=transient_http_retries,
             )
         try:
             payload = self._payload(response)
@@ -181,6 +200,7 @@ class AListClient:
                 retry=False,
                 rate_limit_retries=rate_limit_retries,
                 transient_database_retries=transient_database_retries,
+                transient_http_retries=transient_http_retries,
             )
         if code == 429 and rate_limit_retries > 0:
             await asyncio.sleep(self._retry_after(response, rate_limit_retries))
@@ -190,6 +210,7 @@ class AListClient:
                 retry=retry,
                 rate_limit_retries=rate_limit_retries - 1,
                 transient_database_retries=transient_database_retries,
+                transient_http_retries=transient_http_retries,
             )
         if code not in (0, 200):
             message = str(payload.get("message") or f"AList error {code}")
@@ -216,6 +237,11 @@ class AListClient:
     def _is_database_connection_exhaustion(message: str) -> bool:
         normalized = message.casefold()
         return "error 1040" in normalized or "too many connections" in normalized
+
+    @staticmethod
+    def _transient_http_delay(remaining_retries: int) -> float:
+        attempt = TRANSIENT_HTTP_RETRIES - remaining_retries
+        return min(16.0, float(2**attempt))
 
     @staticmethod
     def _database_retry_delay(remaining_retries: int) -> float:
@@ -291,6 +317,57 @@ class AListClient:
                 break
             page += 1
 
+    def build_video_record(self, directory: str, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """Turn one AList listing entry into a ``videos`` row candidate.
+
+        Returns ``None`` for directories and for entries that are not playable
+        media, so both the legacy and the resumable traversal share one rule.
+        """
+        name = str(entry.get("name") or "")
+        if not name or "/" in name or bool(entry.get("is_dir")):
+            return None
+        extension = PurePosixPath(name).suffix.lower()
+        if extension not in self.extensions and (
+            not self._include_unknown_files or extension in NON_MEDIA_EXTENSIONS
+        ):
+            return None
+        return {
+            "path": posixpath.join(directory, name),
+            "name": name,
+            "size": int(entry.get("size") or 0),
+            "modified": entry.get("modified") or entry.get("created"),
+            "thumb": self._absolute_url(str(entry.get("thumb") or "")),
+            "media_format": (
+                extension.lstrip(".") if extension in self.extensions else "unknown"
+            ),
+            "media_kind": "video",
+        }
+
+    async def child_directories(self, path: str) -> list[str]:
+        children: list[str] = []
+        for entry in await self.list_directory(path):
+            name = str(entry.get("name") or "")
+            if not name or "/" in name or not bool(entry.get("is_dir")):
+                continue
+            children.append(posixpath.join(path, name))
+        return children
+
+    async def scan_directory(self, path: str) -> tuple[list[str], list[dict[str, Any]]]:
+        """List one directory once, returning its subdirectories and media files."""
+        entries = await self.list_directory(path)
+        children: list[str] = []
+        videos: list[dict[str, Any]] = []
+        for entry in entries:
+            if bool(entry.get("is_dir")):
+                name = str(entry.get("name") or "")
+                if name and "/" not in name:
+                    children.append(posixpath.join(path, name))
+                continue
+            record = self.build_video_record(path, entry)
+            if record is not None:
+                videos.append(record)
+        return children, videos
+
     async def iter_scan(self) -> AsyncIterator[tuple[str, Any]]:
         root = "/" + self.media_path.strip("/")
         queue: deque[str] = deque([root])
@@ -300,32 +377,68 @@ class AListClient:
             directory = queue.popleft()
             directories += 1
             yield "directories", directories
-            for entry in await self.list_directory(directory):
-                name = str(entry.get("name") or "")
-                if not name or "/" in name:
-                    continue
-                child = posixpath.join(directory, name)
-                if bool(entry.get("is_dir")):
-                    queue.append(child)
-                    continue
-                extension = PurePosixPath(name).suffix.lower()
-                if extension not in self.extensions and (
-                    not self._include_unknown_files or extension in NON_MEDIA_EXTENSIONS
-                ):
-                    continue
-                yield "video", {
-                    "path": child,
-                    "name": name,
-                    "size": int(entry.get("size") or 0),
-                    "modified": entry.get("modified") or entry.get("created"),
-                    "thumb": self._absolute_url(str(entry.get("thumb") or "")),
-                    "media_format": (
-                        extension.lstrip(".")
-                        if extension in self.extensions
-                        else "unknown"
-                    ),
-                    "media_kind": "video",
-                }
+            children, videos = await self.scan_directory(directory)
+            queue.extend(children)
+            for record in videos:
+                yield "video", record
+
+    def build_author_record(
+        self, directory: str, author: str, entry: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Turn one author-directory entry into a media row candidate."""
+        name = str(entry.get("name") or "")
+        if not name or "/" in name or bool(entry.get("is_dir")):
+            return None
+        extension = PurePosixPath(name).suffix.lower()
+        if extension not in self.extensions:
+            return None
+        return {
+            "path": posixpath.join(directory, name),
+            "name": name,
+            "size": int(entry.get("size") or 0),
+            "modified": entry.get("modified") or entry.get("created"),
+            "thumb": self._absolute_url(str(entry.get("thumb") or "")),
+            "author": author,
+            "media_format": extension.lstrip("."),
+            "media_kind": "audio" if extension in AUDIO_EXTENSIONS else "video",
+        }
+
+    def build_search_record(
+        self,
+        root: str,
+        entry: dict[str, Any],
+        *,
+        author_group_paths: frozenset[str] = frozenset(),
+    ) -> dict[str, Any] | None:
+        """Turn one `/api/fs/search` hit into a media row candidate."""
+        if bool(entry.get("is_dir")):
+            return None
+        name = str(entry.get("name") or "")
+        parent = "/" + str(entry.get("parent") or "").strip("/")
+        if not name or "/" in name:
+            return None
+        extension = PurePosixPath(name).suffix.lower()
+        if extension not in self.extensions:
+            return None
+        if parent != root and not parent.startswith(root + "/"):
+            return None
+        author = self._search_author(
+            root,
+            parent,
+            author_group_paths=author_group_paths,
+        )
+        if not author:
+            return None
+        return {
+            "path": posixpath.join(parent, name),
+            "name": name,
+            "size": int(entry.get("size") or 0),
+            "modified": entry.get("modified") or entry.get("created"),
+            "thumb": self._absolute_url(str(entry.get("thumb") or "")),
+            "author": author,
+            "media_format": extension.lstrip("."),
+            "media_kind": "audio" if extension in AUDIO_EXTENSIONS else "video",
+        }
 
     async def scan(self) -> tuple[list[dict[str, Any]], int]:
         videos: list[dict[str, Any]] = []

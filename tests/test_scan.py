@@ -1,95 +1,385 @@
+"""AList library scans: batching, retirement and resume.
+
+Production broke here twice. A streaming scan deactivated every batch it had
+just written (thousands of rows indexed, none of them active), and an
+interrupted scan restarted from the root instead of continuing where it
+stopped. Both regressions are pinned down below by driving the real
+scan_source against an in-memory AList served through httpx.MockTransport, so
+traversal, batching, retirement and resume all run through the production code
+path.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import importlib
+import json
+import posixpath
+import sqlite3
 import sys
+from typing import Any
 
+import httpx
 import pytest
 
+from app.alist import AListClient
 
-@pytest.mark.asyncio
-async def test_app_startup_does_not_scan_media_sources(monkeypatch, tmp_path):
-    monkeypatch.setenv("ALIST_BASE_URL", "https://guangya.example")
-    monkeypatch.setenv("ALIST_MEDIA_PATH", "/guangya")
-    monkeypatch.setenv("ASMR_BASE_URL", "https://asmr.example")
-    monkeypatch.setenv("ASMR_MEDIA_PATH", "/asmr6")
+BASE_URL = "https://alist.example"
+ROOT = "/guangya-root"
+ASMR_ROOT = "/asmr6"
+SESSION_SECRET = "test-session-secret-with-at-least-32-characters"
+
+
+def file_entry(name: str, *, size: int = 4096) -> dict[str, Any]:
+    return {
+        "name": name,
+        "is_dir": False,
+        "size": size,
+        "modified": "2026-01-01T00:00:00Z",
+    }
+
+
+def dir_entry(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "is_dir": True,
+        "size": 0,
+        "modified": "2026-01-01T00:00:00Z",
+    }
+
+
+def build_tree(files: dict[str, list[str]]) -> dict[str, list[dict[str, Any]]]:
+    """Expand a directory-to-media-name map into AList listings."""
+    tree: dict[str, list[dict[str, Any]]] = {}
+    for directory, names in files.items():
+        tree.setdefault(directory, [])
+        parent, child = posixpath.split(directory.rstrip("/"))
+        if child and parent and parent != "/":
+            entries = tree.setdefault(parent, [])
+            if all(entry["name"] != child for entry in entries):
+                entries.append(dir_entry(child))
+        tree[directory].extend(file_entry(name) for name in names)
+    return tree
+
+
+class FakeAList:
+    """Answers /api/fs/list from an in-memory directory tree."""
+
+    def __init__(
+        self,
+        tree: dict[str, list[dict[str, Any]]],
+        *,
+        failures: dict[str, list[int]] | None = None,
+        bad_gateways: dict[str, int] | None = None,
+    ) -> None:
+        self.tree = dict(tree)
+        self.failures = {path: list(codes) for path, codes in (failures or {}).items()}
+        self.bad_gateways = dict(bad_gateways or {})
+        self.listed: list[str] = []
+        self.unexpected: list[str] = []
+
+    async def handle(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if request.url.path != "/api/fs/list":
+            self.unexpected.append(request.url.path)
+            return httpx.Response(404, json={"code": 404, "message": "unsupported"})
+        path = str(body["path"])
+        self.listed.append(path)
+        codes = self.failures.get(path)
+        if codes is not None:
+            # An exhausted list keeps failing, so permanent outages stay permanent.
+            status = codes.pop(0) if codes else 403
+            return httpx.Response(
+                status,
+                json={"code": status, "message": "alist read failed: " + path},
+            )
+        if self.bad_gateways.get(path, 0):
+            self.bad_gateways[path] -= 1
+            return httpx.Response(502, text="bad gateway")
+        content = self.tree.get(path)
+        if content is None:
+            self.unexpected.append(path)
+            return httpx.Response(
+                404, json={"code": 404, "message": "no such folder: " + path}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "message": "success",
+                "data": {"content": list(content), "total": len(content)},
+            },
+        )
+
+
+async def boot(monkeypatch, tmp_path):
+    """Import app.main against a throwaway database and no real AList."""
+    monkeypatch.setenv("ALIST_BASE_URL", BASE_URL)
+    monkeypatch.setenv("ALIST_MEDIA_PATH", ROOT)
+    monkeypatch.setenv("ASMR_BASE_URL", BASE_URL)
+    monkeypatch.setenv("ASMR_MEDIA_PATH", ASMR_ROOT)
+    monkeypatch.setenv("ASMR_REQUEST_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "library.db"))
     monkeypatch.setenv("STATIC_DIR", str(tmp_path / "static"))
     monkeypatch.setenv("AUTH_PASSWORD_HASH", "scrypt:test")
-    monkeypatch.setenv(
-        "SESSION_SECRET",
-        "test-session-secret-with-at-least-32-characters",
-    )
-    sys.modules.pop("app.main", None)
-    main = importlib.import_module("app.main")
-    scan_calls: list[tuple[str, ...] | None] = []
-
-    async def record_scan(sources=None):
-        scan_calls.append(sources)
-
-    monkeypatch.setattr(main, "scan_library", record_scan)
-
-    async with main.lifespan(main.app):
-        await asyncio.sleep(0)
-        assert scan_calls == []
-
-
-@pytest.mark.asyncio
-async def test_manual_scan_is_isolated_by_alist_source(monkeypatch, tmp_path):
-    monkeypatch.setenv("ALIST_BASE_URL", "https://guangya.example")
-    monkeypatch.setenv("ALIST_MEDIA_PATH", "/guangya")
-    monkeypatch.setenv("ASMR_BASE_URL", "https://asmr.example")
-    monkeypatch.setenv("ASMR_MEDIA_PATH", "/asmr6")
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "library.db"))
-    monkeypatch.setenv("STATIC_DIR", str(tmp_path / "static"))
-    monkeypatch.setenv("AUTH_PASSWORD_HASH", "scrypt:test")
-    monkeypatch.setenv(
-        "SESSION_SECRET",
-        "test-session-secret-with-at-least-32-characters",
-    )
+    monkeypatch.setenv("SESSION_SECRET", SESSION_SECRET)
     sys.modules.pop("app.main", None)
     main = importlib.import_module("app.main")
     main.database.initialize()
     await main.source_registry.initialize()
-    calls: list[str] = []
-    spawned_names: list[str] = []
 
-    async def iter_scan_guangya():
-        calls.append("scan:guangya")
-        yield "directories", 3
-        yield "video", {"path": "/guangya/video.mp4", "name": "video.mp4"}
+    spawned: list[str] = []
 
-    async def scan_asmr(**_kwargs):
-        calls.append("scan:asmr")
-        return ([{"path": "/asmr/author/audio.mp3", "name": "audio.mp3"}], 5)
-
-    def _replace_scan_locked(_items, *, source="guangya", scan_marker="", deactivate_stale=True):
-        calls.append(f"replace:{source}")
-        return 1
-
-    def record_background(coroutine, *, name: str) -> None:
-        spawned_names.append(name)
+    def record_background(coroutine: Any, *, name: str) -> None:
+        spawned.append(name)
         coroutine.close()
 
-    guangya = main.source_registry.get("guangya")
-    asmr = main.source_registry.get("asmr")
-    monkeypatch.setattr(guangya.client, "iter_scan", iter_scan_guangya)
-    monkeypatch.setattr(asmr.client, "scan_authors", scan_asmr)
-    monkeypatch.setattr(main.database, "_replace_scan_locked", _replace_scan_locked)
-    monkeypatch.setattr(guangya.direct_urls, "clear", lambda: calls.append("clear:guangya"))
-    monkeypatch.setattr(asmr.direct_urls, "clear", lambda: calls.append("clear:asmr"))
     monkeypatch.setattr(main, "spawn_background", record_background)
+    main.spawned_background = spawned
+    return main
+
+
+async def serve(main: Any, source: str, fake: FakeAList) -> None:
+    """Route one source's AList client through the in-memory fake."""
+    client = main.source_registry.get(source).client
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=BASE_URL, transport=httpx.MockTransport(fake.handle)
+    )
+
+
+def stored_rows(main: Any, source: str) -> dict[str, dict[str, Any]]:
+    connection = sqlite3.connect(main.database.path)
+    connection.row_factory = sqlite3.Row
+    try:
+        cursor = connection.execute(
+            "SELECT path, active, author, media_kind FROM videos WHERE source = ?",
+            (source,),
+        )
+        return {str(row["path"]): dict(row) for row in cursor.fetchall()}
+    finally:
+        connection.close()
+
+
+def active_paths(main: Any, source: str) -> list[str]:
+    return sorted(
+        path for path, row in stored_rows(main, source).items() if row["active"] == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_app_startup_does_not_scan_media_sources(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    scan_calls: list[Any] = []
+
+    async def record_scan(sources: Any = None) -> None:
+        scan_calls.append(sources)
+
+    monkeypatch.setattr(main, "scan_library", record_scan)
+    async with main.lifespan(main.app):
+        await asyncio.sleep(0)
+        assert scan_calls == []
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_tree_scan_indexes_every_directory_level(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    files: dict[str, list[str]] = {ROOT: ["intro.mp4"]}
+    for index in range(1, 16):
+        branch = ROOT + "/branch-" + f"{index:02d}"
+        files[branch] = ["clip-" + f"{index:02d}" + ".mp4", "notes.txt"]
+    fake = FakeAList(build_tree(files))
+    await serve(main, "guangya", fake)
+
+    assert await main.scan_source("guangya") is True
+
+    expected = sorted(
+        [ROOT + "/intro.mp4"]
+        + [
+            ROOT + "/branch-" + f"{index:02d}" + "/clip-" + f"{index:02d}" + ".mp4"
+            for index in range(1, 16)
+        ]
+    )
+    stored = stored_rows(main, "guangya")
+    assert active_paths(main, "guangya") == expected
+    assert all(row["active"] == 1 for row in stored.values())
+    assert main.database.latest_scan_job(source="guangya")["status"] == "completed"
+    assert main.scan_state["sources"]["guangya"]["directories"] == 16
+    assert main.scan_state["sources"]["guangya"]["lastError"] is None
+    assert fake.unexpected == []
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_scan_retires_media_that_disappeared(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    fake = FakeAList(build_tree({ROOT: ["kept.mp4", "gone.mp4"]}))
+    await serve(main, "guangya", fake)
+
+    assert await main.scan_source("guangya") is True
+    assert active_paths(main, "guangya") == sorted([ROOT + "/gone.mp4", ROOT + "/kept.mp4"])
+
+    fake.tree[ROOT] = [file_entry("kept.mp4"), file_entry("added.mp4")]
+    assert await main.scan_source("guangya") is True
+
+    stored = stored_rows(main, "guangya")
+    assert active_paths(main, "guangya") == sorted([ROOT + "/added.mp4", ROOT + "/kept.mp4"])
+    assert stored[ROOT + "/gone.mp4"]["active"] == 0
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_directory_keeps_existing_media_active(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    fake = FakeAList(build_tree({ROOT: ["existing.mp4"]}))
+    await serve(main, "guangya", fake)
+    assert await main.scan_source("guangya") is True
+
+    branch = ROOT + "/new-branch"
+    fake.tree[ROOT] = [file_entry("existing.mp4"), dir_entry("new-branch")]
+    fake.tree[branch] = [file_entry("new.mp4")]
+    fake.failures[branch] = [403]
+
+    assert await main.scan_source("guangya") is False
+
+    stored = stored_rows(main, "guangya")
+    assert active_paths(main, "guangya") == [ROOT + "/existing.mp4"]
+    assert branch + "/new.mp4" not in stored
+    assert main.database.latest_incomplete_scan_job(source="guangya") is not None
+    assert main.database.latest_scan_job(source="guangya")["status"] == "interrupted"
+    state = main.scan_state["sources"]["guangya"]
+    assert state["status"] == "interrupted"
+    assert "个目录读取失败" in str(state["lastError"])
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_scan_resumes_where_it_stopped(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    files: dict[str, list[str]] = {ROOT: []}
+    for index in (1, 2, 3):
+        branch = ROOT + "/branch-" + f"{index:02d}"
+        files[branch] = ["clip-" + f"{index:02d}" + ".mp4"]
+    broken = ROOT + "/branch-02"
+    fake = FakeAList(build_tree(files), failures={broken: [403]})
+    await serve(main, "guangya", fake)
+
+    assert await main.scan_source("guangya") is False
+    # One pass visits everything it can, then reports the failures; the failed
+    # directory is not retried inside the same run.
+    first_run = list(fake.listed)
+    assert first_run == sorted([ROOT, ROOT + "/branch-01", broken, ROOT + "/branch-03"])
+    job_id = main.database.latest_incomplete_scan_job(source="guangya")["id"]
+
+    fake.failures.clear()
+    assert await main.scan_source("guangya") is True
+
+    # The resumed scan only re-lists the directory that failed last time.
+    assert fake.listed[len(first_run):] == [broken]
+    assert main.database.latest_scan_job(source="guangya")["id"] == job_id
+    assert main.scan_state["sources"]["guangya"]["resumed"] is False
+    expected = sorted(
+        branch + "/clip-" + f"{index:02d}" + ".mp4" for index in (1, 2, 3)
+    )
+    assert active_paths(main, "guangya") == expected
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_transient_bad_gateway_is_retried_without_losing_the_directory(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        AListClient, "_transient_http_delay", staticmethod(lambda _remaining: 0.0)
+    )
+    main = await boot(monkeypatch, tmp_path)
+    branch = ROOT + "/flaky-branch"
+    fake = FakeAList(build_tree({ROOT: [], branch: ["clip.mp4"]}), bad_gateways={branch: 2})
+    await serve(main, "guangya", fake)
+
+    assert await main.scan_source("guangya") is True
+
+    assert fake.listed.count(branch) == 3
+    assert active_paths(main, "guangya") == [branch + "/clip.mp4"]
+    assert main.database.latest_scan_job(source="guangya")["status"] == "completed"
+    assert main.scan_state["sources"]["guangya"]["lastError"] is None
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_changed_source_root_starts_a_fresh_job(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    fake = FakeAList(
+        build_tree(
+            {
+                ROOT: [],
+                ROOT + "/branch-01": ["kept.mp4"],
+                ROOT + "/branch-02": ["unreachable.mp4"],
+            }
+        ),
+        failures={ROOT + "/branch-02": [403]},
+    )
+    await serve(main, "guangya", fake)
+    assert await main.scan_source("guangya") is False
+    old_job = main.database.latest_incomplete_scan_job(source="guangya")["id"]
+
+    main.database.update_media_source("guangya", {"root_path": "/new-root"})
+    await main.source_registry.reload_source("guangya")
+    replacement = FakeAList(build_tree({"/new-root": ["fresh.mp4"]}))
+    await serve(main, "guangya", replacement)
+
+    assert await main.scan_source("guangya") is True
+
+    job = main.database.latest_scan_job(source="guangya")
+    assert job["id"] != old_job
+    assert main.database.get_scan_job(old_job)["status"] == "superseded"
+    assert active_paths(main, "guangya") == ["/new-root/fresh.mp4"]
+    assert main.database.latest_scan_job(source="guangya")["status"] == "completed"
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_authors_scan_records_author_and_media_kind(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    files = {
+        ASMR_ROOT: [],
+        ASMR_ROOT + "/作者甲": ["录音.mp3", "影片.mp4", "直播.m3u8", "封面.jpg"],
+        ASMR_ROOT + "/作者乙": ["声音.opus"],
+    }
+    fake = FakeAList(build_tree(files))
+    await serve(main, "asmr6", fake)
+
+    assert await main.scan_source("asmr6") is True
+
+    stored = stored_rows(main, "asmr6")
+    assert sorted(stored) == [
+        ASMR_ROOT + "/作者乙/声音.opus",
+        ASMR_ROOT + "/作者甲/录音.mp3",
+        ASMR_ROOT + "/作者甲/影片.mp4",
+        ASMR_ROOT + "/作者甲/直播.m3u8",
+    ]
+    assert stored[ASMR_ROOT + "/作者甲/录音.mp3"]["author"] == "作者甲"
+    assert stored[ASMR_ROOT + "/作者甲/录音.mp3"]["media_kind"] == "audio"
+    assert stored[ASMR_ROOT + "/作者甲/影片.mp4"]["media_kind"] == "video"
+    assert stored[ASMR_ROOT + "/作者甲/直播.m3u8"]["media_kind"] == "video"
+    assert "封面.jpg" not in " ".join(stored)
+    assert main.scan_state["sources"]["asmr6"]["directories"] == 3
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_scanning_one_source_leaves_other_sources_untouched(
+    monkeypatch, tmp_path
+):
+    main = await boot(monkeypatch, tmp_path)
+    fake = FakeAList(build_tree({ROOT: ["clip.mp4"]}))
+    await serve(main, "guangya", fake)
 
     await main.scan_library(sources=("guangya",))
 
-    assert calls[:4] == ["scan:guangya", "replace:guangya", "replace:guangya", "clear:guangya"]
-    assert spawned_names == ["media-metadata-check"]
-
-    calls.clear()
-    spawned_names.clear()
-    await main.scan_library(sources=("asmr",))
-
-    assert calls[:1] == ["scan:asmr"]
-    assert calls[1:2] == ["replace:asmr"]
-    assert calls[2:3] == ["clear:asmr"]
-    assert calls == ["scan:asmr", "replace:asmr", "clear:asmr"]
-    assert spawned_names == []
+    assert active_paths(main, "guangya") == [ROOT + "/clip.mp4"]
+    assert active_paths(main, "asmr6") == []
+    assert main.database.latest_scan_job(source="asmr6") is None
+    assert main.spawned_background == ["media-metadata-check"]
     await main.source_registry.close()

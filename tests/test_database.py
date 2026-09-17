@@ -99,7 +99,7 @@ def test_incremental_scan_deactivates_only_missing_source_rows(tmp_path):
         if statement.startswith("update videos set active = 0")
     ]
     assert len(cleanup) == 1
-    assert "last_seen !=" in cleanup[0]
+    assert "scan_id is not" in cleanup[0]
     current_ids = {
         item["path"]: item["id"]
         for item in database.asmr_items(author="author", limit=200)
