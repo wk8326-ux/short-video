@@ -1,0 +1,8 @@
+{
+  "versionCode": 168,
+  "versionName": "1.6.0-beta.9",
+  "apkFile": "deepfuck-android-v1.6.0-beta.9.apk",
+  "sha256": "5b39b50d3c4dd3654abebe1e59cf744dcab63f8b27af209954d4be9d194a8c8a",
+  "size": 4211000,
+  "notes": "扫描修复：光鸭/ASMR目录扫描断点续传与最终激活安全化。"
+}

@@ -280,7 +280,8 @@ async def test_interrupted_scan_resumes_where_it_stopped(monkeypatch, tmp_path):
     assert main.database.latest_scan_job(source="guangya")["id"] == job_id
     assert main.scan_state["sources"]["guangya"]["resumed"] is False
     expected = sorted(
-        branch + "/clip-" + f"{index:02d}" + ".mp4" for index in (1, 2, 3)
+        ROOT + "/branch-" + f"{index:02d}" + "/clip-" + f"{index:02d}" + ".mp4"
+        for index in (1, 2, 3)
     )
     assert active_paths(main, "guangya") == expected
     await main.source_registry.close()
