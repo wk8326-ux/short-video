@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -158,6 +159,7 @@ async def scan_source(source: str) -> bool:
         source_state["running"] = True
         refresh_scan_summary()
         try:
+            count = 0
             scan_mode = runtime.config["scan_mode"]
             if scan_mode in {"authors", "authors_recursive"}:
                 videos, directories = await runtime.client.scan_authors(
@@ -169,13 +171,43 @@ async def scan_source(source: str) -> bool:
                     else frozenset(),
                     search_result_limit=settings.asmr_search_result_limit,
                 )
+                count = await asyncio.to_thread(
+                    database.replace_scan,
+                    videos,
+                    source=source,
+                )
             else:
-                videos, directories = await runtime.client.scan()
-            count = await asyncio.to_thread(
-                database.replace_scan,
-                videos,
-                source=source,
-            )
+                scan_marker = secrets.token_hex(16)
+                directories = 0
+                batch: list[dict[str, Any]] = []
+
+                def write_batch(items: list[dict[str, Any]], *, finalize: bool = False) -> int:
+                    nonlocal count
+                    count += database._replace_scan_locked(
+                        items,
+                        source=source,
+                        scan_marker=scan_marker,
+                        deactivate_stale=finalize,
+                    )
+                    return count
+
+                async for event, value in runtime.client.iter_scan():
+                    if event == "directories":
+                        directories = value
+                    else:
+                        batch.append(value)
+                        if len(batch) >= 200:
+                            await asyncio.to_thread(write_batch, batch)
+                            batch.clear()
+                if batch:
+                    await asyncio.to_thread(write_batch, batch)
+                await asyncio.to_thread(
+                    database._replace_scan_locked,
+                    [],
+                    source=source,
+                    scan_marker=scan_marker,
+                    deactivate_stale=True,
+                )
             if runtime.config["section"] == "movie":
                 await asyncio.to_thread(
                     database.sync_movie_index,

@@ -52,15 +52,16 @@ async def test_manual_scan_is_isolated_by_alist_source(monkeypatch, tmp_path):
     calls: list[str] = []
     spawned_names: list[str] = []
 
-    async def scan_guangya():
+    async def iter_scan_guangya():
         calls.append("scan:guangya")
-        return ([{"path": "/guangya/video.mp4", "name": "video.mp4"}], 3)
+        yield "directories", 3
+        yield "video", {"path": "/guangya/video.mp4", "name": "video.mp4"}
 
     async def scan_asmr(**_kwargs):
         calls.append("scan:asmr")
         return ([{"path": "/asmr/author/audio.mp3", "name": "audio.mp3"}], 5)
 
-    def replace_scan(_items, *, source="guangya"):
+    def _replace_scan_locked(_items, *, source="guangya", scan_marker="", deactivate_stale=True):
         calls.append(f"replace:{source}")
         return 1
 
@@ -70,22 +71,25 @@ async def test_manual_scan_is_isolated_by_alist_source(monkeypatch, tmp_path):
 
     guangya = main.source_registry.get("guangya")
     asmr = main.source_registry.get("asmr")
-    monkeypatch.setattr(guangya.client, "scan", scan_guangya)
+    monkeypatch.setattr(guangya.client, "iter_scan", iter_scan_guangya)
     monkeypatch.setattr(asmr.client, "scan_authors", scan_asmr)
-    monkeypatch.setattr(main.database, "replace_scan", replace_scan)
+    monkeypatch.setattr(main.database, "_replace_scan_locked", _replace_scan_locked)
     monkeypatch.setattr(guangya.direct_urls, "clear", lambda: calls.append("clear:guangya"))
     monkeypatch.setattr(asmr.direct_urls, "clear", lambda: calls.append("clear:asmr"))
     monkeypatch.setattr(main, "spawn_background", record_background)
 
     await main.scan_library(sources=("guangya",))
 
-    assert calls == ["scan:guangya", "replace:guangya", "clear:guangya"]
+    assert calls[:4] == ["scan:guangya", "replace:guangya", "replace:guangya", "clear:guangya"]
     assert spawned_names == ["media-metadata-check"]
 
     calls.clear()
     spawned_names.clear()
     await main.scan_library(sources=("asmr",))
 
+    assert calls[:1] == ["scan:asmr"]
+    assert calls[1:2] == ["replace:asmr"]
+    assert calls[2:3] == ["clear:asmr"]
     assert calls == ["scan:asmr", "replace:asmr", "clear:asmr"]
     assert spawned_names == []
     await main.source_registry.close()

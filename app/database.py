@@ -236,6 +236,18 @@ class LibraryDatabase:
     def replace_scan(self, videos: Iterable[dict[str, Any]], *, source: str = "guangya") -> int:
         count = 0
         scan_marker = secrets.token_hex(16)
+        return self._replace_scan_locked(videos, source=source, scan_marker=scan_marker)
+
+    def _replace_scan_locked(
+        self,
+        videos: Iterable[dict[str, Any]],
+        *,
+        source: str,
+        scan_marker: str,
+        deactivate_stale: bool = True,
+    ) -> int:
+
+        count = 0
 
         def records():
             nonlocal count
@@ -291,7 +303,7 @@ class LibraryDatabase:
                 SET active = 0
                 WHERE source = ? AND active = 1 AND last_seen != ?
                 """,
-                (source, scan_marker),
+                (source, scan_marker) if deactivate_stale else (source, ""),
             )
             connection.commit()
         return count

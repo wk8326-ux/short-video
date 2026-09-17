@@ -291,17 +291,15 @@ class AListClient:
                 break
             page += 1
 
-    async def scan(self) -> tuple[list[dict[str, Any]], int]:
+    async def iter_scan(self) -> AsyncIterator[tuple[str, Any]]:
         root = "/" + self.media_path.strip("/")
         queue: deque[str] = deque([root])
-        videos: list[dict[str, Any]] = []
         directories = 0
 
         while queue:
             directory = queue.popleft()
             directories += 1
-            if directories > 5000:
-                raise AListError("Directory limit exceeded")
+            yield "directories", directories
             for entry in await self.list_directory(directory):
                 name = str(entry.get("name") or "")
                 if not name or "/" in name:
@@ -315,21 +313,28 @@ class AListClient:
                     not self._include_unknown_files or extension in NON_MEDIA_EXTENSIONS
                 ):
                     continue
-                videos.append(
-                    {
-                        "path": child,
-                        "name": name,
-                        "size": int(entry.get("size") or 0),
-                        "modified": entry.get("modified") or entry.get("created"),
-                        "thumb": self._absolute_url(str(entry.get("thumb") or "")),
-                        "media_format": (
-                            extension.lstrip(".")
-                            if extension in self.extensions
-                            else "unknown"
-                        ),
-                        "media_kind": "video",
-                    }
-                )
+                yield "video", {
+                    "path": child,
+                    "name": name,
+                    "size": int(entry.get("size") or 0),
+                    "modified": entry.get("modified") or entry.get("created"),
+                    "thumb": self._absolute_url(str(entry.get("thumb") or "")),
+                    "media_format": (
+                        extension.lstrip(".")
+                        if extension in self.extensions
+                        else "unknown"
+                    ),
+                    "media_kind": "video",
+                }
+
+    async def scan(self) -> tuple[list[dict[str, Any]], int]:
+        videos: list[dict[str, Any]] = []
+        directories = 0
+        async for event, value in self.iter_scan():
+            if event == "video":
+                videos.append(value)
+            else:
+                directories = value
         return videos, directories
 
     async def scan_authors(
