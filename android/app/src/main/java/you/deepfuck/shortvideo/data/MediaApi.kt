@@ -168,10 +168,16 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         return AsmrPage(parsed, payload.optInt("total", parsed.size), payload.optIntOrNull("nextOffset"))
     }
 
-    fun movies(query: String = "", limit: Int = MOVIE_PAGE_SIZE, offset: Int = 0): MoviePage {
+    fun movies(
+        query: String = "",
+        limit: Int = MOVIE_PAGE_SIZE,
+        offset: Int = 0,
+        sort: String = "cover",
+    ): MoviePage {
         val target = url("/api/movies").newBuilder()
             .addQueryParameter("limit", limit.toString())
             .addQueryParameter("offset", offset.toString())
+            .addQueryParameter("sort", sort)
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
             .build()
         val payload = getJson(target.toString())

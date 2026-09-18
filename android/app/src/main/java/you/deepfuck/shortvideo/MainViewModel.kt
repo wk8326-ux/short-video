@@ -74,6 +74,7 @@ data class AppUiState(
     val movieLoading: Boolean = false,
     val movieError: String? = null,
     val movieQuery: String = "",
+    val movieSort: String = "cover",
     val movieDetailLoading: Boolean = false,
     val selectedMovie: MovieItem? = null,
     val expandedMedia: MediaEntry? = null,
@@ -477,6 +478,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pendingAsmrAdvanceId = null
         preferences.saveAsmrPlaybackState(null)
         mutableState.value = mutableState.value.copy(expandedMedia = null, nowPlaying = null)
+    }
+
+    fun setMovieSort(sort: String) {
+        if (sort == mutableState.value.movieSort) return
+        movieJob?.cancel()
+        movieSearchJob?.cancel()
+        movieRequestGeneration += 1L
+        mutableState.value = mutableState.value.copy(movieSort = sort, movieError = null)
+        if (mutableState.value.surface == MediaSurface.MOVIE) loadMovies(reset = true)
     }
 
     fun setMovieQuery(query: String) {
@@ -1088,9 +1098,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (reset) movieJob?.cancel() else if (state.movieLoading) return
         val requestedQuery = state.movieQuery.trim()
         val requestGeneration = ++movieRequestGeneration
+        val requestedSort = state.movieSort
         mutableState.value = state.copy(movieLoading = true, movieError = null)
         movieJob = viewModelScope.launch {
-            runApi { api.movies(query = requestedQuery, offset = offset) }
+            runApi { api.movies(query = requestedQuery, offset = offset, sort = requestedSort) }
                 .onSuccess { page ->
                     val current = mutableState.value
                     if (
@@ -1099,6 +1110,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             currentGeneration = movieRequestGeneration,
                             requestedQuery = requestedQuery,
                             currentQuery = current.movieQuery.trim(),
+                            requestedSort = requestedSort,
+                            currentSort = current.movieSort,
                             currentSurface = current.surface,
                         )
                     ) return@onSuccess
@@ -1125,6 +1138,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             currentGeneration = movieRequestGeneration,
                             requestedQuery = requestedQuery,
                             currentQuery = current.movieQuery.trim(),
+                            requestedSort = requestedSort,
+                            currentSort = current.movieSort,
                             currentSurface = current.surface,
                         )
                     ) return@onFailure

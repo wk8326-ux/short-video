@@ -169,9 +169,12 @@ internal fun shouldApplyMovieResponse(
     currentGeneration: Long,
     requestedQuery: String,
     currentQuery: String,
+    requestedSort: String,
+    currentSort: String,
     currentSurface: MediaSurface,
 ): Boolean = requestGeneration == currentGeneration &&
     requestedQuery == currentQuery &&
+    requestedSort == currentSort &&
     currentSurface == MediaSurface.MOVIE
 
 internal fun filterAsmrAuthors(

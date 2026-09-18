@@ -107,6 +107,7 @@ internal fun MovieScreen(
     fullscreen: Boolean,
     listPosition: ListPosition,
     onQuery: (String) -> Unit,
+    onSort: (String) -> Unit,
     onSelect: (MovieItem) -> Unit,
     onBack: () -> Unit,
     onPlay: (MovieItem) -> Unit,
@@ -158,6 +159,7 @@ internal fun MovieScreen(
             imageLoader = imageLoader,
             gridState = gridState,
             onQuery = onQuery,
+            onSort = onSort,
             onSelect = onSelect,
             onRetry = onRetry,
         )
@@ -220,6 +222,7 @@ private fun MovieCatalog(
     imageLoader: ImageLoader,
     gridState: LazyGridState,
     onQuery: (String) -> Unit,
+    onSort: (String) -> Unit,
     onSelect: (MovieItem) -> Unit,
     onRetry: () -> Unit,
 ) {
@@ -271,6 +274,31 @@ private fun MovieCatalog(
                     cursorColor = AccentSoft,
                 ),
             )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+                .padding(bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("排序", color = TextFaint, style = MaterialTheme.typography.labelSmall)
+            listOf("cover" to "封面优先", "title" to "标题").forEach { (value, label) ->
+                val selected = state.movieSort == value
+                Button(
+                    onClick = { onSort(value) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (selected) AccentSoft else Color.Transparent,
+                        contentColor = if (selected) Color.Black else TextSecondary,
+                    ),
+                    shape = RoundedCornerShape(999.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                    modifier = Modifier.height(30.dp),
+                ) {
+                    Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                }
+            }
         }
 
         when {

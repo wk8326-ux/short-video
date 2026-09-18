@@ -826,6 +826,7 @@ class LibraryDatabase:
         limit: int = 24,
         offset: int = 0,
         sources: Sequence[str] = (),
+        sort: str = "cover",
     ) -> list[dict[str, Any]]:
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "m.source IN")
@@ -837,6 +838,13 @@ class LibraryDatabase:
                 "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\')"
             )
             params.extend([f"%{escaped}%", f"%{escaped}%"])
+        has_poster = "(LOWER(COALESCE(m.poster_url, '')) <> '')"
+        has_thumb = "(LOWER(COALESCE(v.thumb, '')) <> '')"
+        cover_rank = f"CASE WHEN {has_poster} THEN 0 WHEN {has_thumb} THEN 1 ELSE 2 END"
+        if sort == "title":
+            order = "m.display_title COLLATE NOCASE, m.year, m.id"
+        else:
+            order = f"{cover_rank}, m.display_title COLLATE NOCASE, m.year, m.id"
         params.extend([max(1, limit), max(0, offset)])
         with self._lock, self._connect() as connection:
             rows = connection.execute(
@@ -846,7 +854,7 @@ class LibraryDatabase:
                 FROM movies m
                 JOIN videos v ON v.id = m.video_id
                 WHERE {' AND '.join(conditions)}
-                ORDER BY m.display_title COLLATE NOCASE, m.year, m.id
+                ORDER BY {order}
                 LIMIT ? OFFSET ?
                 """,
                 params,

@@ -212,6 +212,7 @@ fun ShortVideoApp(
                                 fullscreen = fullscreen,
                                 listPosition = viewModel.movieListPosition(),
                                 onQuery = viewModel::setMovieQuery,
+                                onSort = viewModel::setMovieSort,
                                 onSelect = viewModel::selectMovie,
                                 onBack = viewModel::closeMovieDetail,
                                 onPlay = viewModel::playMovie,

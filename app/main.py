@@ -37,7 +37,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.9"
+APP_VERSION = "1.6.0-beta.10"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -1615,11 +1615,19 @@ async def movies(
     q: str = Query(default="", max_length=100),
     limit: int = Query(default=24, ge=1, le=60),
     offset: int = Query(default=0, ge=0),
+    sort: str = Query(default="cover", pattern="^(cover|title)$"),
 ) -> dict[str, Any]:
     sources = source_registry.ids("movie")
     search = q.strip()
     rows, total = await asyncio.gather(
-        asyncio.to_thread(database.movies, search=search, limit=limit, offset=offset, sources=sources),
+        asyncio.to_thread(
+            database.movies,
+            search=search,
+            limit=limit,
+            offset=offset,
+            sources=sources,
+            sort=sort,
+        ),
         asyncio.to_thread(database.movie_count, search=search, sources=sources),
     )
     if offset == 0 and rows:
