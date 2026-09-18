@@ -99,6 +99,8 @@ To change the application password, run `python app/auth.py set-password .env` a
 
 The index is stored in `/data/library.db` and refreshed every 30 minutes by default. Existing Guangya IDs survive the multi-source migration. Each source is deactivated and refreshed independently, so an ASMR scan failure cannot remove Guangya rows. Resolved direct URLs are cached independently per source for 10 minutes by default and cleared after its scan. Feed modes are random, newest first, and oldest first.
 
+Movie scanning is manual only and resumable. Every directory step is persisted with an attempt counter and at most `3` attempts, so a directory that the AList origin keeps timing out is skipped instead of being requeued forever; a scan can therefore always reach `completed`. Media that was already indexed below a skipped directory stays active, and the finished job reports how many directories were skipped in `directoriesSkipped` plus a warning in `lastError`.
+
 Key source settings:
 
 - `ALIST_BASE_URL` / `ALIST_MEDIA_PATH`: private Guangya AList source.
@@ -111,3 +113,4 @@ Key source settings:
 - `METADATA_PROBE_BATCH_SIZE`: maximum MP4 duration probes per scan, default `30`.
 - `ASMR_EXTENSIONS`: direct files indexed inside each author directory.
 - `METATUBE_BASE_URL` / `METATUBE_TOKEN`: optional private MetaTube service. Exact numbered media uses it before TMDB; ordinary films remain on TMDB.
+- `SHARED_METADATA_BASE_URL` / `SHARED_METADATA_TOKEN`: optional read-only shared metadata service (cover, NFO and plot sharing). It is consulted before MetaTube and TMDB for movie sources, and its index is cached in the server process for 10 minutes.

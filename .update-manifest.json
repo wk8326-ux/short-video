@@ -1,8 +1,8 @@
 {
-  "versionCode": 169,
-  "versionName": "1.6.0-beta.10",
-  "apkFile": "deepfuck-android-v1.6.0-beta.10.apk",
-  "sha256": "9505ffab5bf74b7efe160e5befbc7247f9b2980677cb667a57a9ae569e288bfc",
+  "versionCode": 170,
+  "versionName": "1.6.0-beta.11",
+  "apkFile": "deepfuck-android-v1.6.0-beta.11.apk",
+  "sha256": "a9364f9f6a1a6464001bdb9cf2d268776ab0ce74150dc450caff8345767cb972",
   "size": 4211000,
-  "notes": "电影栏目新增排序：默认封面优先，无封面影片排在最后。"
+  "notes": "修复扫描卡死：反复失败的目录会跳过并完成扫描，扫描中重启后也能续扫；电影新增共享元数据源，封面覆盖更全。"
 }

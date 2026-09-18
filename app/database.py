@@ -12,6 +12,12 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 
+# A directory that keeps failing (AList hiccup, deleted path, oversized listing)
+# is retried on later manual scans, but only this many times. Past that budget it
+# is skipped for good so one bad directory can never stall an entire library.
+SCAN_STEP_MAX_ATTEMPTS = 3
+
+
 class LibraryDatabase:
     def __init__(self, path: str):
         self.path = path
@@ -409,6 +415,49 @@ class LibraryDatabase:
             ).fetchone()
         return dict(row) if row else None
 
+    def reconcile_orphaned_scan_jobs(self) -> list[str]:
+        """Reopen scans whose worker disappeared with the process.
+
+        A scan only runs inside the application process, so a job still marked
+        ``running`` at startup cannot have an owner any more. Leaving it that
+        way made the management view show a scan that never advanced and could
+        never finish. Marking it ``interrupted`` keeps the recorded progress and
+        lets the next manual scan continue from the pending directories.
+        """
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT id FROM media_scan_jobs
+                WHERE status = 'running'
+                ORDER BY created_at
+                """
+            ).fetchall()
+            job_ids = [str(row["id"]) for row in rows]
+            if not job_ids:
+                return []
+            placeholders = ",".join("?" for _ in job_ids)
+            connection.execute(
+                f"""
+                UPDATE media_scan_jobs
+                SET status = 'interrupted',
+                    error = COALESCE(error, '扫描进程重启，重新扫描即可续扫'),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({placeholders})
+                """,
+                job_ids,
+            )
+            connection.execute(
+                f"""
+                UPDATE media_scan_directories
+                SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+                WHERE status = 'working' AND job_id IN ({placeholders})
+                """,
+                job_ids,
+            )
+            connection.commit()
+        return job_ids
+
     def update_scan_job_status(
         self,
         job_id: str,
@@ -417,6 +466,7 @@ class LibraryDatabase:
         error: str | None = None,
         count_attempt: bool = True,
     ) -> None:
+        """Record the new status of a scan job."""
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
@@ -433,23 +483,77 @@ class LibraryDatabase:
                 (status, error, 1 if count_attempt else 0, status, job_id),
             )
 
-    def resume_scan_job(self, job_id: str) -> int:
+    def resume_scan_job(
+        self, job_id: str, *, max_attempts: int = SCAN_STEP_MAX_ATTEMPTS
+    ) -> int:
         """Requeue claimed and previously failed steps for a manual rescan.
 
         Failed steps are left alone while a run is in progress, so one bad
         directory ends the run instead of being retried in a tight loop; the
-        next manual scan of the source requeues them here.
+        next manual scan of the source requeues them here. Steps that already
+        burned through their attempt budget stay failed: the scan then finishes
+        with a warning instead of retrying the same directory forever.
         """
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE media_scan_directories
                 SET status = 'pending', updated_at = CURRENT_TIMESTAMP
-                WHERE job_id = ? AND status IN ('working', 'failed')
+                WHERE job_id = ?
+                  AND (
+                    status = 'working'
+                    OR (status = 'failed' AND attempts < ?)
+                  )
                 """,
-                (job_id,),
+                (job_id, max(1, int(max_attempts))),
             )
         return int(cursor.rowcount)
+
+    def exhausted_scan_step_paths(
+        self, job_id: str, *, max_attempts: int = SCAN_STEP_MAX_ATTEMPTS
+    ) -> list[str]:
+        """Directories that failed often enough for us to stop retrying them."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT path FROM media_scan_directories
+                WHERE job_id = ? AND status = 'failed' AND attempts >= ?
+                ORDER BY path
+                """,
+                (job_id, max(1, int(max_attempts))),
+            ).fetchall()
+        return [str(row["path"]) for row in rows]
+
+    def carry_over_scan_paths(
+        self, *, source: str, marker: str, paths: Sequence[str]
+    ) -> int:
+        """Keep media under unreadable directories from being retired.
+
+        A directory we could not list tells us nothing about its contents, so
+        its already indexed media stays active instead of looking deleted.
+        """
+        prefixes = [str(path).rstrip("/") for path in paths if str(path).strip("/")]
+        if not prefixes:
+            return 0
+        carried = 0
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for prefix in prefixes:
+                escaped = (
+                    prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                )
+                cursor = connection.execute(
+                    """
+                    UPDATE videos
+                    SET scan_id = ?
+                    WHERE source = ? AND active = 1
+                      AND (path = ? OR path LIKE ? ESCAPE '\\')
+                    """,
+                    (marker, source, prefix, f"{escaped}/%"),
+                )
+                carried += int(cursor.rowcount)
+            connection.commit()
+        return carried
 
     def seed_scan_directories(self, job_id: str, steps: Sequence[tuple[str, str]]) -> int:
         records = [(job_id, kind, path) for kind, path in steps if path]
@@ -601,7 +705,14 @@ class LibraryDatabase:
                 (error, job_id, kind, path),
             )
 
-    def scan_step_progress(self, *, job_id: str, source: str, marker: str) -> dict[str, int]:
+    def scan_step_progress(
+        self,
+        *,
+        job_id: str,
+        source: str,
+        marker: str,
+        max_attempts: int = SCAN_STEP_MAX_ATTEMPTS,
+    ) -> dict[str, int]:
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 """
@@ -610,15 +721,30 @@ class LibraryDatabase:
                     (SELECT COUNT(*) FROM media_scan_directories WHERE job_id = ? AND status = 'completed') AS completed,
                     (SELECT COUNT(*) FROM media_scan_directories WHERE job_id = ? AND status = 'pending') AS pending,
                     (SELECT COUNT(*) FROM media_scan_directories WHERE job_id = ? AND status = 'failed') AS failed,
+                    (SELECT COUNT(*) FROM media_scan_directories WHERE job_id = ? AND status = 'failed' AND attempts < ?) AS retryable,
+                    (SELECT COUNT(*) FROM media_scan_directories WHERE job_id = ? AND status = 'failed' AND attempts >= ?) AS exhausted,
                     (SELECT COUNT(*) FROM videos WHERE source = ? AND last_seen = ?) AS files
                 """,
-                (job_id, job_id, job_id, job_id, source, marker),
+                (
+                    job_id,
+                    job_id,
+                    job_id,
+                    job_id,
+                    job_id,
+                    max(1, int(max_attempts)),
+                    job_id,
+                    max(1, int(max_attempts)),
+                    source,
+                    marker,
+                ),
             ).fetchone()
         return {
             "directories_total": int(row["total"]),
             "directories_completed": int(row["completed"]),
             "directories_pending": int(row["pending"]),
             "directories_failed": int(row["failed"]),
+            "directories_retryable": int(row["retryable"]),
+            "directories_exhausted": int(row["exhausted"]),
             "files_discovered": int(row["files"]),
         }
 
@@ -912,7 +1038,7 @@ class LibraryDatabase:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT m.*, v.name
+                SELECT m.*, v.name, v.path AS media_path
                 FROM movies m
                 JOIN videos v ON v.id = m.video_id
                 WHERE v.active = 1 AND {source_clause} {status_clause}

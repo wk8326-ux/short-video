@@ -360,10 +360,29 @@ class PlaybackSequenceTest {
 
     @Test
     fun movieResponsesOnlyApplyToTheCurrentMovieQuery() {
-        assertTrue(shouldApplyMovieResponse(4L, 4L, "matrix", "matrix", MediaSurface.MOVIE))
-        assertFalse(shouldApplyMovieResponse(3L, 4L, "matrix", "matrix", MediaSurface.MOVIE))
-        assertFalse(shouldApplyMovieResponse(4L, 4L, "matrix", "alien", MediaSurface.MOVIE))
-        assertFalse(shouldApplyMovieResponse(4L, 4L, "matrix", "matrix", MediaSurface.SHORT))
+        fun applies(
+            requestGeneration: Long = 4L,
+            currentGeneration: Long = 4L,
+            requestedQuery: String = "matrix",
+            currentQuery: String = "matrix",
+            requestedSort: String = "default",
+            currentSort: String = "default",
+            currentSurface: MediaSurface = MediaSurface.MOVIE,
+        ) = shouldApplyMovieResponse(
+            requestGeneration = requestGeneration,
+            currentGeneration = currentGeneration,
+            requestedQuery = requestedQuery,
+            currentQuery = currentQuery,
+            requestedSort = requestedSort,
+            currentSort = currentSort,
+            currentSurface = currentSurface,
+        )
+
+        assertTrue(applies())
+        assertFalse(applies(requestGeneration = 3L))
+        assertFalse(applies(currentQuery = "alien"))
+        assertFalse(applies(requestedSort = "newest"))
+        assertFalse(applies(currentSurface = MediaSurface.SHORT))
     }
 
     @Test

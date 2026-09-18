@@ -81,6 +81,8 @@ class Settings:
     metatube_base_url: str = ""
     metatube_token: str = ""
     metatube_provider: str = "JavBus"
+    shared_metadata_base_url: str = ""
+    shared_metadata_token: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -140,6 +142,8 @@ class Settings:
             metatube_base_url=os.getenv("METATUBE_BASE_URL", "").strip().rstrip("/"),
             metatube_token=os.getenv("METATUBE_TOKEN", "").strip(),
             metatube_provider=os.getenv("METATUBE_PROVIDER", "JavBus").strip() or "JavBus",
+            shared_metadata_base_url=os.getenv("SHARED_METADATA_BASE_URL", "").strip().rstrip("/"),
+            shared_metadata_token=os.getenv("SHARED_METADATA_TOKEN", "").strip(),
         )
 
     def validate(self) -> None:
@@ -159,6 +163,10 @@ class Settings:
             raise ValueError("TMDB_LANGUAGE must not be empty")
         if self.metatube_base_url and not self.metatube_base_url.startswith(("http://", "https://")):
             raise ValueError("METATUBE_BASE_URL must be an absolute HTTP(S) URL")
+        if self.shared_metadata_base_url and not self.shared_metadata_base_url.startswith(
+            ("http://", "https://")
+        ):
+            raise ValueError("SHARED_METADATA_BASE_URL must be an absolute HTTP(S) URL")
         if not self.auth_password_hash.startswith("scrypt:"):
             raise ValueError("AUTH_PASSWORD_HASH is missing; run: python app/auth.py init-env .env")
         if len(self.session_secret) < 32:

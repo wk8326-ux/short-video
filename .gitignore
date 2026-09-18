@@ -30,3 +30,8 @@ playwright-report/
 test-results/
 *.log
 *.tar.gz
+
+.deploy/
+tmp-*.json
+deepfuck-android-*.apk
+short-video-android-*.apk

@@ -30,6 +30,7 @@ from app.media_sources import MediaSourceRegistry
 from app.scanner import ResumableScanner, initial_steps
 from app.movie_metadata import movie_search_candidates, parse_movie_filename
 from app.metatube import MetatubeClient
+from app.shared_metadata import SharedMetadataClient
 from app.tmdb import TmdbClient
 from app.settings import Settings
 
@@ -37,7 +38,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.10"
+APP_VERSION = "1.6.0-beta.11"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -136,6 +137,7 @@ def empty_source_scan_state() -> dict[str, Any]:
         "directoriesTotal": 0,
         "directoriesPending": 0,
         "directoriesFailed": 0,
+        "directoriesSkipped": 0,
         "filesDiscovered": 0,
         "pendingErrors": [],
     }
@@ -146,6 +148,7 @@ def apply_scan_progress(state: dict[str, Any], progress: dict[str, Any]) -> None
     state["directoriesTotal"] = int(progress.get("directories_total") or 0)
     state["directoriesPending"] = int(progress.get("directories_pending") or 0)
     state["directoriesFailed"] = int(progress.get("directories_failed") or 0)
+    state["directoriesSkipped"] = int(progress.get("directories_exhausted") or 0)
     state["filesDiscovered"] = int(progress.get("files_discovered") or 0)
     errors = progress.get("errors")
     if errors:
@@ -270,7 +273,13 @@ async def scan_source(source: str) -> bool:
             progress = await scanner.run()
             apply_scan_progress(source_state, progress)
             errors = [str(error) for error in progress.get("errors") or []]
-            if progress["directories_pending"] or progress["directories_failed"]:
+            # Only failures we still intend to retry block the run. Directories
+            # that already exhausted their retry budget are skipped instead, so a
+            # single unreadable path cannot keep a whole library unfinished.
+            blocked = int(progress.get("directories_pending") or 0) + int(
+                progress.get("directories_retryable") or 0
+            )
+            if blocked:
                 message = "; ".join(errors[:3]) or "scan incomplete"
                 await asyncio.to_thread(
                     database.update_scan_job_status,
@@ -288,14 +297,30 @@ async def scan_source(source: str) -> bool:
                 )
                 source_state["status"] = "interrupted"
                 source_state["lastError"] = (
-                    f"{progress['directories_failed']} 个目录读取失败，再次扫描即可续扫"
+                    f"{blocked} 个目录读取失败，再次扫描即可续扫"
                 )
                 logger.warning(
                     "%s scan paused with %s unfinished directories",
                     source,
-                    progress["directories_pending"] + progress["directories_failed"],
+                    blocked,
                 )
                 return False
+            skipped_paths = await asyncio.to_thread(
+                database.exhausted_scan_step_paths, job_id
+            )
+            if skipped_paths:
+                carried = await asyncio.to_thread(
+                    database.carry_over_scan_paths,
+                    source=source,
+                    marker=marker,
+                    paths=skipped_paths,
+                )
+                logger.warning(
+                    "%s scan skipping %s unreadable directories (kept %s media active)",
+                    source,
+                    len(skipped_paths),
+                    carried,
+                )
             retired = await asyncio.to_thread(
                 database.finalize_scan, source=source, marker=marker
             )
@@ -303,7 +328,11 @@ async def scan_source(source: str) -> bool:
                 database.update_scan_job_status,
                 job_id,
                 "completed",
-                error=None,
+                error=(
+                    f"{len(skipped_paths)} 个目录多次读取失败，已跳过"
+                    if skipped_paths
+                    else None
+                ),
                 count_attempt=False,
             )
             if config["section"] == "movie":
@@ -312,20 +341,25 @@ async def scan_source(source: str) -> bool:
                 )
             active = await asyncio.to_thread(database.active_media_count, source=source)
             now = int(time.time())
+            skipped_warning = (
+                f"{len(skipped_paths)} 个目录多次读取失败，已跳过"
+                if skipped_paths
+                else None
+            )
             source_state.update(
                 {
                     "status": "completed",
                     "lastSuccess": now,
-                    "lastError": None,
+                    "lastError": skipped_warning,
                     "resumed": False,
-                    "pendingErrors": [],
+                    "pendingErrors": [skipped_warning] if skipped_warning else [],
                 }
             )
             await asyncio.to_thread(
                 database.update_source_scan_state,
                 source,
                 last_success=now,
-                last_error=None,
+                last_error=skipped_warning,
                 directories=source_state["directories"],
             )
             runtime.direct_urls.clear()
@@ -515,8 +549,9 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
         try:
             has_tmdb = bool(settings.tmdb_api_read_token or settings.tmdb_api_key)
             has_metatube = bool(settings.metatube_base_url)
-            if not has_tmdb and not has_metatube:
-                raise RuntimeError("TMDB 或 MetaTube 未配置")
+            has_shared_metadata = bool(settings.shared_metadata_base_url)
+            if not has_tmdb and not has_metatube and not has_shared_metadata:
+                raise RuntimeError("TMDB / MetaTube / 共享元数据接口 均未配置")
             source_ids = (source,)
             movies = await asyncio.to_thread(
                 database.movie_metadata_candidates,
@@ -534,10 +569,51 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                 token=settings.metatube_token,
                 provider=settings.metatube_provider,
             ) if has_metatube else None
+            shared_metadata = SharedMetadataClient(
+                base_url=settings.shared_metadata_base_url,
+                token=settings.shared_metadata_token,
+            ) if has_shared_metadata else None
             metatube_cache: dict[str, Any] = {}
             try:
                 for movie in movies:
                     parsed_name = parse_movie_filename(str(movie.get("name") or ""))
+                    # The shared service already holds the sidecar covers and NFO
+                    # metadata produced for the Emby stack, so it is both faster
+                    # and more complete than re-scraping the same title here.
+                    shared_match = (
+                        await shared_metadata.lookup(
+                            str(movie.get("name") or ""),
+                            str(movie.get("media_path") or ""),
+                        )
+                        if shared_metadata is not None
+                        else None
+                    )
+                    if shared_match is not None:
+                        await asyncio.to_thread(
+                            database.update_movie_metadata,
+                            int(movie["id"]),
+                            display_title=shared_match.title or movie["display_title"],
+                            original_title=shared_match.original_title or None,
+                            year=shared_match.year or movie.get("year"),
+                            overview=shared_match.overview or None,
+                            poster_url=shared_match.poster_url
+                            or movie.get("poster_url"),
+                            backdrop_url=shared_match.backdrop_url
+                            or movie.get("backdrop_url"),
+                            tmdb_id=None,
+                            metadata_provider="shared",
+                            metatube_provider=None,
+                            metatube_id=None,
+                            release_date=str(shared_match.year) if shared_match.year else None,
+                            genres="[]",
+                            performers=json.dumps(shared_match.performers, ensure_ascii=False),
+                            studio=shared_match.studio or None,
+                            match_status="matched",
+                            match_confidence=shared_match.confidence,
+                        )
+                        movie_metadata_state["matched"] += 1
+                        movie_metadata_state["checked"] += 1
+                        continue
                     match = None
                     metatube_match = None
                     if parsed_name.metatube_code and metatube:
@@ -666,6 +742,8 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                     await client.close()
                 if metatube:
                     await metatube.close()
+                if shared_metadata:
+                    await shared_metadata.close()
             movie_metadata_state["lastSuccess"] = int(time.time())
         except Exception as exc:
             movie_metadata_state["lastError"] = str(exc)
@@ -679,6 +757,12 @@ async def lifespan(_: FastAPI):
     global movie_image_client
     await asyncio.to_thread(database.initialize)
     await source_registry.initialize()
+    orphaned = await asyncio.to_thread(database.reconcile_orphaned_scan_jobs)
+    if orphaned:
+        logger.warning(
+            "Reopened %s scan job(s) left running by a previous process",
+            len(orphaned),
+        )
     await asyncio.to_thread(refresh_source_states)
     movie_image_client = httpx.AsyncClient(
         follow_redirects=True,
@@ -873,7 +957,18 @@ def _movie_image_headers(source_url: str) -> dict[str, str]:
         headers["Referer"] = "https://www.javbus.com/"
     elif host.endswith("dmm.co.jp") or host.endswith("dmm.com"):
         headers["Referer"] = "https://www.dmm.co.jp/"
+    elif host and host == _shared_metadata_host():
+        # Sidecar artwork lives behind the shared token gateway.
+        if settings.shared_metadata_token:
+            headers["X-Media-Shared-Token"] = settings.shared_metadata_token
     return headers
+
+
+def _shared_metadata_host() -> str:
+    try:
+        return (urlsplit(settings.shared_metadata_base_url).hostname or "").lower()
+    except ValueError:
+        return ""
 
 
 def _image_media_type(content_type: str, content: bytes) -> str | None:
@@ -1322,8 +1417,13 @@ async def scan_one_source(source_id: str) -> dict[str, Any]:
 async def start_movie_metadata(source_id: str, force: bool = False) -> dict[str, Any]:
     if source_id not in source_registry.ids("movie"):
         raise HTTPException(status_code=404, detail="电影媒体源不存在或已停用")
-    if not settings.tmdb_api_read_token and not settings.tmdb_api_key and not settings.metatube_base_url:
-        raise HTTPException(status_code=503, detail="TMDB 或 MetaTube 未配置")
+    if (
+        not settings.tmdb_api_read_token
+        and not settings.tmdb_api_key
+        and not settings.metatube_base_url
+        and not settings.shared_metadata_base_url
+    ):
+        raise HTTPException(status_code=503, detail="TMDB / MetaTube / 共享元数据接口 均未配置")
     if scan_locks.get(source_id) and scan_locks[source_id].locked():
         raise HTTPException(status_code=409, detail="媒体源正在扫描，请完成后再刮削")
     source_summary = await asyncio.to_thread(

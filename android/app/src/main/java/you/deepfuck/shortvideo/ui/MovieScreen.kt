@@ -620,13 +620,21 @@ private fun MovieDetail(
                         MovieMetadataLine("演员", it.joinToString(" · "))
                     }
                     movie.metadataProvider?.let { provider ->
-                        MovieMetadataLine("资料来源", provider.uppercase())
+                        MovieMetadataLine("资料来源", metadataProviderLabel(provider))
                     }
                 }
             }
         }
     }
     }
+}
+
+/** Raw provider ids come straight from the API, so keep the UI labels here. */
+private fun metadataProviderLabel(provider: String): String = when (provider.lowercase()) {
+    "tmdb" -> "TMDB"
+    "metatube" -> "MetaTube"
+    "shared" -> "共享元数据"
+    else -> provider.uppercase()
 }
 
 @Composable

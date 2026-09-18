@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.11] - 2026-09-18
+
+### Added
+
+- Consult an optional read-only shared metadata service (`SHARED_METADATA_BASE_URL` / `SHARED_METADATA_TOKEN`) before MetaTube and TMDB, so movies whose provider scraping is incomplete still resolve a cover, plot and studio.
+- Match shared metadata by parent folder, then by the file name without its `@` suffix, then by the raw file name, and cache the remote index for 10 minutes.
+- Report skipped directories in the management view after a scan that lost some folders to repeated origin timeouts.
+
+### Fixed
+
+- Stop rescanning directories that the AList origin keeps timing out. Each directory step now has a bounded attempt budget, so a scan always reaches `completed` instead of looping in `interrupted` forever.
+- Keep already indexed media active when a directory is skipped, and surface a warning instead of silently dropping the rows.
+
+## [1.6.0-beta.10] - 2026-09-18
+
+### Changed
+
+- Order the movie wall with covered artwork first and unmatched movies last.
+- Add sorting to the movie section.
+
+## [1.6.0-beta.9] - 2026-09-17
+
+### Fixed
+
+- Stream large AList directory listings instead of buffering them, so big movie sources stop exhausting memory during a scan.
+- Finalize a scan safely so partially scanned sources keep their existing movies.
+
+## [1.6.0-beta.8] - 2026-09-05
+
+### Changed
+
+- Refine the movie detail cover presentation on Android.
+
 ## [1.6.0-beta.7] - 2026-09-01
 
 ### Changed

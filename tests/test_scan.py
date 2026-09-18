@@ -23,6 +23,7 @@ import httpx
 import pytest
 
 from app.alist import AListClient
+from app.database import SCAN_STEP_MAX_ATTEMPTS
 
 BASE_URL = "https://alist.example"
 ROOT = "/guangya-root"
@@ -255,6 +256,50 @@ async def test_failed_directory_keeps_existing_media_active(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_repeatedly_failing_directory_is_skipped_so_scan_can_finish(
+    monkeypatch, tmp_path
+):
+    """One permanently unreadable directory must not stall a whole library.
+
+    Production hit this with a single AList directory that kept timing out: the
+    scan stayed 'interrupted' forever, so the media library was never finalized
+    and none of the newly found movies ever showed up in the app.
+    """
+    main = await boot(monkeypatch, tmp_path)
+    branch = ROOT + "/stuck"
+    other = ROOT + "/other"
+    files: dict[str, list[str]] = {ROOT: [], branch: ["kept.mp4"]}
+    fake = FakeAList(build_tree(files))
+    await serve(main, "guangya", fake)
+    assert await main.scan_source("guangya") is True
+    assert active_paths(main, "guangya") == [branch + "/kept.mp4"]
+
+    # The branch now answers every request with an error, and new media shows up
+    # elsewhere in the same source.
+    fake.tree[ROOT] = [dir_entry("stuck"), dir_entry("other")]
+    fake.tree[other] = [file_entry("fresh.mp4")]
+    fake.failures[branch] = []
+
+    attempts = 0
+    budget = SCAN_STEP_MAX_ATTEMPTS
+    while attempts < budget:
+        attempts += 1
+        finalized = await main.scan_source("guangya")
+        assert finalized is (attempts >= budget)
+
+    stored = stored_rows(main, "guangya")
+    # Media under the unreadable branch is preserved, not reported as deleted.
+    assert stored[branch + "/kept.mp4"]["active"] == 1
+    assert stored[other + "/fresh.mp4"]["active"] == 1
+    assert main.database.latest_scan_job(source="guangya")["status"] == "completed"
+    state = main.scan_state["sources"]["guangya"]
+    assert state["status"] == "completed"
+    assert state["directoriesSkipped"] >= 1
+    assert "已跳过" in str(state["lastError"])
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
 async def test_interrupted_scan_resumes_where_it_stopped(monkeypatch, tmp_path):
     main = await boot(monkeypatch, tmp_path)
     files: dict[str, list[str]] = {ROOT: []}
@@ -284,6 +329,51 @@ async def test_interrupted_scan_resumes_where_it_stopped(monkeypatch, tmp_path):
         for index in (1, 2, 3)
     )
     assert active_paths(main, "guangya") == expected
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_scan_left_running_by_a_restart_is_reopened(monkeypatch, tmp_path):
+    """A deploy in the middle of a scan must not leave a phantom running job.
+
+    The scan worker only lives inside the application process, so a job still
+    marked ``running`` after a restart can never advance. Reopening it at
+    startup keeps the recorded progress and lets the next manual scan continue
+    instead of showing an endless "scanning" state.
+    """
+    main = await boot(monkeypatch, tmp_path)
+    branch = ROOT + "/branch-01"
+    fake = FakeAList(
+        build_tree({ROOT: [], branch: ["clip.mp4"]}), failures={branch: [403]}
+    )
+    await serve(main, "guangya", fake)
+
+    assert await main.scan_source("guangya") is False
+    job_id = main.database.latest_incomplete_scan_job(source="guangya")["id"]
+
+    # Simulate the process dying while a directory was in flight.
+    main.database.update_scan_job_status(job_id, "running")
+    with main.database._connect() as connection:
+        connection.execute(
+            "UPDATE media_scan_directories SET status = 'working'"
+            " WHERE job_id = ? AND path = ?",
+            (job_id, branch),
+        )
+    assert main.database.get_scan_job(job_id)["status"] == "running"
+
+    async with main.lifespan(main.app):
+        assert main.database.get_scan_job(job_id)["status"] == "interrupted"
+        assert main.scan_state["sources"]["guangya"]["status"] == "interrupted"
+
+    await main.source_registry.initialize()
+    fake.failures.clear()
+    await serve(main, "guangya", fake)
+    already_listed = list(fake.listed)
+
+    assert await main.scan_source("guangya") is True
+    assert fake.listed[len(already_listed):] == [branch]
+    assert main.database.latest_scan_job(source="guangya")["id"] == job_id
+    assert active_paths(main, "guangya") == [branch + "/clip.mp4"]
     await main.source_registry.close()
 
 
