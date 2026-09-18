@@ -1396,6 +1396,9 @@ async def _proxy_movie_image(source_url: Any, if_none_match: str | None = None) 
                         try:
                             content = await asyncio.to_thread(decrypt_media, content)
                         except Exception as exc:
+                            # The reason matters: a missing AES backend and a
+                            # corrupt payload look identical from the client.
+                            logger.warning("Movie image decrypt failed for %s: %s", url, exc)
                             raise HTTPException(
                                 status_code=502,
                                 detail="Movie image upstream returned an undecodable payload",

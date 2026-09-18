@@ -24,6 +24,13 @@ All notable changes to this project are documented in this file.
   scrape button and match summary.
 - Re-balanced the top tab bar for five sections so it no longer overlaps the overflow button on narrow screens.
 
+### Fixed
+
+- Drama posters load again. 91crdj ships every picture as an AES-CBC blob, and the image proxy needed an AES backend
+  that the runtime image never installed, so `decrypt_media` raised `ModuleNotFoundError` and every cover answered
+  `502 Movie image upstream returned an undecodable payload`. `cryptography` is now an explicit requirement, the
+  decrypt error says which backend is missing, and a failure is logged with the offending URL.
+
 ## [1.6.0-beta.12] - 2026-09-18
 
 ### Changed

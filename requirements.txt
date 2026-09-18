@@ -1,3 +1,6 @@
 fastapi==0.116.1
 httpx==0.28.1
 uvicorn==0.35.0
+# 91crdj publishes its artwork as AES-CBC blobs, so the poster proxy needs a
+# real AES backend in the image; without it every drama poster returns 502.
+cryptography==50.0.1

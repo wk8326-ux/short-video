@@ -60,6 +60,10 @@ def decrypt_media(blob: bytes) -> bytes:
 
     The page decrypts in a web worker with CryptoJS (``mode: CBC``, no padding);
     the same call maps onto pycryptodome or ``cryptography`` here.
+
+    A missing AES backend used to surface as a bare ``ModuleNotFoundError``
+    inside the poster proxy, which turned every drama cover into a 502.  Say
+    what is wrong instead of letting the caller guess.
     """
     if not blob or len(blob) % 16:
         raise DramaError("encrypted payload is not a whole number of AES blocks")
@@ -69,7 +73,12 @@ def decrypt_media(blob: bytes) -> bytes:
         return AES.new(_MEDIA_KEY, AES.MODE_CBC, _MEDIA_IV).decrypt(blob)
     except ImportError:
         pass
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    except ImportError as exc:
+        raise DramaError(
+            "no AES backend available: install pycryptodome or cryptography"
+        ) from exc
 
     decryptor = Cipher(algorithms.AES(_MEDIA_KEY), modes.CBC(_MEDIA_IV)).decryptor()
     return decryptor.update(blob) + decryptor.finalize()
