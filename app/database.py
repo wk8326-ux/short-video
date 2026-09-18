@@ -174,8 +174,6 @@ class LibraryDatabase:
                     runtime_minutes INTEGER,
                     tmdb_id INTEGER,
                     metadata_provider TEXT,
-                    metatube_provider TEXT,
-                    metatube_id TEXT,
                     release_date TEXT,
                     genres TEXT,
                     performers TEXT,
@@ -202,8 +200,6 @@ class LibraryDatabase:
             }
             for name, definition in (
                 ("metadata_provider", "TEXT"),
-                ("metatube_provider", "TEXT"),
-                ("metatube_id", "TEXT"),
                 ("release_date", "TEXT"),
                 ("genres", "TEXT"),
                 ("performers", "TEXT"),
@@ -1091,7 +1087,7 @@ class LibraryDatabase:
         allowed = {
             "display_title", "normalized_title", "original_title", "year", "overview",
             "poster_url", "backdrop_url", "rating", "runtime_minutes", "tmdb_id",
-            "metadata_provider", "metatube_provider", "metatube_id", "release_date",
+            "metadata_provider", "release_date",
             "genres", "performers", "studio", "match_status", "match_confidence",
         }
         updates = {key: value for key, value in values.items() if key in allowed}

@@ -403,14 +403,14 @@ private fun MediaSourceRow(
             if (metadataBusy) {
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    "正在刮削 ${metadataStatus.checked} / ${metadataStatus.total}",
+                    "正在匹配封面 ${metadataStatus.checked} / ${metadataStatus.total}",
                     color = TextSecondary,
                     style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 )
             } else if ((metadata?.total ?: 0) == 0) {
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    "先扫描媒体源，再刮削封面和资料。",
+                    "先扫描媒体源，再匹配封面和资料。",
                     color = TextFaint,
                     style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 )
@@ -418,7 +418,7 @@ private fun MediaSourceRow(
                 metadata?.lastSuccess?.let {
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "上次刮削 ${formatTimestamp(it)}",
+                        "上次匹配 ${formatTimestamp(it)}",
                         color = TextFaint,
                         style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                     )
@@ -483,7 +483,7 @@ private fun MediaSourceRow(
                         Icon(Icons.Outlined.ImageSearch, contentDescription = null)
                     }
                     Spacer(Modifier.size(7.dp))
-                    Text(if (metadataBusy) "刮削中" else "刮削")
+                    Text(if (metadataBusy) "匹配中" else "刷新封面")
                 }
             }
         }

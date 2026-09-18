@@ -20,13 +20,20 @@ def test_movie_search_candidates_splits_and_repairs_noisy_titles():
 
 def test_parse_movie_filename_ignores_domain_prefix_before_at_sign():
     parsed = parse_movie_filename("hhd800.com@NMYK-002.mp4")
-    assert parsed.metatube_code == "NMYK-002"
+    assert parsed.code == "NMYK-002"
 
     parsed = parse_movie_filename("rh2048.com@MGMP-061.mp4")
-    assert parsed.metatube_code == "MGMP-061"
+    assert parsed.code == "MGMP-061"
 
 
 def test_parse_movie_filename_accepts_numeric_site_prefixes():
-    assert parse_movie_filename("277DCV-303.mp4").metatube_code == "DCV-303"
-    assert parse_movie_filename("300MIUM-995.mp4").metatube_code == "MIUM-995"
-    assert parse_movie_filename("0808cjod094FHD.mp4").metatube_code == "CJOD-094"
+    assert parse_movie_filename("277DCV-303.mp4").code == "DCV-303"
+    assert parse_movie_filename("300MIUM-995.mp4").code == "MIUM-995"
+    assert parse_movie_filename("0808cjod094FHD.mp4").code == "CJOD-094"
+
+
+def test_parse_movie_filename_keeps_the_code_and_tmdb_id_separate():
+    parsed = parse_movie_filename("ABP-485.2024.[tmdbid=32249].mkv")
+
+    assert parsed.code == "ABP-485"
+    assert parsed.tmdb_id == 32249

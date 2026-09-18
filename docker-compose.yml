@@ -23,23 +23,3 @@ services:
       options:
         max-size: "5m"
         max-file: "2"
-  metatube:
-    image: ghcr.io/metatube-community/metatube-server:latest
-    container_name: short-video-metatube
-    restart: unless-stopped
-    environment:
-      TOKEN: ${METATUBE_TOKEN:-}
-    expose:
-      - "8080"
-    cpus: 0.30
-    mem_limit: 256m
-    pids_limit: 100
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    logging:
-      driver: json-file
-      options:
-        max-size: "5m"
-        max-file: "2"

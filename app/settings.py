@@ -78,9 +78,6 @@ class Settings:
     tmdb_api_read_token: str = ""
     tmdb_api_key: str = ""
     tmdb_language: str = "zh-CN"
-    metatube_base_url: str = ""
-    metatube_token: str = ""
-    metatube_provider: str = "JavBus"
     shared_metadata_base_url: str = ""
     shared_metadata_token: str = ""
 
@@ -139,9 +136,6 @@ class Settings:
             tmdb_api_read_token=os.getenv("TMDB_API_READ_TOKEN", "").strip(),
             tmdb_api_key=os.getenv("TMDB_API_KEY", "").strip(),
             tmdb_language=os.getenv("TMDB_LANGUAGE", "zh-CN").strip() or "zh-CN",
-            metatube_base_url=os.getenv("METATUBE_BASE_URL", "").strip().rstrip("/"),
-            metatube_token=os.getenv("METATUBE_TOKEN", "").strip(),
-            metatube_provider=os.getenv("METATUBE_PROVIDER", "JavBus").strip() or "JavBus",
             shared_metadata_base_url=os.getenv("SHARED_METADATA_BASE_URL", "").strip().rstrip("/"),
             shared_metadata_token=os.getenv("SHARED_METADATA_TOKEN", "").strip(),
         )
@@ -161,8 +155,6 @@ class Settings:
             raise ValueError("ASMR_AUTHOR_GROUP_PATHS entries must start with /")
         if not self.tmdb_language:
             raise ValueError("TMDB_LANGUAGE must not be empty")
-        if self.metatube_base_url and not self.metatube_base_url.startswith(("http://", "https://")):
-            raise ValueError("METATUBE_BASE_URL must be an absolute HTTP(S) URL")
         if self.shared_metadata_base_url and not self.shared_metadata_base_url.startswith(
             ("http://", "https://")
         ):

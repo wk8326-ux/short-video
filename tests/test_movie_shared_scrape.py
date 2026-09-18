@@ -1,4 +1,4 @@
-"""The shared metadata service must win over MetaTube and land in the DB."""
+"""The shared catalogue is the only movie metadata provider, and it never wipes."""
 
 import importlib
 import sys
@@ -7,6 +7,7 @@ import pytest
 
 from app.movie_metadata import parse_movie_filename
 from app.shared_metadata import SharedMetadataMatch
+from app.tmdb import TmdbMatch
 
 SAMPLE = SharedMetadataMatch(
     code="CEMD-822",
@@ -43,7 +44,34 @@ class _FakeSharedClient:
         type(self).closed = True
 
 
-def _import_main(monkeypatch, tmp_path):
+class _FakeTmdbClient:
+    """Records every TMDB call so a test can assert it was never reached."""
+
+    calls: list[str] = []
+    closed = False
+
+    def __init__(
+        self,
+        *,
+        read_token: str = "",
+        api_key: str = "",
+        language: str = "zh-CN",
+    ) -> None:
+        pass
+
+    async def movie_by_id(self, tmdb_id: int):
+        type(self).calls.append(f"id:{tmdb_id}")
+        return None
+
+    async def search_movie(self, title: str, *, year: int | None = None):
+        type(self).calls.append(title)
+        return None
+
+    async def close(self) -> None:
+        type(self).closed = True
+
+
+def _import_main(monkeypatch, tmp_path, *, tmdb: bool = False):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "library.db"))
     monkeypatch.setenv("STATIC_DIR", str(tmp_path / "static"))
     monkeypatch.setenv("ALIST_BASE_URL", "https://guangya.example")
@@ -54,8 +82,10 @@ def _import_main(monkeypatch, tmp_path):
     monkeypatch.setenv("SESSION_SECRET", "test-session-secret-with-at-least-32-characters")
     monkeypatch.setenv("SHARED_METADATA_BASE_URL", "http://shared.test/api/shared-metadata")
     monkeypatch.setenv("SHARED_METADATA_TOKEN", "test-token")
-    for key in ("TMDB_API_KEY", "TMDB_API_READ_TOKEN", "METATUBE_BASE_URL"):
+    for key in ("TMDB_API_KEY", "TMDB_API_READ_TOKEN"):
         monkeypatch.delenv(key, raising=False)
+    if tmdb:
+        monkeypatch.setenv("TMDB_API_KEY", "test-tmdb-key")
     sys.modules.pop("app.main", None)
     return importlib.import_module("app.main")
 
@@ -141,7 +171,7 @@ async def test_unmatched_titles_stay_pending_when_the_shared_index_misses(
 async def test_scrape_endpoint_accepts_a_shared_metadata_only_deployment(
     monkeypatch, tmp_path
 ):
-    """No TMDB key and no MetaTube still has to be a scrapeable setup."""
+    """A shared-catalogue-only deployment still has to be scrapeable."""
     main = _import_main(monkeypatch, tmp_path)
     monkeypatch.setattr(main.source_registry, "ids", lambda *_args, **_kwargs: ["movies"])
     monkeypatch.setattr(
@@ -161,3 +191,95 @@ async def test_scrape_endpoint_accepts_a_shared_metadata_only_deployment(
 
     assert payload["started"] is True
     assert spawned == ["movie-metadata-movies"]
+
+
+def _seed_one_movie(main, path: str, name: str) -> dict:
+    main.database.initialize()
+    main.database.replace_scan(
+        [{"path": path, "name": name, "size": 1024}],
+        source="movies",
+    )
+    main.database.sync_movie_index("movies", parse_movie_filename)
+    return main.database.movies(sources=("movies",), limit=10)[0]
+
+
+@pytest.mark.asyncio
+async def test_a_miss_never_discards_metadata_an_earlier_run_found(
+    monkeypatch, tmp_path
+):
+    """Re-running the pass must not blank covers that are already on the wall."""
+    main = _import_main(monkeypatch, tmp_path)
+    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
+    movie = _seed_one_movie(
+        main,
+        "/media/关键词分类/20260901/ABP-485/hhd800.com@ABP-485.mp4",
+        "hhd800.com@ABP-485.mp4",
+    )
+    main.database.update_movie_metadata(
+        int(movie["id"]),
+        display_title="ABP-485 既有标题",
+        poster_url="https://c0.jdbstatic.com/covers/ab/abp485.jpg",
+        metadata_provider="metatube",
+        match_status="matched",
+    )
+
+    await main.scrape_movie_metadata("movies", force=True)
+
+    stored = main.database.movies(sources=("movies",), limit=10)[0]
+    assert stored["poster_url"] == "https://c0.jdbstatic.com/covers/ab/abp485.jpg"
+    assert stored["display_title"] == "ABP-485 既有标题"
+    assert stored["match_status"] == "matched"
+
+
+@pytest.mark.asyncio
+async def test_coded_titles_never_reach_tmdb(monkeypatch, tmp_path):
+    """A番号 is a shared-catalogue key, not something TMDB can answer."""
+    main = _import_main(monkeypatch, tmp_path, tmdb=True)
+    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
+    monkeypatch.setattr(main, "TmdbClient", _FakeTmdbClient)
+    _FakeTmdbClient.calls = []
+    _seed_one_movie(
+        main,
+        "/media/关键词分类/20260901/ABP-485/hhd800.com@ABP-485.mp4",
+        "hhd800.com@ABP-485.mp4",
+    )
+
+    await main.scrape_movie_metadata("movies")
+
+    assert _FakeTmdbClient.calls == []
+    stored = main.database.movies(sources=("movies",), limit=10)[0]
+    assert stored["match_status"] == "unmatched"
+    assert not stored["metadata_provider"]
+
+
+@pytest.mark.asyncio
+async def test_plain_titles_still_fall_back_to_tmdb(monkeypatch, tmp_path):
+    main = _import_main(monkeypatch, tmp_path, tmdb=True)
+    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
+
+    class _MatchingTmdbClient(_FakeTmdbClient):
+        async def search_movie(self, title: str, *, year: int | None = None):
+            type(self).calls.append(title)
+            return TmdbMatch(
+                tmdb_id=32249,
+                title="公元2000",
+                original_title="公元2000",
+                year=2000,
+                overview="简介",
+                poster_url="https://image.tmdb.org/t/p/w500/poster.jpg",
+                backdrop_url="https://image.tmdb.org/t/p/w780/backdrop.jpg",
+                rating=6.5,
+                status="matched",
+                confidence=0.9,
+            )
+
+    monkeypatch.setattr(main, "TmdbClient", _MatchingTmdbClient)
+    _MatchingTmdbClient.calls = []
+    _seed_one_movie(main, "/media/movies/公元2000.2000.mkv", "公元2000.2000.mkv")
+
+    await main.scrape_movie_metadata("movies")
+
+    stored = main.database.movies(sources=("movies",), limit=10)[0]
+    assert stored["metadata_provider"] == "tmdb"
+    assert stored["match_status"] == "matched"
+    assert stored["poster_url"] == "https://image.tmdb.org/t/p/w500/poster.jpg"

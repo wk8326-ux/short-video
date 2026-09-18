@@ -7,8 +7,8 @@ from pathlib import PurePath
 
 _YEAR = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 _TMDB_ID = re.compile(r"\[\s*tmdbid\s*[:=]\s*(\d+)\s*\]", re.IGNORECASE)
-_METATUBE_CODE = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{2,12})[-_ ]?(\d{2,6})(?!\d)")
-_METATUBE_CODE_AFTER_DIGITS = re.compile(
+_CODE_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{2,12})[-_ ]?(\d{2,6})(?!\d)")
+_CODE_AFTER_DIGITS = re.compile(
     r"(?<![A-Za-z0-9])\d{2,5}([A-Za-z]{2,12})[-_ ]?(\d{2,6})(?!\d)"
 )
 _TECHNICAL = re.compile(
@@ -31,7 +31,7 @@ class MovieName:
     normalized_title: str
     year: int | None
     tmdb_id: int | None = None
-    metatube_code: str | None = None
+    code: str | None = None
 
 
 def movie_search_candidates(title: str) -> list[str]:
@@ -80,13 +80,13 @@ def parse_movie_filename(name: str) -> MovieName:
     # Cloud-drive names often prefix the real番号 with an origin such as
     # ``hhd800.com@`` or ``rh2048.com@``. Search the suffix after the final
     # ``@`` so the domain itself cannot be mistaken for a movie code.
-    metatube_stem = stem.rsplit("@", 1)[-1]
-    metatube_match = _METATUBE_CODE.search(metatube_stem)
-    if metatube_match is None:
-        metatube_match = _METATUBE_CODE_AFTER_DIGITS.search(metatube_stem)
-    metatube_code = (
-        f"{metatube_match.group(1).upper()}-{int(metatube_match.group(2)):03d}"
-        if metatube_match
+    code_stem = stem.rsplit("@", 1)[-1]
+    code_match = _CODE_PATTERN.search(code_stem)
+    if code_match is None:
+        code_match = _CODE_AFTER_DIGITS.search(code_stem)
+    code = (
+        f"{code_match.group(1).upper()}-{int(code_match.group(2)):03d}"
+        if code_match
         else None
     )
     year_match = _YEAR.search(stem)
@@ -103,5 +103,5 @@ def parse_movie_filename(name: str) -> MovieName:
         normalized_title=title.casefold(),
         year=year,
         tmdb_id=tmdb_id,
-        metatube_code=metatube_code,
+        code=code,
     )

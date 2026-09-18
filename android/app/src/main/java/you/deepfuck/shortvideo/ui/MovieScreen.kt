@@ -632,7 +632,6 @@ private fun MovieDetail(
 /** Raw provider ids come straight from the API, so keep the UI labels here. */
 private fun metadataProviderLabel(provider: String): String = when (provider.lowercase()) {
     "tmdb" -> "TMDB"
-    "metatube" -> "MetaTube"
     "shared" -> "共享元数据"
     else -> provider.uppercase()
 }

@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.12] - 2026-09-18
+
+### Changed
+
+- Movie covers come from the shared catalogue only. MetaTube is gone: the client, the settings, the compose service and the filename scraper are removed, so no numbered title can trigger a third-party scrape again.
+- A finished movie scan runs the cover pass by itself. Scanning is now the only manual step, which is what closes the loop when a media source changes.
+- The per-source management button is relabelled `刷新封面` / `匹配中`, because it no longer scrapes: it re-reads the shared index.
+- The movie payload no longer carries `metatubeProvider` / `metatubeId`, and older databases keep their legacy columns untouched.
+
+### Fixed
+
+- A metadata miss no longer blanks a row. Re-running the pass over a matched library used to write `poster_url = NULL` for every title the current provider could not answer, so a switched-off provider wiped the wall.
+- Titles carrying a番号 are never sent to TMDB, where a coincidental name used to produce a wrong cover.
+
 ## [1.6.0-beta.11] - 2026-09-18
 
 ### Added

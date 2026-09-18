@@ -4,6 +4,6 @@ data/
 tests/
 frontend/node_modules/
 frontend/dist/
-__pycache__/
-*.pyc
+**/__pycache__/
+**/*.pyc
 *.tar.gz

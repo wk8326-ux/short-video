@@ -112,5 +112,7 @@ Key source settings:
 - `DURATION_BOUNDARY_SECONDS`: Guangya short/long boundary, default `180`.
 - `METADATA_PROBE_BATCH_SIZE`: maximum MP4 duration probes per scan, default `30`.
 - `ASMR_EXTENSIONS`: direct files indexed inside each author directory.
-- `METATUBE_BASE_URL` / `METATUBE_TOKEN`: optional private MetaTube service. Exact numbered media uses it before TMDB; ordinary films remain on TMDB.
-- `SHARED_METADATA_BASE_URL` / `SHARED_METADATA_TOKEN`: optional read-only shared metadata service (cover, NFO and plot sharing). It is consulted before MetaTube and TMDB for movie sources, and its index is cached in the server process for 10 minutes.
+- `SHARED_METADATA_BASE_URL` / `SHARED_METADATA_TOKEN`: read-only shared metadata service (cover, NFO and plot sharing). It is the first stop for every movie, and its index is cached in the server process for 10 minutes.
+- `TMDB_API_KEY` / `TMDB_API_READ_TOKEN`: only used for titles that carry no番号, since a coded title must never be matched against a generic movie database.
+
+Movie metadata is never scraped twice for the same title: a completed scan runs the cover pass itself, and a miss leaves whatever the row already has in place.

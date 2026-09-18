@@ -474,3 +474,47 @@ async def test_scanning_one_source_leaves_other_sources_untouched(
     assert main.database.latest_scan_job(source="asmr6") is None
     assert main.spawned_background == ["media-metadata-check"]
     await main.source_registry.close()
+
+
+MOVIE_ROOT = "/movies"
+
+
+@pytest.mark.asyncio
+async def test_a_finished_movie_scan_runs_the_cover_pass_on_its_own(
+    monkeypatch, tmp_path
+):
+    """Scanning is the only manual step; covers must land without a second tap."""
+    main = await boot(monkeypatch, tmp_path)
+    main.database.seed_media_sources(
+        [
+            {
+                "id": "movies",
+                "name": "光鸭-电影",
+                "provider": "alist",
+                "base_url": BASE_URL,
+                "root_path": MOVIE_ROOT,
+                "section": "movie",
+                "scan_mode": "tree",
+                "anonymous": False,
+                "token": "",
+                "username": "",
+                "password": "",
+                "enabled": True,
+            }
+        ]
+    )
+    await main.source_registry.reload()
+    fake = FakeAList(build_tree({MOVIE_ROOT: ["hhd800.com@ABP-485.mp4"]}))
+    await serve(main, "movies", fake)
+    started: list[str] = []
+    monkeypatch.setattr(
+        main,
+        "start_movie_metadata_job",
+        lambda source, **kwargs: started.append(source) or True,
+    )
+
+    assert await main.scan_source("movies") is True
+
+    assert started == ["movies"]
+    assert main.spawned_background == []
+    await main.source_registry.close()

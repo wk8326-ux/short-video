@@ -96,7 +96,7 @@ class SharedMetadataClient:
 
     The service already holds the sidecar covers and NFO metadata that the
     standalone Emby stack scraped, so the movie library can reuse them instead
-    of running its own MetaTube lookups for the same titles.
+    of scraping the same titles a second time.
     """
 
     def __init__(

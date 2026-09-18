@@ -29,7 +29,6 @@ from app.media_metadata import mp4_duration_seconds
 from app.media_sources import MediaSourceRegistry
 from app.scanner import ResumableScanner, initial_steps
 from app.movie_metadata import movie_search_candidates, parse_movie_filename
-from app.metatube import MetatubeClient
 from app.shared_metadata import SharedMetadataClient
 from app.tmdb import TmdbClient
 from app.settings import Settings
@@ -38,7 +37,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.11"
+APP_VERSION = "1.6.0-beta.12"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -375,6 +374,12 @@ async def scan_source(source: str) -> bool:
                     check_media_metadata(force=False),
                     name="media-metadata-check",
                 )
+            if config["section"] == "movie":
+                # Assembling covers from the shared catalogue is an index lookup
+                # rather than a scrape, so a finished scan can always finish the
+                # job: a refresh here is what closes the "I changed the source"
+                # loop without a second manual button.
+                start_movie_metadata_job(source)
             return True
         except Exception as exc:
             if job:
@@ -532,6 +537,39 @@ async def check_media_metadata(*, force: bool) -> None:
             metadata_state["running"] = False
 
 
+async def _mark_movie_unmatched_if_empty(movie: dict[str, Any]) -> None:
+    """Record a miss without discarding metadata an earlier run already found."""
+    if movie.get("metadata_provider") or str(movie.get("poster_url") or "").strip():
+        return
+    await asyncio.to_thread(
+        database.update_movie_metadata,
+        int(movie["id"]),
+        match_status="unmatched",
+        match_confidence=0.0,
+    )
+
+
+def start_movie_metadata_job(source: str, *, force: bool = False) -> bool:
+    """Kick off a metadata pass and report whether this call started it."""
+    if movie_metadata_lock.locked() or movie_metadata_state["running"]:
+        return False
+    movie_metadata_state.update(
+        {
+            "running": True,
+            "source": source,
+            "checked": 0,
+            "total": 0,
+            "matched": 0,
+            "lastError": None,
+        }
+    )
+    spawn_background(
+        scrape_movie_metadata(source, force=force),
+        name=f"movie-metadata-{source}",
+    )
+    return True
+
+
 async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
     if movie_metadata_lock.locked():
         return
@@ -548,10 +586,9 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
         )
         try:
             has_tmdb = bool(settings.tmdb_api_read_token or settings.tmdb_api_key)
-            has_metatube = bool(settings.metatube_base_url)
             has_shared_metadata = bool(settings.shared_metadata_base_url)
-            if not has_tmdb and not has_metatube and not has_shared_metadata:
-                raise RuntimeError("TMDB / MetaTube / 共享元数据接口 均未配置")
+            if not has_tmdb and not has_shared_metadata:
+                raise RuntimeError("共享元数据接口与 TMDB 均未配置")
             source_ids = (source,)
             movies = await asyncio.to_thread(
                 database.movie_metadata_candidates,
@@ -564,16 +601,10 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                 api_key=settings.tmdb_api_key,
                 language=settings.tmdb_language,
             ) if has_tmdb else None
-            metatube = MetatubeClient(
-                base_url=settings.metatube_base_url,
-                token=settings.metatube_token,
-                provider=settings.metatube_provider,
-            ) if has_metatube else None
             shared_metadata = SharedMetadataClient(
                 base_url=settings.shared_metadata_base_url,
                 token=settings.shared_metadata_token,
             ) if has_shared_metadata else None
-            metatube_cache: dict[str, Any] = {}
             try:
                 for movie in movies:
                     parsed_name = parse_movie_filename(str(movie.get("name") or ""))
@@ -602,8 +633,6 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                             or movie.get("backdrop_url"),
                             tmdb_id=None,
                             metadata_provider="shared",
-                            metatube_provider=None,
-                            metatube_id=None,
                             release_date=str(shared_match.year) if shared_match.year else None,
                             genres="[]",
                             performers=json.dumps(shared_match.performers, ensure_ascii=False),
@@ -614,77 +643,14 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                         movie_metadata_state["matched"] += 1
                         movie_metadata_state["checked"] += 1
                         continue
-                    match = None
-                    metatube_match = None
-                    if parsed_name.metatube_code and metatube:
-                        code = parsed_name.metatube_code
-                        if code not in metatube_cache:
-                            try:
-                                metatube_cache[code] = await metatube.lookup(code)
-                            except Exception as exc:
-                                logger.warning(
-                                    "MetaTube lookup failed for %s (%s): %s",
-                                    movie.get("name") or movie.get("display_title"),
-                                    code,
-                                    exc,
-                                )
-                                metatube_cache[code] = None
-                        metatube_match = metatube_cache[code]
-                        if metatube_match is None:
-                            # A coded title belongs to MetaTube. Do not send it to
-                            # TMDB, where a coincidental title could be mis-matched.
-                            await asyncio.to_thread(
-                                database.update_movie_metadata,
-                                int(movie["id"]),
-                                display_title=parsed_name.display_title,
-                                normalized_title=parsed_name.normalized_title,
-                                original_title=None,
-                                overview=None,
-                                poster_url=None,
-                                backdrop_url=None,
-                                rating=None,
-                                runtime_minutes=None,
-                                tmdb_id=None,
-                                metadata_provider=None,
-                                metatube_provider=None,
-                                metatube_id=None,
-                                release_date=None,
-                                genres="[]",
-                                performers="[]",
-                                studio=None,
-                                match_status="unmatched",
-                                match_confidence=0.0,
-                            )
-                            movie_metadata_state["checked"] += 1
-                            continue
-                    if metatube_match is not None:
-                        await asyncio.to_thread(
-                            database.update_movie_metadata,
-                            int(movie["id"]),
-                            display_title=metatube_match.title or movie["display_title"],
-                            original_title=metatube_match.original_title,
-                            year=int(metatube_match.release_date[:4])
-                            if metatube_match.release_date and metatube_match.release_date[:4].isdigit()
-                            else movie.get("year"),
-                            overview=metatube_match.overview,
-                            poster_url=metatube_match.poster_url,
-                            backdrop_url=metatube_match.backdrop_url,
-                            rating=metatube_match.rating,
-                            runtime_minutes=metatube_match.runtime_minutes,
-                            tmdb_id=None,
-                            metadata_provider="metatube",
-                            metatube_provider=metatube_match.provider,
-                            metatube_id=metatube_match.movie_id,
-                            release_date=metatube_match.release_date,
-                            genres=json.dumps(metatube_match.genres, ensure_ascii=False),
-                            performers=json.dumps(metatube_match.performers, ensure_ascii=False),
-                            studio=metatube_match.studio,
-                            match_status="matched",
-                            match_confidence=metatube_match.confidence,
-                        )
-                        movie_metadata_state["matched"] += 1
+                    if parsed_name.code:
+                        # A coded title belongs to the shared catalogue. A generic
+                        # movie database would happily match a coincidental title,
+                        # so an unmatched code is left exactly as it stands.
+                        await _mark_movie_unmatched_if_empty(movie)
                         movie_metadata_state["checked"] += 1
                         continue
+                    match = None
                     if parsed_name.tmdb_id and client:
                         match = await client.movie_by_id(parsed_name.tmdb_id)
                     if match is None and client:
@@ -706,12 +672,7 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                                 best = candidate
                         match = best
                     if match is None:
-                        await asyncio.to_thread(
-                            database.update_movie_metadata,
-                            int(movie["id"]),
-                            match_status="unmatched",
-                            match_confidence=0.0,
-                        )
+                        await _mark_movie_unmatched_if_empty(movie)
                     else:
                         await asyncio.to_thread(
                             database.update_movie_metadata,
@@ -726,8 +687,6 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                             runtime_minutes=match.runtime_minutes,
                             tmdb_id=match.tmdb_id,
                             metadata_provider="tmdb",
-                            metatube_provider=None,
-                            metatube_id=None,
                             release_date=str(match.year) if match.year else None,
                             genres="[]",
                             performers="[]",
@@ -740,8 +699,6 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
             finally:
                 if client:
                     await client.close()
-                if metatube:
-                    await metatube.close()
                 if shared_metadata:
                     await shared_metadata.close()
             movie_metadata_state["lastSuccess"] = int(time.time())
@@ -934,8 +891,6 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         payload["size"] = row.get("size")
         payload["format"] = row.get("media_format")
         payload["metadataProvider"] = row.get("metadata_provider")
-        payload["metatubeProvider"] = row.get("metatube_provider")
-        payload["metatubeId"] = row.get("metatube_id")
         payload["releaseDate"] = row.get("release_date")
         payload["genres"] = _metadata_list(row.get("genres"))
         payload["performers"] = _metadata_list(row.get("performers"))
@@ -1420,34 +1375,18 @@ async def start_movie_metadata(source_id: str, force: bool = False) -> dict[str,
     if (
         not settings.tmdb_api_read_token
         and not settings.tmdb_api_key
-        and not settings.metatube_base_url
         and not settings.shared_metadata_base_url
     ):
-        raise HTTPException(status_code=503, detail="TMDB / MetaTube / 共享元数据接口 均未配置")
+        raise HTTPException(status_code=503, detail="共享元数据接口与 TMDB 均未配置")
     if scan_locks.get(source_id) and scan_locks[source_id].locked():
-        raise HTTPException(status_code=409, detail="媒体源正在扫描，请完成后再刮削")
+        raise HTTPException(status_code=409, detail="媒体源正在扫描，请完成后再匹配封面")
     source_summary = await asyncio.to_thread(
         database.movie_metadata_summary,
         sources=(source_id,),
     )
     if not source_summary["total"]:
         raise HTTPException(status_code=409, detail="请先扫描电影媒体源")
-    started = not movie_metadata_lock.locked() and not movie_metadata_state["running"]
-    if started:
-        movie_metadata_state.update(
-            {
-                "running": True,
-                "source": source_id,
-                "checked": 0,
-                "total": 0,
-                "matched": 0,
-                "lastError": None,
-            }
-        )
-        spawn_background(
-            scrape_movie_metadata(source_id, force=force),
-            name=f"movie-metadata-{source_id}",
-        )
+    started = start_movie_metadata_job(source_id, force=force)
     return {"started": started, "movieMetadata": movie_metadata_state}
 
 
