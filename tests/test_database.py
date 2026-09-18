@@ -334,6 +334,51 @@ def test_media_source_registry_persists_scan_state_and_section(tmp_path):
     assert database.source_ids_for_section("feed") == ("guangya",)
 
 
+def test_deleting_a_media_source_removes_its_scan_history(tmp_path):
+    """A removed library must not keep reporting a half-finished scan."""
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    database.seed_media_sources(
+        [
+            {
+                "id": "source-gone",
+                "name": "已删除",
+                "provider": "alist",
+                "base_url": "https://guangya.example",
+                "root_path": "/gone",
+                "section": "movie",
+                "scan_mode": "tree",
+                "anonymous": False,
+                "token": "",
+                "username": "",
+                "password": "",
+                "enabled": True,
+            }
+        ]
+    )
+    job = database.create_scan_job(
+        source="source-gone",
+        root_path="/gone",
+        base_url="https://guangya.example",
+        scan_mode="tree",
+        section="movie",
+    )
+    database.seed_scan_directories(str(job["id"]), [("list", "/gone")])
+    database.update_scan_job_status(str(job["id"]), "interrupted", error="读取失败")
+
+    assert database.delete_media_source("source-gone") is True
+
+    assert database.source_scan_states() == {}
+    connection = sqlite3.connect(database.path)
+    try:
+        remaining = connection.execute(
+            "SELECT COUNT(*) FROM media_scan_directories"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert remaining == 0
+
+
 def test_initialize_migrates_legacy_path_unique_without_changing_ids(tmp_path):
     path = tmp_path / "library.db"
     with sqlite3.connect(path) as connection:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import posixpath
+import re
 from collections.abc import AsyncIterator
 from collections import deque
 from pathlib import PurePosixPath
@@ -24,27 +25,36 @@ NON_MEDIA_EXTENSIONS = frozenset(
     {
         ".7z",
         ".ass",
+        ".apk",
         ".bmp",
+        ".bat",
         ".chm",
         ".doc",
         ".docx",
+        ".dmg",
         ".epub",
+        ".exe",
         ".gif",
         ".gz",
         ".htm",
         ".html",
+        ".ipa",
         ".idx",
         ".iso",
         ".jpeg",
         ".jpg",
         ".lnk",
+        ".log",
+        ".msi",
         ".json",
         ".mht",
         ".mhtml",
         ".nfo",
         ".png",
         ".pdf",
+        ".psd",
         ".rar",
+        ".sh",
         ".srt",
         ".ssa",
         ".sub",
@@ -55,9 +65,53 @@ NON_MEDIA_EXTENSIONS = frozenset(
         ".vtt",
         ".webp",
         ".xml",
+        ".xlsx",
         ".zip",
     }
 )
+
+# Container formats a cloud drive can hand out for a movie even though they are
+# not part of the configured whitelist. The list is a whitelist on purpose:
+# everything outside it (``.apk``, ``.exe``, ``.html``, ``.nfo`` ...) is
+# provider clutter and must never turn into a library row.
+PLAYABLE_EXTENSIONS = frozenset(
+    {
+        ".3g2",
+        ".3gp",
+        ".asf",
+        ".avi",
+        ".dat",
+        ".divx",
+        ".dv",
+        ".f4v",
+        ".flv",
+        ".m2t",
+        ".m2ts",
+        ".m2v",
+        ".m4v",
+        ".mkv",
+        ".mov",
+        ".mp4",
+        ".mpe",
+        ".mpeg",
+        ".mpg",
+        ".mts",
+        ".ogv",
+        ".rm",
+        ".rmvb",
+        ".ts",
+        ".vob",
+        ".webm",
+        ".wmv",
+    }
+)
+# Providers occasionally strip the extension from a real movie (``《无间道》``),
+# so extension-less entries stay eligible - but only when they are big enough to
+# be a movie. ``解压密码 1024`` is the kind of junk this keeps out.
+MIN_EXTENSIONLESS_MEDIA_BYTES = 20 * 1024 * 1024
+# A dotted title such as ``《蝙蝠侠.黑暗骑士》`` is not an extension, so only a
+# plain ASCII suffix counts as one.
+EXTENSION_PATTERN = re.compile(r"\.[a-z0-9]{1,6}")
 
 
 class AListError(RuntimeError):
@@ -327,8 +381,23 @@ class AListClient:
         if not name or "/" in name or bool(entry.get("is_dir")):
             return None
         extension = PurePosixPath(name).suffix.lower()
-        if extension not in self.extensions and (
-            not self._include_unknown_files or extension in NON_MEDIA_EXTENSIONS
+        if extension and not EXTENSION_PATTERN.fullmatch(extension):
+            extension = ""
+        if extension:
+            # A known extension is playable; an unknown one only counts when it
+            # is a real container format, never when it is an install package,
+            # archive, subtitle or web page shipped next to the media.
+            if (
+                extension not in self.extensions
+                and (
+                    extension not in PLAYABLE_EXTENSIONS
+                    or extension in NON_MEDIA_EXTENSIONS
+                )
+            ):
+                return None
+        elif (
+            not self._include_unknown_files
+            or int(entry.get("size") or 0) < MIN_EXTENSIONLESS_MEDIA_BYTES
         ):
             return None
         return {

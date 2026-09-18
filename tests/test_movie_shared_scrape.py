@@ -232,6 +232,61 @@ async def test_a_miss_never_discards_metadata_an_earlier_run_found(
 
 
 @pytest.mark.asyncio
+async def test_a_forced_pass_clears_a_cover_the_shared_index_no_longer_claims(
+    monkeypatch, tmp_path
+):
+    """Forced re-matching is authoritative; TMDB-curated rows stay untouched."""
+    main = _import_main(monkeypatch, tmp_path)
+    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
+    movie = _seed_one_movie(
+        main,
+        "/media/关键词分类/绝顶FUCK/KCPN-054.mp4",
+        "KCPN-054.mp4",
+    )
+    # What the buggy folder-name matcher stored on an earlier run.
+    main.database.update_movie_metadata(
+        int(movie["id"]),
+        display_title="ABP-167 共享标题",
+        poster_url="https://c0.jdbstatic.com/covers/ve/veyGnb.jpg",
+        backdrop_url="https://c0.jdbstatic.com/covers/ve/veyGnb.jpg",
+        metadata_provider="shared",
+        match_status="matched",
+    )
+
+    await main.scrape_movie_metadata("movies", force=True)
+
+    stored = main.database.movies(sources=("movies",), limit=10)[0]
+    assert stored["match_status"] == "unmatched"
+    assert not stored["poster_url"]
+    assert not stored["metadata_provider"]
+    # The title falls back to what the file itself says.
+    assert stored["display_title"] == "KCPN-054"
+
+
+@pytest.mark.asyncio
+async def test_an_incremental_pass_keeps_existing_shared_metadata(monkeypatch, tmp_path):
+    """Only a forced pass may drop metadata; a routine pass still never wipes."""
+    main = _import_main(monkeypatch, tmp_path)
+    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
+    movie = _seed_one_movie(
+        main,
+        "/media/关键词分类/绝顶FUCK/KCPN-054.mp4",
+        "KCPN-054.mp4",
+    )
+    main.database.update_movie_metadata(
+        int(movie["id"]),
+        poster_url="https://c0.jdbstatic.com/covers/ve/veyGnb.jpg",
+        metadata_provider="shared",
+        match_status="matched",
+    )
+
+    await main.scrape_movie_metadata("movies")
+
+    stored = main.database.movies(sources=("movies",), limit=10)[0]
+    assert stored["poster_url"] == "https://c0.jdbstatic.com/covers/ve/veyGnb.jpg"
+
+
+@pytest.mark.asyncio
 async def test_coded_titles_never_reach_tmdb(monkeypatch, tmp_path):
     """A番号 is a shared-catalogue key, not something TMDB can answer."""
     main = _import_main(monkeypatch, tmp_path, tmdb=True)
@@ -283,3 +338,85 @@ async def test_plain_titles_still_fall_back_to_tmdb(monkeypatch, tmp_path):
     assert stored["metadata_provider"] == "tmdb"
     assert stored["match_status"] == "matched"
     assert stored["poster_url"] == "https://image.tmdb.org/t/p/w500/poster.jpg"
+
+
+class _ArtworklessSharedClient(_FakeSharedClient):
+    """Matches the file, but the catalogue holds no cover for that release."""
+
+    async def lookup(self, name: str, path: str = "") -> SharedMetadataMatch | None:
+        type(self).lookups.append((name, path))
+        return SharedMetadataMatch(
+            code="KCPN-054",
+            title="KCPN-054 共享标题",
+            original_title="",
+            year=2020,
+            overview="",
+            studio="",
+            performers=(),
+            poster_url="",
+            backdrop_url="",
+            website="",
+            confidence=0.98,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_matched_row_drops_the_artwork_borrowed_from_another_release(
+    monkeypatch, tmp_path
+):
+    """One flat folder used to hand one poster to every file in it.
+
+    Even after the matcher resolves each file to its own release, the row kept
+    showing the borrowed poster because the shared match carried no cover and
+    the stored value was reused. A neighbour's artwork has to go.
+    """
+    main = _import_main(monkeypatch, tmp_path)
+    monkeypatch.setattr(main, "SharedMetadataClient", _ArtworklessSharedClient)
+    movie = _seed_one_movie(
+        main,
+        "/media/关键词分类/绝顶FUCK/KCPN-054.mp4",
+        "KCPN-054.mp4",
+    )
+    # What the folder-name matcher left on the row on an earlier run.
+    main.database.update_movie_metadata(
+        int(movie["id"]),
+        display_title="ABP-167 共享标题",
+        poster_url="https://c0.jdbstatic.com/covers/47/475G.jpg",
+        backdrop_url="https://c0.jdbstatic.com/covers/47/475G.jpg",
+        metadata_provider="shared",
+        match_status="matched",
+    )
+
+    await main.scrape_movie_metadata("movies", force=True)
+
+    stored = main.database.movies(sources=("movies",), limit=10)[0]
+    assert stored["match_status"] == "matched"
+    assert stored["display_title"] == "KCPN-054 共享标题"
+    assert not stored["poster_url"]
+    assert not stored["backdrop_url"]
+
+
+@pytest.mark.asyncio
+async def test_a_shared_match_never_strips_artwork_curated_elsewhere(
+    monkeypatch, tmp_path
+):
+    """A TMDB or hand-picked poster survives a coverless shared match."""
+    main = _import_main(monkeypatch, tmp_path)
+    monkeypatch.setattr(main, "SharedMetadataClient", _ArtworklessSharedClient)
+    movie = _seed_one_movie(
+        main, "/media/movies/公元2000.2000.mkv", "公元2000.2000.mkv"
+    )
+    main.database.update_movie_metadata(
+        int(movie["id"]),
+        display_title="公元2000",
+        poster_url="https://image.tmdb.org/t/p/w500/poster.jpg",
+        backdrop_url="https://image.tmdb.org/t/p/w780/backdrop.jpg",
+        metadata_provider="tmdb",
+        match_status="matched",
+    )
+
+    await main.scrape_movie_metadata("movies", force=True)
+
+    stored = main.database.movies(sources=("movies",), limit=10)[0]
+    assert stored["poster_url"] == "https://image.tmdb.org/t/p/w500/poster.jpg"
+    assert stored["backdrop_url"] == "https://image.tmdb.org/t/p/w780/backdrop.jpg"

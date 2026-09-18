@@ -250,3 +250,90 @@ async def test_metadata_by_code_reads_a_single_record():
     assert client.absolute_url("/poster?path=x") == f"{BASE}/poster?path=x"
     assert client.absolute_url("poster?path=x") == f"{BASE}/poster?path=x"
     assert client.absolute_url("") == ""
+
+
+def _flat_folder_index(codes: list[str], folder: str = "绝顶FUCK") -> list[dict]:
+    """A flat "关键词分类" directory: one folder name, many unrelated codes."""
+    return [_entry(code, folder, f"{code} 标题") for code in codes]
+
+
+@pytest.mark.asyncio
+async def test_flat_folder_name_never_hands_one_cover_to_every_release():
+    """``绝顶FUCK`` holds many codes; the old index gave them all entry #1."""
+    codes = ["ABP-167", "ABP-259", "HODV-20987", "KCPN-054", "SDNM-181"]
+    asked: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/index"):
+            return httpx.Response(200, json={"ok": True, "total": 5, "items": _flat_folder_index(codes)})
+        asked.append(request.url.params["code"])
+        code = request.url.params["code"]
+        return httpx.Response(200, json={"ok": True, "code": code, "title": f"{code} 标题", "cover_url": f"https://c/{code}.jpg"})
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(base_url=BASE, token="t", client=http_client)
+
+    matches = [
+        await client.lookup(f"{code}.mp4", f"/光鸭/关键词分类/绝顶FUCK/{code}.mp4")
+        for code in codes
+    ]
+    await http_client.aclose()
+
+    assert [match.code for match in matches if match] == codes
+    assert [match.poster_url for match in matches if match] == [
+        f"https://c/{code}.jpg" for code in codes
+    ]
+    assert asked == codes
+
+
+@pytest.mark.asyncio
+async def test_lookup_prefers_no_cover_over_a_borrowed_one():
+    """One index entry claims the folder name: unrelated files get nothing."""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/index"):
+            return httpx.Response(200, json={"ok": True, "total": 1, "items": [_entry("ABP-167", "绝顶FUCK")]})
+        raise AssertionError("no detail call may happen for a rejected match")
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(base_url=BASE, token="t", client=http_client)
+
+    assert (
+        await client.lookup("KCPN-054.mp4", "/光鸭/关键词分类/绝顶FUCK/KCPN-054.mp4")
+        is None
+    )
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_generic_container_folder_names_are_ignored():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/index"):
+            return httpx.Response(200, json={"ok": True, "total": 1, "items": [_entry("XYZ-001", "mp4")]})
+        raise AssertionError("a folder called ``mp4`` must not match anything")
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(base_url=BASE, token="t", client=http_client)
+
+    assert await client.lookup("SDNM-181.mp4", "/下载/新/mp4/SDNM-181.mp4") is None
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_date_style_codes_normalise_on_both_sides():
+    """``CARIB-010225`` in the catalogue must answer a ``carib-10225`` guess."""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/index"):
+            return httpx.Response(
+                200,
+                json={"ok": True, "total": 1, "items": [_entry("CARIB-010225", "别的目录名", "日期番号")]},
+            )
+        assert request.url.params["code"] == "CARIB-010225"
+        return httpx.Response(200, json={"ok": True, "code": "CARIB-010225", "title": "日期番号", "cover_url": "https://c/x.jpg"})
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(base_url=BASE, token="t", client=http_client)
+
+    match = await client.lookup("carib-010225-001-FHD.mp4", "/下载/杂项/carib-010225-001-FHD.mp4")
+    await http_client.aclose()
+
+    assert match is not None and match.code == "CARIB-010225"

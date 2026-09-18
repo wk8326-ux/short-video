@@ -160,28 +160,39 @@ def refresh_source_states() -> None:
     for source in database.list_media_sources():
         source_id = str(source["id"])
         current_ids.add(source_id)
-        previous = scan_state["sources"].get(source_id, {})
-        state = empty_source_scan_state()
-        state["running"] = bool(previous.get("running", False))
-        state["lastSuccess"] = source.get("last_scan_success")
+        lock = scan_locks.setdefault(source_id, asyncio.Lock())
+        # ``scan_source`` holds a reference to this very dict for the whole run
+        # (progress callbacks write into it), so the entry must be updated in
+        # place. Replacing it here orphaned the scanner's object and left the
+        # published state saying "scanning" forever after a single refresh.
+        state = scan_state["sources"].setdefault(
+            source_id, empty_source_scan_state()
+        )
+        # The lock is the only authority on whether a scan is really in flight.
+        # A flag remembered from a previous state snapshot could outlive the
+        # coroutine that set it, which made the management screen show a scan
+        # that had already finished and silently refused to start a new one.
+        state["running"] = lock.locked()
         job = jobs.get(source_id) or {}
         error = job.get("error") or source.get("last_scan_error")
-        state["status"] = job.get("status")
-        state["lastError"] = error
-        state["directories"] = int(source.get("directories") or 0)
-        if error:
-            state["pendingErrors"] = [str(error)]
-        if job and not state["running"]:
-            apply_scan_progress(
-                state,
-                database.scan_step_progress(
-                    job_id=str(job["id"]),
-                    source=source_id,
-                    marker=str(job["marker"]),
-                ),
-            )
-        scan_state["sources"][source_id] = state
-        scan_locks.setdefault(source_id, asyncio.Lock())
+        if not state["running"]:
+            # A live scan owns its own progress and error fields; only an idle
+            # source is described by the persisted job.
+            state["lastSuccess"] = source.get("last_scan_success")
+            state["status"] = job.get("status")
+            state["lastError"] = error
+            state["directories"] = int(source.get("directories") or 0)
+            if error:
+                state["pendingErrors"] = [str(error)]
+            if job:
+                apply_scan_progress(
+                    state,
+                    database.scan_step_progress(
+                        job_id=str(job["id"]),
+                        source=source_id,
+                        marker=str(job["marker"]),
+                    ),
+                )
     for source_id in set(scan_state["sources"]) - current_ids:
         scan_state["sources"].pop(source_id, None)
         scan_locks.pop(source_id, None)
@@ -537,13 +548,43 @@ async def check_media_metadata(*, force: bool) -> None:
             metadata_state["running"] = False
 
 
-async def _mark_movie_unmatched_if_empty(movie: dict[str, Any]) -> None:
-    """Record a miss without discarding metadata an earlier run already found."""
-    if movie.get("metadata_provider") or str(movie.get("poster_url") or "").strip():
+async def _mark_movie_unmatched(
+    movie: dict[str, Any],
+    *,
+    fallback_title: str = "",
+    authoritative: bool = False,
+) -> None:
+    """Record a miss without discarding metadata an earlier run already found.
+
+    A forced pass re-reads the whole shared catalogue, so it is authoritative:
+    a row that no longer matches has to lose the cover an earlier (buggy) run
+    handed it, because the stored title and artwork would otherwise stay wrong
+    forever. Rows curated by TMDB or by hand are never touched.
+    """
+    provider = str(movie.get("metadata_provider") or "")
+    if not authoritative or (provider and provider != "shared"):
+        if provider or str(movie.get("poster_url") or "").strip():
+            return
+        await asyncio.to_thread(
+            database.update_movie_metadata,
+            int(movie["id"]),
+            match_status="unmatched",
+            match_confidence=0.0,
+        )
         return
+    title = fallback_title or str(movie.get("display_title") or "")
     await asyncio.to_thread(
         database.update_movie_metadata,
         int(movie["id"]),
+        display_title=title,
+        normalized_title=title.casefold(),
+        original_title=None,
+        overview=None,
+        poster_url=None,
+        backdrop_url=None,
+        performers="[]",
+        studio=None,
+        metadata_provider=None,
         match_status="unmatched",
         match_confidence=0.0,
     )
@@ -620,6 +661,22 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                         else None
                     )
                     if shared_match is not None:
+                        # The shared catalogue is the only cover source for the
+                        # rows it curates, so a match that arrives without
+                        # artwork has to clear whatever the row held: that value
+                        # may belong to the very release the matcher has just
+                        # ruled out, and keeping it is what re-surfaced one
+                        # poster across a whole flat folder. Artwork curated
+                        # elsewhere (TMDB, a manual edit) is left untouched.
+                        curated_elsewhere = str(
+                            movie.get("metadata_provider") or ""
+                        ) not in ("", "shared")
+                        poster_url = shared_match.poster_url or (
+                            movie.get("poster_url") if curated_elsewhere else None
+                        )
+                        backdrop_url = shared_match.backdrop_url or (
+                            movie.get("backdrop_url") if curated_elsewhere else None
+                        )
                         await asyncio.to_thread(
                             database.update_movie_metadata,
                             int(movie["id"]),
@@ -627,10 +684,8 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                             original_title=shared_match.original_title or None,
                             year=shared_match.year or movie.get("year"),
                             overview=shared_match.overview or None,
-                            poster_url=shared_match.poster_url
-                            or movie.get("poster_url"),
-                            backdrop_url=shared_match.backdrop_url
-                            or movie.get("backdrop_url"),
+                            poster_url=poster_url,
+                            backdrop_url=backdrop_url,
                             tmdb_id=None,
                             metadata_provider="shared",
                             release_date=str(shared_match.year) if shared_match.year else None,
@@ -647,7 +702,11 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                         # A coded title belongs to the shared catalogue. A generic
                         # movie database would happily match a coincidental title,
                         # so an unmatched code is left exactly as it stands.
-                        await _mark_movie_unmatched_if_empty(movie)
+                        await _mark_movie_unmatched(
+                            movie,
+                            fallback_title=parsed_name.display_title,
+                            authoritative=force,
+                        )
                         movie_metadata_state["checked"] += 1
                         continue
                     match = None
@@ -672,7 +731,11 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                                 best = candidate
                         match = best
                     if match is None:
-                        await _mark_movie_unmatched_if_empty(movie)
+                        await _mark_movie_unmatched(
+                            movie,
+                            fallback_title=parsed_name.display_title,
+                            authoritative=force,
+                        )
                     else:
                         await asyncio.to_thread(
                             database.update_movie_metadata,
@@ -1289,11 +1352,11 @@ async def start_scan(
         raise HTTPException(status_code=404, detail="媒体源不存在或已停用")
     if movie_metadata_state["running"] and movie_metadata_state["source"] == source:
         raise HTTPException(status_code=409, detail="电影资料正在刮削，请完成后再扫描")
-    source_state = scan_state["sources"][source]
-    started = not scan_locks[source].locked() and not source_state["running"]
+    # ``scan_source`` owns the running flag: it raises it once the lock is held
+    # and always clears it in its ``finally``. Requesting a scan only decides
+    # whether a worker is spawned, so the flag can never outlive the coroutine.
+    started = not scan_locks.setdefault(source, asyncio.Lock()).locked()
     if started:
-        source_state["running"] = True
-        refresh_scan_summary()
         spawn_background(
             scan_library(sources=(source,)),
             name=f"manual-{source}-scan",

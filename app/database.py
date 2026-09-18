@@ -1199,6 +1199,19 @@ class LibraryDatabase:
                 return False
             connection.execute("DELETE FROM movies WHERE source = ?", (source_id,))
             connection.execute("DELETE FROM videos WHERE source = ?", (source_id,))
+            # A removed library must not leave its traversal history behind:
+            # orphaned jobs kept reporting a half-finished scan for a source the
+            # management screen no longer knows about.
+            connection.execute(
+                """
+                DELETE FROM media_scan_directories
+                WHERE job_id IN (SELECT id FROM media_scan_jobs WHERE source = ?)
+                """,
+                (source_id,),
+            )
+            connection.execute(
+                "DELETE FROM media_scan_jobs WHERE source = ?", (source_id,)
+            )
             connection.execute(
                 "INSERT OR REPLACE INTO deleted_media_sources(id) VALUES(?)", (source_id,)
             )

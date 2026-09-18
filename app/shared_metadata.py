@@ -28,6 +28,19 @@ _CODE_STOPWORDS = frozenset(
         "rip", "site", "tv", "vip", "www", "xyz",
     }
 )
+# Folder names that say nothing about which release a file is. The catalogue
+# folds to alphanumerics, so a flat "关键词分类" folder full of unrelated titles
+# can be called ``mp4`` or a quality tag, and matching on that name glues dozens
+# of files onto one poster. Those keys are never allowed to decide a match.
+_GENERIC_NAME_KEYS = frozenset(
+    {
+        "1080p", "2160p", "480p", "4k", "720p", "8k", "avi", "bd", "bluray",
+        "blurayrip", "download", "downloads", "fhd", "flv", "hd", "hdrip",
+        "mkv", "mov", "movie", "movies", "mp4", "mpeg", "mpg", "new", "other",
+        "others", "temp", "tmp", "ts", "uhd", "video", "videos", "web", "webdl",
+        "wmv", "www",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +74,42 @@ def guess_code(value: Any) -> str:
     return ""
 
 
+def code_key(value: Any) -> str:
+    """Fold any code spelling so ``CARIB-010225`` and ``carib-10225`` agree."""
+    return fold_key(guess_code(value)) or fold_key(value)
+
+
+def _entry_identity(item: dict[str, Any]) -> str:
+    """A stable identity for one index entry: its release code, else its folder."""
+    return code_key(item.get("code")) or fold_key(item.get("folder_name"))
+
+
+def _entry_code_keys(item: dict[str, Any]) -> tuple[str, ...]:
+    keys: list[str] = []
+    raw_code = fold_key(item.get("code"))
+    if raw_code:
+        keys.append(raw_code)
+    for value in (item.get("code"), item.get("folder_name")):
+        # Only a value that really carries a ``ABC-123`` shape may become a code
+        # key; a folder name that is just a word must not leak into the table.
+        if guess_code(value):
+            keys.append(code_key(value))
+    return tuple(dict.fromkeys(keys))
+
+
+def _entry_agrees_with(entry: dict[str, Any], code_keys: tuple[str, ...]) -> bool:
+    """Reject an index entry that describes a different release than the file.
+
+    The file's own name is the arbiter: when it carries a code and the entry is
+    about another code, the entry is wrong no matter how well a folder name
+    happens to line up. Files without any code keep the name-only behaviour.
+    """
+    if not code_keys:
+        return True
+    entry_code = code_key(entry.get("code"))
+    return not entry_code or entry_code in code_keys
+
+
 def candidate_keys(name: str, path: str = "") -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Split lookup keys into strong name keys and derived code keys.
 
@@ -79,7 +128,7 @@ def candidate_keys(name: str, path: str = "") -> tuple[tuple[str, ...], tuple[st
             names.append(folded)
         code = guess_code(value)
         if code:
-            codes.append(fold_key(code))
+            codes.append(code_key(code))
     return tuple(dict.fromkeys(names)), tuple(dict.fromkeys(codes))
 
 
@@ -169,15 +218,38 @@ class SharedMetadataClient:
 
     @staticmethod
     def _build_index(entries: list[dict[str, Any]]) -> SharedMetadataIndex:
+        """Fold the published catalogue into lookup tables that never lie.
+
+        The catalogue has no stable primary key: several unrelated releases can
+        share one ``folder_name`` (flat "关键词分类" folders full of different
+        codes). Keeping whichever entry arrived first - the old ``setdefault``
+        behaviour - handed every file in that folder the same cover. A key that
+        is claimed by more than one release is now dropped outright, and the
+        lookup falls through to the file's own code instead.
+        """
         names: dict[str, dict[str, Any]] = {}
         codes: dict[str, dict[str, Any]] = {}
+        rejected_names: set[str] = set()
+        rejected_codes: set[str] = set()
         for item in entries:
+            identity = _entry_identity(item)
             name_key = fold_key(item.get("folder_name"))
-            if name_key:
-                names.setdefault(name_key, item)
-            for code_key in (fold_key(item.get("code")), fold_key(guess_code(item.get("folder_name")))):
-                if code_key:
-                    codes.setdefault(code_key, item)
+            if name_key and name_key not in rejected_names:
+                if name_key in _GENERIC_NAME_KEYS:
+                    rejected_names.add(name_key)
+                elif name_key not in names:
+                    names[name_key] = item
+                elif _entry_identity(names[name_key]) != identity:
+                    names.pop(name_key, None)
+                    rejected_names.add(name_key)
+            for key in _entry_code_keys(item):
+                if not key or key in rejected_codes:
+                    continue
+                if key not in codes:
+                    codes[key] = item
+                elif _entry_identity(codes[key]) != identity:
+                    codes.pop(key, None)
+                    rejected_codes.add(key)
         return SharedMetadataIndex(names=names, codes=codes)
 
     async def lookup(self, name: str, path: str = "") -> SharedMetadataMatch | None:
@@ -192,11 +264,14 @@ class SharedMetadataClient:
             return None
         for key in name_keys:
             entry = index.names.get(key)
-            if entry is not None:
+            # A folder-name hit still has to describe the same release as the
+            # file itself, otherwise a flat directory would hand every one of
+            # its files the cover of whichever entry happened to be indexed.
+            if entry is not None and _entry_agrees_with(entry, code_keys):
                 return await self._match_from_entry(entry)
         for key in code_keys:
             entry = index.codes.get(key)
-            if entry is not None:
+            if entry is not None and _entry_agrees_with(entry, code_keys):
                 return await self._match_from_entry(entry)
         return None
 

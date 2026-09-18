@@ -91,6 +91,46 @@ async def test_movie_scan_can_index_provider_files_without_reliable_extensions()
 
 
 @pytest.mark.asyncio
+async def test_movie_scan_keeps_installers_and_junk_out_of_the_library():
+    """Only real containers and big extension-less titles count as movies."""
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        content = [
+            {"name": "ABP-167.mp4", "is_dir": False, "size": 2_000_000_000},
+            {"name": "《无间道》", "is_dir": False, "size": 3_612_015_764},
+            {"name": "解压密码 1024", "is_dir": False, "size": 12},
+            {"name": "(_1024手机发布器.apk", "is_dir": False, "size": 8_000_000},
+            {"name": "杏吧社区地址发布器.exe", "is_dir": False, "size": 900_000},
+            {"name": "sample.ts", "is_dir": False, "size": 1_500_000_000},
+            {"name": "老片.rmvb", "is_dir": False, "size": 700_000_000},
+        ]
+        return httpx.Response(
+            200,
+            json={"code": 200, "data": {"content": content, "total": len(content)}},
+        )
+
+    http_client = httpx.AsyncClient(
+        base_url="https://alist.example", transport=httpx.MockTransport(handler)
+    )
+    client = AListClient(
+        _settings(),
+        http_client,
+        extensions=frozenset({".mp4", ".mkv"}),
+        include_unknown_files=True,
+    )
+
+    videos, _ = await client.scan()
+    await http_client.aclose()
+
+    assert [row["name"] for row in videos] == [
+        "ABP-167.mp4",
+        "《无间道》",
+        "sample.ts",
+        "老片.rmvb",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_resolve_rejects_non_http_url():
     transport = httpx.MockTransport(
         lambda _: httpx.Response(200, json={"code": 200, "data": {"raw_url": "file:///secret.mp4"}})

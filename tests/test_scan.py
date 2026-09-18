@@ -184,6 +184,63 @@ async def test_app_startup_does_not_scan_media_sources(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_scan_finishes_when_source_states_refresh_mid_scan(monkeypatch, tmp_path):
+    """Adding another library mid-scan used to strand the running flag.
+
+    ``refresh_source_states`` replaced every per-source dict, so the ``running``
+    flag it inherited lived in a different object than the one the scanner
+    cleared when it finished. The management screen then showed a scan that had
+    already completed and refused to start a new one.
+    """
+    main = await boot(monkeypatch, tmp_path)
+    fake = FakeAList(build_tree({ROOT: ["intro.mp4"], ROOT + "/branch": ["clip.mp4"]}))
+    raw_handle = fake.handle
+    refreshes: list[int] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if not refreshes:
+            refreshes.append(1)
+            main.refresh_source_states()
+        return await raw_handle(request)
+
+    fake.handle = handle  # type: ignore[method-assign]
+    await serve(main, "guangya", fake)
+
+    assert await main.scan_source("guangya") is True
+
+    assert refreshes
+    state = main.scan_state["sources"]["guangya"]
+    assert state["running"] is False
+    assert main.scan_state["running"] is False
+    assert state["status"] == "completed"
+    assert main.database.latest_scan_job(source="guangya")["status"] == "completed"
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_state_refresh_reconciles_a_running_flag_with_no_live_scan(
+    monkeypatch, tmp_path
+):
+    """A stale flag from an older process must not survive a refresh.
+
+    The lock is the only thing that proves a scan is in flight, so rebuilding
+    the state has to clear any leftover ``running`` marker.
+    """
+    main = await boot(monkeypatch, tmp_path)
+    main.refresh_source_states()
+    state = main.scan_state["sources"]["guangya"]
+    state["running"] = True
+    main.refresh_scan_summary()
+    assert main.scan_state["running"] is True
+
+    main.refresh_source_states()
+
+    assert state["running"] is False
+    assert main.scan_state["running"] is False
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
 async def test_tree_scan_indexes_every_directory_level(monkeypatch, tmp_path):
     main = await boot(monkeypatch, tmp_path)
     files: dict[str, list[str]] = {ROOT: ["intro.mp4"]}
