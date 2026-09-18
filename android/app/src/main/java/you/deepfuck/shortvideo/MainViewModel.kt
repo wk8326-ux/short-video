@@ -26,6 +26,9 @@ import you.deepfuck.shortvideo.data.AppUpdatePhase
 import you.deepfuck.shortvideo.data.AppUpdateUiState
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.AsmrFilter
+import you.deepfuck.shortvideo.data.DramaDetail
+import you.deepfuck.shortvideo.data.DramaEpisode
+import you.deepfuck.shortvideo.data.DramaItem
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.LibraryScanStatus
 import you.deepfuck.shortvideo.data.LibrarySection
@@ -77,6 +80,14 @@ data class AppUiState(
     val movieSort: String = "cover",
     val movieDetailLoading: Boolean = false,
     val selectedMovie: MovieItem? = null,
+    val dramaItems: List<DramaItem> = emptyList(),
+    val dramaTotal: Int = 0,
+    val dramaNextOffset: Int? = 0,
+    val dramaLoading: Boolean = false,
+    val dramaError: String? = null,
+    val dramaQuery: String = "",
+    val dramaDetailLoading: Boolean = false,
+    val selectedDrama: DramaDetail? = null,
     val expandedMedia: MediaEntry? = null,
     val nowPlaying: MediaEntry? = null,
     val asmrVideoBackgroundPlayback: Boolean = false,
@@ -152,6 +163,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var movieDetailJob: Job? = null
     private var movieRequestGeneration = 0L
     private var movieCatalogDirty = false
+    private var dramaJob: Job? = null
+    private var dramaSearchJob: Job? = null
+    private var dramaDetailJob: Job? = null
+    private var dramaRequestGeneration = 0L
+    private var dramaCatalogDirty = false
     private var appUpdateJob: Job? = null
     private var appUpdateObserverJob: Job? = null
     val movieImageLoader by lazy { api.movieImageLoader(application) }
@@ -247,6 +263,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieDetailJob?.cancel()
             movieRequestGeneration += 1L
         }
+        if (previousSurface == MediaSurface.DRAMA) {
+            dramaJob?.cancel()
+            dramaSearchJob?.cancel()
+            dramaDetailJob?.cancel()
+            dramaRequestGeneration += 1L
+        }
         preferences.surface = surface
         val surfaceMuted = preferences.muted(surface)
         playback.setMuted(surfaceMuted)
@@ -263,10 +285,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             nowPlaying = null,
             selectedMovie = null,
             movieDetailLoading = false,
+            selectedDrama = null,
+            dramaDetailLoading = false,
             showManagement = false,
             feedError = null,
             asmrError = null,
             movieError = null,
+            dramaError = null,
         )
         playback.stop()
         playback.prefetch(surface, emptyList())
@@ -275,6 +300,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             surface.isFeed -> if (!refreshPendingFeedLibrary()) restoreFeed(surface)
             surface == MediaSurface.ASMR -> restoreAsmrSurface()
             surface == MediaSurface.MOVIE -> restoreMovieSurface()
+            surface == MediaSurface.DRAMA -> restoreDramaSurface()
         }
     }
 
@@ -581,6 +607,124 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setDramaQuery(query: String) {
+        if (query == mutableState.value.dramaQuery) return
+        dramaJob?.cancel()
+        dramaSearchJob?.cancel()
+        dramaRequestGeneration += 1L
+        mutableState.value = mutableState.value.copy(dramaQuery = query, dramaError = null)
+        dramaSearchJob = viewModelScope.launch {
+            delay(320)
+            if (mutableState.value.surface == MediaSurface.DRAMA) loadDramas(reset = true)
+        }
+    }
+
+    fun retryDramas() = loadDramas(reset = true)
+
+    fun loadMoreDramas() {
+        val state = mutableState.value
+        if (
+            state.surface == MediaSurface.DRAMA &&
+            !state.dramaLoading &&
+            state.dramaNextOffset != null
+        ) {
+            loadDramas(reset = false)
+        }
+    }
+
+    fun selectDrama(drama: DramaItem) {
+        if (mutableState.value.surface != MediaSurface.DRAMA) return
+        mutableState.value = mutableState.value.copy(
+            selectedDrama = DramaDetail(item = drama, episodes = emptyList()),
+            dramaDetailLoading = true,
+            dramaError = null,
+            nowPlaying = null,
+        )
+        dramaDetailJob?.cancel()
+        dramaDetailJob = viewModelScope.launch {
+            runApi { api.dramaDetail(drama.id) }
+                .onSuccess { detail ->
+                    val state = mutableState.value
+                    if (state.surface != MediaSurface.DRAMA || state.selectedDrama?.item?.id != drama.id) {
+                        return@onSuccess
+                    }
+                    mutableState.value = state.copy(
+                        selectedDrama = detail.copy(item = detail.item.withAbsolutePoster()),
+                        dramaDetailLoading = false,
+                    )
+                    // The first episode is the likeliest next tap, so warm it while
+                    // the user is still reading the synopsis.
+                    detail.episodes.firstOrNull()?.let { first ->
+                        playback.prefetch(MediaSurface.DRAMA, listOf(first.asMediaEntry(detail.item)))
+                    }
+                }
+                .onFailure { error ->
+                    if (!handleUnauthorized(error)) {
+                        val state = mutableState.value
+                        if (state.surface == MediaSurface.DRAMA && state.selectedDrama?.item?.id == drama.id) {
+                            mutableState.value = state.copy(
+                                dramaDetailLoading = false,
+                                dramaError = "无法载入分集列表",
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
+    /** Episode the user should continue from, or null when nothing was watched. */
+    fun dramaResumeEpisode(drama: DramaItem, episodes: List<DramaEpisode>): DramaEpisode? {
+        if (episodes.isEmpty()) return null
+        val savedId = preferences.dramaEpisodeId(drama.id) ?: return null
+        return episodes.firstOrNull { it.videoId == savedId }
+    }
+
+    /** Leave playback but stay on the series page. */
+    fun stopDramaPlayback() {
+        if (mutableState.value.surface != MediaSurface.DRAMA) return
+        saveCurrentPosition()
+        playback.stop()
+        playback.prefetch(MediaSurface.DRAMA, emptyList())
+        stopPlaybackService()
+        mutableState.value = mutableState.value.copy(nowPlaying = null)
+    }
+
+    fun playDramaEpisode(drama: DramaItem, episode: DramaEpisode) {
+        if (mutableState.value.surface != MediaSurface.DRAMA) return
+        saveCurrentPosition()
+        val entry = episode.asMediaEntry(drama)
+        preferences.setLastVideo(MediaSurface.DRAMA, entry.id)
+        preferences.setDramaEpisodeId(drama.id, entry.id)
+        mutableState.value = mutableState.value.copy(
+            nowPlaying = entry,
+            dramaError = null,
+        )
+        playback.cancelBackgroundPrefetch()
+        val queue = mutableState.value.selectedDrama?.episodes
+            ?.map { it.asMediaEntry(drama) }
+            .orEmpty()
+        if (!playback.play(entry, preferences.position(entry.id), queue = queue)) {
+            mutableState.value = mutableState.value.copy(
+                nowPlaying = null,
+                dramaError = "无法准备该剧集",
+            )
+        }
+    }
+
+    fun closeDramaDetail() {
+        if (mutableState.value.surface != MediaSurface.DRAMA) return
+        saveCurrentPosition()
+        dramaDetailJob?.cancel()
+        playback.stop()
+        playback.prefetch(MediaSurface.DRAMA, emptyList())
+        stopPlaybackService()
+        mutableState.value = mutableState.value.copy(
+            selectedDrama = null,
+            dramaDetailLoading = false,
+            nowPlaying = null,
+        )
+    }
+
     fun showManagement() {
         logs.info("management_open", "surface=${mutableState.value.surface} media=${mutableState.value.nowPlaying?.id}")
         if (!keepCurrentAsmrPlaybackInBackground()) {
@@ -686,6 +830,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun startDramaMetadata(sourceId: String) {
+        val action = "drama-metadata-$sourceId"
+        val state = mutableState.value
+        if (action in state.adminActions || state.adminStatus?.dramaMetadata?.running == true) return
+        mutableState.update {
+            it.copy(adminActions = it.adminActions + action, adminError = null)
+        }
+        viewModelScope.launch {
+            val start = runApi { api.startDramaMetadata(sourceId) }
+            if (start.isFailure) {
+                finishDramaMetadataAction(action, start.exceptionOrNull())
+                return@launch
+            }
+            if (!start.getOrDefault(false)) {
+                finishDramaMetadataAction(
+                    action,
+                    IllegalStateException("已有短剧刮削任务正在运行"),
+                )
+                loadAdminStatus()
+                return@launch
+            }
+            monitorDramaMetadata(action, sourceId)
+        }
+    }
+
     fun saveMediaSource(sourceId: String?, draft: MediaSourceDraft) =
         runAdminAction("source-${sourceId ?: "new"}") {
             api.saveMediaSource(sourceId, draft)
@@ -708,6 +877,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         LibrarySection.FEED -> feedLibraryRefresh.markPending()
                         LibrarySection.ASMR -> refreshAsmrLibrary()
                         LibrarySection.MOVIE -> refreshMovieLibrary()
+                        LibrarySection.DRAMA -> refreshDramaLibrary()
                     }
                     mutableState.update { it.copy(adminActions = it.adminActions - action) }
                     loadAdminStatus()
@@ -985,6 +1155,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.saveMovieListPosition(position)
     }
 
+    internal fun dramaListPosition(): ListPosition = preferences.dramaListPosition()
+
+    internal fun saveDramaListPosition(position: ListPosition) {
+        preferences.saveDramaListPosition(position)
+    }
+
     private fun persistCurrentFeedSession(
         playWhenReady: Boolean = playback.snapshot.value.playWhenReady,
     ) {
@@ -1029,6 +1205,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             surface.isFeed -> restoreFeed(surface)
             surface == MediaSurface.ASMR -> restoreAsmrSurface()
             surface == MediaSurface.MOVIE -> restoreMovieSurface()
+            surface == MediaSurface.DRAMA -> restoreDramaSurface()
         }
     }
 
@@ -1090,6 +1267,70 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             loadMovies(reset = true)
         }
     }
+
+    private fun restoreDramaSurface() {
+        mutableState.value = mutableState.value.copy(
+            selectedDrama = null,
+            dramaDetailLoading = false,
+            nowPlaying = null,
+            dramaError = null,
+        )
+        if (dramaCatalogDirty || mutableState.value.dramaItems.isEmpty()) {
+            loadDramas(reset = true)
+        }
+    }
+
+    private fun loadDramas(reset: Boolean) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.DRAMA) return
+        val offset = if (reset) 0 else state.dramaNextOffset ?: return
+        if (reset) dramaJob?.cancel() else if (state.dramaLoading) return
+        val requestedQuery = state.dramaQuery.trim()
+        val requestGeneration = ++dramaRequestGeneration
+        mutableState.value = state.copy(dramaLoading = true, dramaError = null)
+        dramaJob = viewModelScope.launch {
+            runApi { api.dramas(query = requestedQuery, offset = offset) }
+                .onSuccess { page ->
+                    val current = mutableState.value
+                    if (
+                        current.surface != MediaSurface.DRAMA ||
+                        requestGeneration != dramaRequestGeneration ||
+                        requestedQuery != current.dramaQuery.trim()
+                    ) return@onSuccess
+                    val incoming = page.items.map { it.withAbsolutePoster() }
+                    val ids = if (reset) mutableSetOf() else current.dramaItems.mapTo(mutableSetOf()) { it.id }
+                    val merged = if (reset) incoming else current.dramaItems + incoming.filter { ids.add(it.id) }
+                    dramaCatalogDirty = false
+                    mutableState.value = current.copy(
+                        dramaItems = merged,
+                        dramaTotal = maxOf(page.total, merged.size),
+                        dramaNextOffset = page.nextOffset,
+                        dramaLoading = false,
+                        dramaError = null,
+                    )
+                    if (reset && page.items.isEmpty() && page.scanRunning) {
+                        delay(1_500)
+                        loadDramas(reset = true)
+                    }
+                }
+                .onFailure { error ->
+                    val current = mutableState.value
+                    if (
+                        current.surface != MediaSurface.DRAMA ||
+                        requestGeneration != dramaRequestGeneration
+                    ) return@onFailure
+                    if (!handleUnauthorized(error)) {
+                        mutableState.value = current.copy(
+                            dramaLoading = false,
+                            dramaError = "短剧目录暂时无法载入",
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun DramaItem.withAbsolutePoster(): DramaItem =
+        copy(posterUrl = posterUrl?.let(api::absoluteUrl))
 
     private fun loadMovies(reset: Boolean) {
         val state = mutableState.value
@@ -1451,6 +1692,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun monitorDramaMetadata(action: String, sourceId: String) {
+        while (viewModelScope.isActive) {
+            delay(750)
+            val statusResult = runApi { api.adminStatus() }
+            if (statusResult.isFailure) {
+                val error = statusResult.exceptionOrNull()
+                if (error != null && handleUnauthorized(error)) return
+                logs.warning("drama_metadata_status_failed", "source=$sourceId")
+                delay(1_500)
+                continue
+            }
+            val status = statusResult.getOrThrow()
+            mutableState.update { it.copy(adminStatus = status, adminLoading = false) }
+            val metadata = status.dramaMetadata
+            if (metadata.sourceId != sourceId) {
+                if (metadata.running) continue
+                finishDramaMetadataAction(
+                    action,
+                    IllegalStateException("刮削任务状态已失效"),
+                )
+                return
+            }
+            if (metadata.running) continue
+
+            mutableState.update { current ->
+                current.copy(
+                    adminActions = current.adminActions - action,
+                    adminError = metadata.lastError,
+                )
+            }
+            refreshDramaLibrary()
+            return
+        }
+    }
+
     private fun finishScanAction(action: String, error: Throwable?) {
         if (error != null && handleUnauthorized(error)) return
         error?.let { logs.error("source_scan_failed", "action=$action", it) }
@@ -1463,12 +1739,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun finishMovieMetadataAction(action: String, error: Throwable?) {
+        finishMetadataAction(action, error, "movie_metadata_failed", "电影资料刮削失败，请稍后重试")
+    }
+
+    private fun finishDramaMetadataAction(action: String, error: Throwable?) {
+        finishMetadataAction(action, error, "drama_metadata_failed", "短剧封面刮削失败，请稍后重试")
+    }
+
+    private fun finishMetadataAction(
+        action: String,
+        error: Throwable?,
+        logEvent: String,
+        fallback: String,
+    ) {
         if (error != null && handleUnauthorized(error)) return
-        error?.let { logs.error("movie_metadata_failed", "action=$action", it) }
+        error?.let { logs.error(logEvent, "action=$action", it) }
         mutableState.update {
             it.copy(
                 adminActions = it.adminActions - action,
-                adminError = error?.message ?: "电影资料刮削失败，请稍后重试",
+                adminError = error?.message ?: fallback,
             )
         }
     }
@@ -1483,6 +1772,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             LibrarySection.ASMR -> refreshAsmrLibrary()
             LibrarySection.MOVIE -> refreshMovieLibrary()
+            LibrarySection.DRAMA -> refreshDramaLibrary()
         }
     }
 
@@ -1527,6 +1817,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshMovieLibrary() {
         movieCatalogDirty = true
         if (mutableState.value.surface == MediaSurface.MOVIE) loadMovies(reset = true)
+    }
+
+    private fun refreshDramaLibrary() {
+        dramaCatalogDirty = true
+        if (mutableState.value.surface == MediaSurface.DRAMA) {
+            // A rescan can drop or add episodes, so any open detail page is stale.
+            mutableState.value = mutableState.value.copy(selectedDrama = null, nowPlaying = null)
+            dramaDetailJob?.cancel()
+            loadDramas(reset = true)
+        }
     }
 
     private fun loadAsmrItems(key: AsmrItemsKey, reset: Boolean) {
@@ -1660,6 +1960,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 saveCurrentPosition()
                 playback.seekTo(0L)
                 playback.pause()
+                return
+            }
+            state.surface == MediaSurface.DRAMA -> {
+                // Short dramas are consumed episode after episode, so roll on to
+                // the next part the way a series player would.
+                saveCurrentPosition()
+                val detail = state.selectedDrama
+                val current = state.nowPlaying
+                val next = detail?.episodes?.let { episodes ->
+                    val index = episodes.indexOfFirst { it.videoId == current?.id }
+                    if (index >= 0) episodes.getOrNull(index + 1) else null
+                }
+                if (next != null && detail != null) {
+                    playDramaEpisode(detail.item, next)
+                } else {
+                    playback.seekTo(0L)
+                    playback.pause()
+                }
                 return
             }
             !state.surface.isFeed -> return

@@ -229,6 +229,20 @@ class PlaybackPreferences(context: Context) {
     internal fun saveMovieListPosition(position: ListPosition) =
         saveListPosition(KEY_MOVIE_LIST_POSITION, position)
 
+    internal fun dramaListPosition(): ListPosition =
+        listPosition(KEY_DRAMA_LIST_POSITION)
+
+    internal fun saveDramaListPosition(position: ListPosition) =
+        saveListPosition(KEY_DRAMA_LIST_POSITION, position)
+
+    fun dramaEpisodeId(dramaId: String): Long? =
+        preferences.getLong("${KEY_DRAMA_EPISODE}:$dramaId", -1L).takeIf { it > 0L }
+
+    fun setDramaEpisodeId(dramaId: String, videoId: Long) {
+        if (dramaId.isBlank() || videoId <= 0L) return
+        preferences.edit().putLong("${KEY_DRAMA_EPISODE}:$dramaId", videoId).apply()
+    }
+
     fun clearSession() {
         sessionCookie = null
     }
@@ -260,6 +274,8 @@ class PlaybackPreferences(context: Context) {
         const val KEY_ASMR_AUTHOR_LIST_POSITION = "asmr_author_list_position"
         const val KEY_ASMR_MEDIA_LIST_POSITION = "asmr_media_list_position"
         const val KEY_MOVIE_LIST_POSITION = "movie_list_position"
+        const val KEY_DRAMA_LIST_POSITION = "drama_list_position"
+        const val KEY_DRAMA_EPISODE = "drama_episode"
         const val KEY_RECENT = "recent"
         const val KEY_POSITIONS = "positions"
         const val FEED_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1_000

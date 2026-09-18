@@ -93,7 +93,7 @@ class MediaSourceRegistry:
             self.settings.asmr_extensions
             if config["section"] == "asmr"
             else self.settings.movie_extensions
-            if config["section"] == "movie"
+            if config["section"] in ("movie", "drama")
             else self.settings.video_extensions
         )
         client = AListClient(
@@ -110,6 +110,9 @@ class MediaSourceRegistry:
                 if config["section"] == "asmr"
                 else 0.0
             ),
+            # Only the movie wall tolerates unknown file types (sidecar
+            # artwork). A drama library is strictly video, so stray .html or
+            # .nfo files must never be indexed as an episode.
             include_unknown_files=config["section"] == "movie",
         )
         self._runtimes[source_id] = SourceRuntime(

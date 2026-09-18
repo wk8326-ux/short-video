@@ -7,6 +7,7 @@ enum class MediaSurface(val apiValue: String, val label: String) {
     LONG("long", "长视频"),
     ASMR("asmr", "ASMR"),
     MOVIE("movie", "电影"),
+    DRAMA("drama", "短剧"),
     ;
 
     val isFeed: Boolean get() = this == SHORT || this == LONG
@@ -28,6 +29,7 @@ enum class LibrarySection(val apiValue: String, val label: String) {
     FEED("feed", "短视频 / 长视频"),
     ASMR("asmr", "ASMR"),
     MOVIE("movie", "电影"),
+    DRAMA("drama", "短剧"),
     ;
 
     val usesTreeScan: Boolean get() = this != ASMR
@@ -201,17 +203,110 @@ data class MoviePage(
     val scanRunning: Boolean,
 )
 
+data class DramaItem(
+    val id: String,
+    val title: String,
+    val category: String?,
+    val code: String?,
+    val overview: String,
+    val tags: List<String>,
+    val episodeCount: Int,
+    val posterUrl: String?,
+    val matchStatus: String,
+    val source: String?,
+    val path: String?,
+) {
+    /** Categories arrive as raw folder names from the downloader. */
+    val categoryLabel: String
+        get() = category?.trim()?.takeIf { it.isNotEmpty() } ?: "短剧"
+
+    val hasPoster: Boolean get() = posterUrl != null
+
+    companion object {
+        fun fromJson(value: JSONObject): DramaItem = DramaItem(
+            id = value.optString("id"),
+            title = value.optString("title"),
+            category = value.optNullableString("category"),
+            code = value.optNullableString("code"),
+            overview = value.optString("overview"),
+            tags = value.optStringList("tags"),
+            episodeCount = value.optInt("episodeCount"),
+            posterUrl = value.optNullableString("posterUrl"),
+            matchStatus = value.optString("matchStatus", "pending"),
+            source = value.optNullableString("source"),
+            path = value.optNullableString("path"),
+        )
+    }
+}
+
+data class DramaEpisode(
+    val videoId: Long,
+    val position: Int,
+    val title: String,
+    val durationSeconds: Double?,
+    val modified: String?,
+    val playUrl: String,
+) {
+    fun asMediaEntry(drama: DramaItem): MediaEntry = MediaEntry(
+        id = videoId,
+        title = "${drama.title} · 第${position}集",
+        size = 0L,
+        modified = modified,
+        durationSeconds = durationSeconds,
+        playUrl = playUrl,
+        posterUrl = drama.posterUrl,
+    )
+
+    companion object {
+        fun fromJson(value: JSONObject): DramaEpisode = DramaEpisode(
+            videoId = value.getLong("videoId"),
+            position = value.optInt("position"),
+            title = value.optString("title"),
+            durationSeconds = value.optNullableDouble("duration"),
+            modified = value.optNullableString("modified"),
+            playUrl = value.optString("playUrl"),
+        )
+    }
+}
+
+data class DramaDetail(
+    val item: DramaItem,
+    val episodes: List<DramaEpisode>,
+) {
+    companion object {
+        fun fromJson(value: JSONObject): DramaDetail = DramaDetail(
+            item = DramaItem.fromJson(value),
+            episodes = value.optJSONArray("episodes")?.let { array ->
+                buildList {
+                    for (index in 0 until array.length()) {
+                        array.optJSONObject(index)?.let { add(DramaEpisode.fromJson(it)) }
+                    }
+                }
+            }.orEmpty(),
+        )
+    }
+}
+
+data class DramaPage(
+    val items: List<DramaItem>,
+    val total: Int,
+    val nextOffset: Int?,
+    val scanRunning: Boolean,
+)
+
 data class AdminStatus(
     val totalItems: Int,
     val totalBytes: Long,
     val guangyaItems: Int,
     val asmrItems: Int,
     val movieItems: Int,
+    val dramaItems: Int,
     val scanRunning: Boolean,
     val scanLastSuccess: Long?,
     val scanLastError: String?,
     val sources: List<MediaLibrarySource>,
     val movieMetadata: MovieMetadataStatus,
+    val dramaMetadata: MovieMetadataStatus,
     val fastStartRunning: Boolean,
     val fastStartOptimized: Int,
     val fastStartIssues: Int,
@@ -296,6 +391,7 @@ data class MediaLibrarySource(
     val bytes: Long,
     val scan: LibraryScanStatus,
     val movieMetadata: MovieMetadataSummary?,
+    val dramaMetadata: MovieMetadataSummary?,
 ) {
     companion object {
         fun fromJson(value: JSONObject): MediaLibrarySource = MediaLibrarySource(
@@ -316,6 +412,7 @@ data class MediaLibrarySource(
             bytes = value.optLong("bytes"),
             scan = LibraryScanStatus.fromJson(value.optJSONObject("scan")),
             movieMetadata = MovieMetadataSummary.fromJson(value.optJSONObject("movieMetadata")),
+            dramaMetadata = MovieMetadataSummary.fromJson(value.optJSONObject("dramaMetadata")),
         )
     }
 }

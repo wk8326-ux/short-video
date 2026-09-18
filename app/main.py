@@ -24,6 +24,14 @@ from app.alist import AListError
 from app.app_update import AppUpdateStore, InvalidUpdateManifest, UpdateNotPublished
 from app.auth import LoginRateLimiter, SESSION_COOKIE, SessionManager, verify_password
 from app.database import LibraryDatabase
+from app.drama import (
+    CATEGORY_SLUGS,
+    build_series,
+    decrypt_media,
+    episode_order_key,
+    is_encrypted_image_url,
+    parse_series_metadata,
+)
 from app.faststart import inspect_mp4_prefix
 from app.media_metadata import mp4_duration_seconds
 from app.media_sources import MediaSourceRegistry
@@ -37,7 +45,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.12"
+APP_VERSION = "1.6.0-beta.13"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -76,6 +84,16 @@ movie_metadata_state: dict[str, Any] = {
     "lastError": None,
 }
 movie_metadata_lock = asyncio.Lock()
+drama_metadata_state: dict[str, Any] = {
+    "running": False,
+    "source": None,
+    "checked": 0,
+    "total": 0,
+    "matched": 0,
+    "lastSuccess": None,
+    "lastError": None,
+}
+drama_metadata_lock = asyncio.Lock()
 fast_start_state: dict[str, Any] = {
     "running": False,
     "checked": 0,
@@ -93,6 +111,13 @@ MOVIE_IMAGE_CACHE_MAX_BYTES = 256 * 1024 * 1024
 movie_image_cache_dir = Path(settings.database_path).resolve().parent / "movie-images"
 movie_image_cache_locks: dict[str, asyncio.Lock] = {}
 movie_image_cache_guard = threading.RLock()
+
+# 91crdj publishes one detail page per series; its artwork lives on a picture
+# CDN as AES-CBC blobs that the site decrypts in a browser worker. The series
+# folder already carries the site's id token, so one lookup per series is the
+# whole scrape.
+DRAMA_SITE_BASE = "https://91crdj.com"
+DRAMA_USER_AGENT = "deepfuck-drama-library/1"
 
 
 def spawn_background(coroutine: Any, *, name: str) -> None:
@@ -349,6 +374,17 @@ async def scan_source(source: str) -> bool:
                 await asyncio.to_thread(
                     database.sync_movie_index, source, parse_movie_filename
                 )
+            if config["section"] == "drama":
+                # Episodes are already in ``videos``; grouping them into series
+                # is the last step of the scan, so the drama wall is never a
+                # separate manual step the user has to remember.
+                series = await asyncio.to_thread(
+                    database.sync_drama_index,
+                    source,
+                    str(config["root_path"]),
+                    build_series,
+                )
+                logger.info("Grouped %s series for %s", series, source)
             active = await asyncio.to_thread(database.active_media_count, source=source)
             now = int(time.time())
             skipped_warning = (
@@ -391,6 +427,10 @@ async def scan_source(source: str) -> bool:
                 # job: a refresh here is what closes the "I changed the source"
                 # loop without a second manual button.
                 start_movie_metadata_job(source)
+            if config["section"] == "drama":
+                # Each series needs exactly one 91crdj lookup and the pass skips
+                # anything already resolved, so this stays cheap on re-scans.
+                start_drama_metadata_job(source)
             return True
         except Exception as exc:
             if job:
@@ -588,6 +628,147 @@ async def _mark_movie_unmatched(
         match_status="unmatched",
         match_confidence=0.0,
     )
+
+
+def drama_slug_candidates(category: Any) -> list[str]:
+    """Category slugs to try for one series, best guess first."""
+    slugs: list[str] = []
+    mapped = CATEGORY_SLUGS.get(str(category or "").strip())
+    if mapped:
+        slugs.append(mapped)
+    for slug in CATEGORY_SLUGS.values():
+        if slug not in slugs:
+            slugs.append(slug)
+    return slugs
+
+
+async def _fetch_drama_page(
+    client: httpx.AsyncClient,
+    code: str,
+    category: Any,
+) -> tuple[str, str] | None:
+    """The series detail page, or ``None`` when the site does not know it."""
+    site_id = str(code or "").strip()
+    if site_id.startswith("91crdj-"):
+        site_id = site_id.split("-", 1)[1]
+    if not site_id.isdigit():
+        return None
+    for slug in drama_slug_candidates(category):
+        url = f"{DRAMA_SITE_BASE}/{slug}/{site_id}/"
+        try:
+            response = await client.get(url)
+        except httpx.HTTPError as exc:
+            logger.info("Drama metadata lookup failed for %s: %s", url, exc)
+            continue
+        if response.status_code == 200 and response.text:
+            return response.text, str(response.url)
+    return None
+
+
+def start_drama_metadata_job(source: str, *, force: bool = False) -> bool:
+    if drama_metadata_lock.locked() or drama_metadata_state["running"]:
+        return False
+    drama_metadata_state.update(
+        {
+            "running": True,
+            "source": source,
+            "checked": 0,
+            "total": 0,
+            "matched": 0,
+            "lastError": None,
+        }
+    )
+    spawn_background(
+        scrape_drama_metadata(source, force=force),
+        name=f"drama-metadata-{source}",
+    )
+    return True
+
+
+async def scrape_drama_metadata(source: str, *, force: bool = False) -> None:
+    """One 91crdj lookup per series: real title, synopsis, tags and cover."""
+    if drama_metadata_lock.locked():
+        return
+    async with drama_metadata_lock:
+        drama_metadata_state.update(
+            {
+                "running": True,
+                "source": source,
+                "checked": 0,
+                "total": 0,
+                "matched": 0,
+                "lastError": None,
+            }
+        )
+        try:
+            dramas = await asyncio.to_thread(
+                database.drama_metadata_candidates,
+                sources=(source,),
+                force=force,
+            )
+            drama_metadata_state["total"] = len(dramas)
+            semaphore = asyncio.Semaphore(4)
+            client = httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=httpx.Timeout(15.0, connect=5.0),
+                headers={"User-Agent": DRAMA_USER_AGENT},
+                limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+            )
+
+            async def enrich(drama: dict[str, Any]) -> None:
+                async with semaphore:
+                    lookup = await _fetch_drama_page(
+                        client,
+                        str(drama.get("code") or ""),
+                        drama.get("category"),
+                    )
+                    if lookup is None:
+                        await asyncio.to_thread(
+                            database.update_drama_metadata,
+                            str(drama["id"]),
+                            metadata_status="unmatched",
+                        )
+                        drama_metadata_state["checked"] += 1
+                        return
+                    page, page_url = lookup
+                    metadata = parse_series_metadata(
+                        str(drama.get("code") or ""), page, page_url
+                    )
+                    values: dict[str, Any] = {
+                        "metadata_status": "matched" if metadata.poster_url else "unmatched"
+                    }
+                    # ``title`` is NOT NULL, so only ever send a real string.
+                    if metadata.title:
+                        values["title"] = metadata.title
+                    if metadata.overview:
+                        values["overview"] = metadata.overview
+                    if metadata.tags:
+                        values["tags"] = json.dumps(metadata.tags, ensure_ascii=False)
+                    if metadata.poster_url:
+                        values["poster_url"] = metadata.poster_url
+                    await asyncio.to_thread(
+                        database.update_drama_metadata, str(drama["id"]), **values
+                    )
+                    if metadata.poster_url:
+                        drama_metadata_state["matched"] += 1
+                    drama_metadata_state["checked"] += 1
+
+            try:
+                await asyncio.gather(*(enrich(drama) for drama in dramas))
+            finally:
+                await client.aclose()
+            drama_metadata_state["lastSuccess"] = int(time.time())
+            logger.info(
+                "Drama metadata resolved %s/%s series for %s",
+                drama_metadata_state["matched"],
+                drama_metadata_state["total"],
+                source,
+            )
+        except Exception as exc:
+            drama_metadata_state["lastError"] = str(exc)
+            logger.exception("Drama metadata pass failed for %s", source)
+        finally:
+            drama_metadata_state["running"] = False
 
 
 def start_movie_metadata_job(source: str, *, force: bool = False) -> bool:
@@ -843,7 +1024,7 @@ class MediaSourceRequest(BaseModel):
     provider: Literal["alist", "openlist"] = "alist"
     baseUrl: str = Field(min_length=8, max_length=500)
     rootPath: str = Field(min_length=1, max_length=500)
-    section: Literal["feed", "asmr", "movie"]
+    section: Literal["feed", "asmr", "movie", "drama"]
     scanMode: Literal["tree", "authors", "authors_recursive"] | None = None
     anonymous: bool = True
     token: str = Field(default="", max_length=2000)
@@ -858,8 +1039,11 @@ def normalize_source_payload(payload: MediaSourceRequest) -> dict[str, Any]:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username:
         raise HTTPException(status_code=422, detail="AList 地址必须是有效的 HTTP(S) 地址")
     root_path = "/" + payload.rootPath.strip().strip("/")
-    scan_mode = payload.scanMode or ("tree" if payload.section in {"feed", "movie"} else "authors_recursive")
-    if payload.section in {"feed", "movie"} and scan_mode != "tree":
+    tree_sections = {"feed", "movie", "drama"}
+    scan_mode = payload.scanMode or (
+        "tree" if payload.section in tree_sections else "authors_recursive"
+    )
+    if payload.section in tree_sections and scan_mode != "tree":
         raise HTTPException(status_code=422, detail="该板块来源必须使用递归目录扫描")
     if payload.section == "asmr" and scan_mode == "tree":
         raise HTTPException(status_code=422, detail="ASMR 来源必须使用作者目录扫描")
@@ -882,6 +1066,7 @@ def public_source(
     source: dict[str, Any],
     *,
     movie_metadata: dict[str, int | None] | None = None,
+    drama_metadata: dict[str, int | None] | None = None,
 ) -> dict[str, Any]:
     state = scan_state["sources"].get(
         source["id"],
@@ -905,6 +1090,8 @@ def public_source(
     }
     if movie_metadata is not None:
         payload["movieMetadata"] = movie_metadata
+    if drama_metadata is not None:
+        payload["dramaMetadata"] = drama_metadata
     return payload
 
 
@@ -959,6 +1146,38 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         payload["performers"] = _metadata_list(row.get("performers"))
         payload["studio"] = row.get("studio")
     return payload
+
+
+def public_drama(row: dict[str, Any]) -> dict[str, Any]:
+    drama_id = str(row["id"])
+    has_poster = bool(str(row.get("poster_url") or "").strip())
+    return {
+        "id": drama_id,
+        "title": str(row.get("title") or row.get("folder_title") or ""),
+        "category": row.get("category"),
+        "code": row.get("code"),
+        "overview": row.get("overview") or "",
+        "tags": _metadata_list(row.get("tags")),
+        "episodeCount": int(row.get("episode_count") or 0),
+        # Third-party artwork stays server-side: the picture CDN is not
+        # reachable from many phones, and the payload is encrypted anyway.
+        "posterUrl": f"/api/dramas/{drama_id}/poster" if has_poster else None,
+        "matchStatus": row.get("metadata_status") or "pending",
+        "source": row.get("source"),
+        "path": row.get("folder"),
+    }
+
+
+def public_drama_episode(video: dict[str, Any], position: int) -> dict[str, Any]:
+    video_id = int(video["video_id"])
+    return {
+        "videoId": video_id,
+        "position": position,
+        "title": Path(str(video.get("name") or "")).stem,
+        "duration": video.get("duration_seconds"),
+        "modified": video.get("modified"),
+        "playUrl": f"/api/videos/{video_id}/play",
+    }
 
 
 def _movie_image_headers(source_url: str) -> dict[str, str]:
@@ -1169,6 +1388,18 @@ async def _proxy_movie_image(source_url: Any, if_none_match: str | None = None) 
                             raise HTTPException(status_code=502, detail="Movie image is too large")
                         chunks.append(chunk)
                     content = b"".join(chunks)
+                    if is_encrypted_image_url(url):
+                        # The picture CDN serves AES-CBC blobs; the real JPEG
+                        # only exists after the same decode the site runs in a
+                        # browser worker. Without this the proxy would cache
+                        # ciphertext and the wall would show broken images.
+                        try:
+                            content = await asyncio.to_thread(decrypt_media, content)
+                        except Exception as exc:
+                            raise HTTPException(
+                                status_code=502,
+                                detail="Movie image upstream returned an undecodable payload",
+                            ) from exc
                     media_type = _image_media_type(
                         upstream.headers.get("content-type", ""),
                         content,
@@ -1302,11 +1533,22 @@ async def admin_status() -> dict[str, Any]:
     feed_sources = source_registry.ids("feed")
     asmr_sources = source_registry.ids("asmr")
     movie_sources = source_registry.ids("movie")
-    library, feed_library, asmr_library, movie_library, sources, summary, issues = await asyncio.gather(
+    drama_sources = source_registry.ids("drama")
+    (
+        library,
+        feed_library,
+        asmr_library,
+        movie_library,
+        drama_library,
+        sources,
+        summary,
+        issues,
+    ) = await asyncio.gather(
         asyncio.to_thread(database.stats),
         asyncio.to_thread(database.stats, sources=feed_sources),
         asyncio.to_thread(database.stats, sources=asmr_sources),
         asyncio.to_thread(database.stats, sources=movie_sources),
+        asyncio.to_thread(database.stats, sources=drama_sources),
         asyncio.to_thread(database.list_media_sources),
         asyncio.to_thread(database.fast_start_summary, sources=feed_sources),
         asyncio.to_thread(database.fast_start_issues, limit=20, sources=feed_sources),
@@ -1327,18 +1569,42 @@ async def admin_status() -> dict[str, Any]:
             ),
         )
     }
+    drama_sources_with_config = [source for source in sources if source["section"] == "drama"]
+    drama_source_summaries = {
+        source["id"]: source_summary
+        for source, source_summary in zip(
+            drama_sources_with_config,
+            await asyncio.gather(
+                *(
+                    asyncio.to_thread(
+                        database.drama_metadata_summary,
+                        sources=(source["id"],),
+                    )
+                    for source in drama_sources_with_config
+                )
+            ),
+        )
+    }
     return {
-        "library": {**library, "guangya": feed_library, "asmr": asmr_library, "movie": movie_library},
+        "library": {
+            **library,
+            "guangya": feed_library,
+            "asmr": asmr_library,
+            "movie": movie_library,
+            "drama": drama_library,
+        },
         "scan": dict(scan_state),
         "sources": [
             public_source(
                 source,
                 movie_metadata=movie_source_summaries.get(source["id"]),
+                drama_metadata=drama_source_summaries.get(source["id"]),
             )
             for source in sources
         ],
         "metadata": dict(metadata_state),
         "movieMetadata": dict(movie_metadata_state),
+        "dramaMetadata": dict(drama_metadata_state),
         "fastStart": {**fast_start_state, "summary": summary},
         "issues": issues,
     }
@@ -1453,6 +1719,22 @@ async def start_movie_metadata(source_id: str, force: bool = False) -> dict[str,
     return {"started": started, "movieMetadata": movie_metadata_state}
 
 
+@app.post("/api/admin/sources/{source_id}/drama-metadata", status_code=202)
+async def start_drama_metadata(source_id: str, force: bool = False) -> dict[str, Any]:
+    if source_id not in source_registry.ids("drama"):
+        raise HTTPException(status_code=404, detail="短剧媒体源不存在或已停用")
+    if scan_locks.get(source_id) and scan_locks[source_id].locked():
+        raise HTTPException(status_code=409, detail="媒体源正在扫描，请完成后再匹配封面")
+    source_summary = await asyncio.to_thread(
+        database.drama_metadata_summary,
+        sources=(source_id,),
+    )
+    if not source_summary["total"]:
+        raise HTTPException(status_code=409, detail="请先扫描短剧媒体源")
+    started = start_drama_metadata_job(source_id, force=force)
+    return {"started": started, "dramaMetadata": drama_metadata_state}
+
+
 @app.post("/api/admin/fast-start", status_code=202)
 async def start_fast_start_check(force: bool = False) -> dict[str, Any]:
     started = not fast_start_lock.locked() and not fast_start_state["running"]
@@ -1515,6 +1797,17 @@ async def prewarm_movie_wall_images(rows: list[dict[str, Any]], *, limit: int = 
             await prewarm_movie_image(
                 row.get("backdrop_url") or row.get("poster_url") or row.get("thumb")
             )
+
+    await asyncio.gather(*(warm(row) for row in rows[:limit]))
+
+
+async def prewarm_drama_posters(rows: list[dict[str, Any]], *, limit: int = 6) -> None:
+    """Fill the persistent image cache for the first visible series."""
+    semaphore = asyncio.Semaphore(3)
+
+    async def warm(row: dict[str, Any]) -> None:
+        async with semaphore:
+            await prewarm_movie_image(row.get("poster_url"))
 
     await asyncio.gather(*(warm(row) for row in rows[:limit]))
 
@@ -1785,6 +2078,85 @@ async def movie_poster(movie_id: int, request: Request) -> Response:
 @app.get("/api/movies/{movie_id}/backdrop")
 async def movie_backdrop(movie_id: int, request: Request) -> Response:
     return await _movie_image(movie_id, "backdrop_url", request)
+
+
+@app.get("/api/dramas")
+async def dramas(
+    q: str = Query(default="", max_length=100),
+    limit: int = Query(default=24, ge=1, le=60),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    sources = source_registry.ids("drama")
+    search = q.strip()
+    rows, total = await asyncio.gather(
+        asyncio.to_thread(
+            database.dramas,
+            search=search,
+            limit=limit,
+            offset=offset,
+            sources=sources,
+        ),
+        asyncio.to_thread(database.drama_count, search=search, sources=sources),
+    )
+    if offset == 0 and rows:
+        spawn_background(
+            prewarm_drama_posters(rows),
+            name="prewarm-drama-wall",
+        )
+    return {
+        "items": [public_drama(row) for row in rows],
+        "total": total,
+        "nextOffset": offset + len(rows) if offset + len(rows) < total else None,
+        "scan": {
+            "running": any(
+                scan_state["sources"].get(source, {}).get("running")
+                for source in sources
+            )
+        },
+    }
+
+
+@app.get("/api/dramas/{drama_id}")
+async def drama_detail(drama_id: str) -> dict[str, Any]:
+    row = await asyncio.to_thread(
+        database.get_drama,
+        drama_id,
+        sources=source_registry.ids("drama"),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Drama not found")
+    episodes = await asyncio.to_thread(database.drama_episodes, drama_id)
+    # Order at read time with the same key the index used, so a rescan and a
+    # running client can never disagree about what "next episode" means.
+    episodes.sort(key=lambda item: episode_order_key(str(item.get("name") or "")))
+    payload = public_drama(row)
+    payload["episodes"] = [
+        public_drama_episode(video, position)
+        for position, video in enumerate(episodes, start=1)
+    ]
+    if episodes:
+        first = dict(episodes[0])
+        first["source"] = row.get("source")
+        first["id"] = first["video_id"]
+        spawn_background(
+            prewarm_play_url(first),
+            name=f"prewarm-drama-play-{first['video_id']}",
+        )
+    return payload
+
+
+@app.get("/api/dramas/{drama_id}/poster")
+async def drama_poster(drama_id: str, request: Request) -> Response:
+    row = await asyncio.to_thread(
+        database.get_drama,
+        drama_id,
+        sources=source_registry.ids("drama"),
+    )
+    if not row or not str(row.get("poster_url") or "").strip():
+        raise HTTPException(status_code=404, detail="Drama poster not found")
+    return await _proxy_movie_image(
+        row["poster_url"], request.headers.get("if-none-match")
+    )
 
 
 @app.get("/api/videos/{video_id}/poster")

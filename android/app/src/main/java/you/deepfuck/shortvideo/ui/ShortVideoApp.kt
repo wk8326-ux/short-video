@@ -99,6 +99,7 @@ fun ShortVideoApp(
         val fullscreenContentClosed = when (state.surface) {
             MediaSurface.ASMR -> state.expandedMedia == null
             MediaSurface.MOVIE -> state.selectedMovie == null || state.nowPlaying == null
+            MediaSurface.DRAMA -> state.selectedDrama == null || state.nowPlaying == null
             else -> false
         }
         if (
@@ -137,6 +138,18 @@ fun ShortVideoApp(
     ) {
         viewModel.closeMovieDetail()
     }
+    BackHandler(
+        enabled = !fullscreen && !state.showManagement &&
+            state.surface == MediaSurface.DRAMA && state.selectedDrama != null && state.nowPlaying != null,
+    ) {
+        viewModel.stopDramaPlayback()
+    }
+    BackHandler(
+        enabled = !fullscreen && !state.showManagement &&
+            state.surface == MediaSurface.DRAMA && state.selectedDrama != null && state.nowPlaying == null,
+    ) {
+        viewModel.closeDramaDetail()
+    }
 
     when (state.authentication) {
         AuthenticationState.CHECKING -> LoadingScreen()
@@ -152,6 +165,7 @@ fun ShortVideoApp(
                 onRefresh = viewModel::loadAdminStatus,
                 onScanSource = viewModel::startLibraryScan,
                 onMovieMetadata = viewModel::startMovieMetadata,
+                onDramaMetadata = viewModel::startDramaMetadata,
                 onSaveSource = viewModel::saveMediaSource,
                 onDeleteSource = viewModel::deleteMediaSource,
                 onFastStart = viewModel::startFastStartCheck,
@@ -229,6 +243,33 @@ fun ShortVideoApp(
                                 onListPosition = viewModel::saveMovieListPosition,
                             )
                         }
+                        MediaSurface.DRAMA -> {
+                            DramaScreen(
+                                state = state,
+                                player = player,
+                                exoPlayer = viewModel.playback.player,
+                                imageLoader = viewModel.movieImageLoader,
+                                fullscreen = fullscreen,
+                                listPosition = viewModel.dramaListPosition(),
+                                onQuery = viewModel::setDramaQuery,
+                                onSelect = viewModel::selectDrama,
+                                onBack = viewModel::closeDramaDetail,
+                                onResumeEpisode = viewModel::dramaResumeEpisode,
+                                onPlayEpisode = viewModel::playDramaEpisode,
+                                onStopPlayback = viewModel::stopDramaPlayback,
+                                onLoadMore = viewModel::loadMoreDramas,
+                                onRetry = viewModel::retryDramas,
+                                onTogglePlayback = viewModel::togglePlayback,
+                                onMuted = viewModel::setMuted,
+                                onSeek = viewModel.playback::seekTo,
+                                onSeekBy = viewModel.playback::seekBy,
+                                onFullscreen = {
+                                    fullscreen = it
+                                    onFullscreenChanged(it)
+                                },
+                                onListPosition = viewModel::saveDramaListPosition,
+                            )
+                        }
                         MediaSurface.SHORT, MediaSurface.LONG -> {
                         FeedScreen(
                             state = state,
@@ -255,7 +296,12 @@ fun ShortVideoApp(
                         }
                     }
                 }
-                if (!fullscreen && state.expandedMedia == null && state.selectedMovie == null) {
+                if (
+                    !fullscreen &&
+                    state.expandedMedia == null &&
+                    state.selectedMovie == null &&
+                    state.selectedDrama == null
+                ) {
                     AppNavigation(
                         state = state,
                         compact = false,
@@ -397,8 +443,10 @@ internal fun AppNavigation(
             .height(52.dp)
             .padding(horizontal = if (compact) 8.dp else 12.dp),
     ) {
-        val tabWidth = ((maxWidth - 112.dp - 16.dp) / MediaSurface.entries.size)
-            .coerceIn(48.dp, 72.dp)
+        // 分栏数量会随板块增加，这里按两侧各留一个 48dp 圆钮的空间来分配宽度，
+        // 下限压到 36dp，保证窄屏上 5 个分栏也不会和右侧“更多”按钮叠在一起。
+        val tabWidth = ((maxWidth - 104.dp - 16.dp) / MediaSurface.entries.size)
+            .coerceIn(36.dp, 72.dp)
         val indicatorOffset by animateDpAsState(
             targetValue = tabWidth * state.surface.ordinal,
             animationSpec = tween(200),
@@ -430,10 +478,10 @@ internal fun AppNavigation(
                             Text(
                                 surface.label,
                                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                style = (if (tabWidth < 62.dp) {
-                                    MaterialTheme.typography.labelMedium
-                                } else {
-                                    MaterialTheme.typography.labelLarge
+                                style = (when {
+                                    tabWidth < 46.dp -> MaterialTheme.typography.labelSmall
+                                    tabWidth < 62.dp -> MaterialTheme.typography.labelMedium
+                                    else -> MaterialTheme.typography.labelLarge
                                 }).copy(
                                     shadow = Shadow(Color.Black.copy(alpha = 0.58f), Offset(0f, 1f), 3f),
                                 ),

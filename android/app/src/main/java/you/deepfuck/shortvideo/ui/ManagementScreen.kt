@@ -1,15 +1,19 @@
 package you.deepfuck.shortvideo.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -18,28 +22,43 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Badge
+import androidx.compose.material.icons.outlined.Category
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.LiveTv
+import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +68,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -59,9 +79,11 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import you.deepfuck.shortvideo.AppUiState
+import you.deepfuck.shortvideo.data.AdminStatus
 import you.deepfuck.shortvideo.data.LibrarySection
 import you.deepfuck.shortvideo.data.MediaLibrarySource
 import you.deepfuck.shortvideo.data.MediaSourceDraft
+import you.deepfuck.shortvideo.data.MovieMetadataSummary
 import you.deepfuck.shortvideo.data.MovieMetadataStatus
 
 @Composable
@@ -71,6 +93,7 @@ internal fun ManagementScreen(
     onRefresh: () -> Unit,
     onScanSource: (String) -> Unit,
     onMovieMetadata: (String) -> Unit,
+    onDramaMetadata: (String) -> Unit,
     onSaveSource: (String?, MediaSourceDraft) -> Unit,
     onDeleteSource: (String) -> Unit,
     onFastStart: () -> Unit,
@@ -158,6 +181,7 @@ internal fun ManagementScreen(
                                 "光鸭" to status.guangyaItems.toString(),
                                 "ASMR" to status.asmrItems.toString(),
                                 "电影" to status.movieItems.toString(),
+                                "短剧" to status.dramaItems.toString(),
                             ),
                         )
                         Spacer(Modifier.height(8.dp))
@@ -170,11 +194,17 @@ internal fun ManagementScreen(
                             MediaSourceRow(
                                 source = source,
                                 starting = "scan-${source.id}" in state.adminActions,
-                                metadataStatus = status.movieMetadata,
-                                metadataStarting = "metadata-${source.id}" in state.adminActions,
+                                metadataStatus = source.metadataStatus(status),
+                                metadataStarting = "${source.metadataActionKey}-${source.id}" in state.adminActions,
                                 deleting = "delete-source-${source.id}" in state.adminActions,
                                 onScan = onScanSource,
-                                onMovieMetadata = onMovieMetadata,
+                                onMetadata = { id ->
+                                    if (source.section == LibrarySection.DRAMA) {
+                                        onDramaMetadata(id)
+                                    } else {
+                                        onMovieMetadata(id)
+                                    }
+                                },
                                 onEdit = {
                                     editingSource = source
                                     sourceDialogOpen = true
@@ -311,7 +341,7 @@ private fun MediaSourceRow(
     metadataStarting: Boolean,
     deleting: Boolean,
     onScan: (String) -> Unit,
-    onMovieMetadata: (String) -> Unit,
+    onMetadata: (String) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -389,8 +419,8 @@ private fun MediaSourceRow(
                 style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
             )
         }
-        if (source.section == LibrarySection.MOVIE) {
-            val metadata = source.movieMetadata
+        if (source.supportsMetadata) {
+            val metadata = source.metadataSummary
             HorizontalDivider(Modifier.padding(top = 14.dp, bottom = 12.dp), color = Line)
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -469,10 +499,10 @@ private fun MediaSourceRow(
                 Spacer(Modifier.size(7.dp))
                 Text(if (busy) "扫描中" else "扫描")
             }
-            if (source.section == LibrarySection.MOVIE) {
+            if (source.supportsMetadata) {
                 Spacer(Modifier.size(8.dp))
                 OutlinedButton(
-                    onClick = { onMovieMetadata(source.id) },
+                    onClick = { onMetadata(source.id) },
                     enabled = source.enabled && !busy && !metadataBusy && !otherMetadataBusy && source.videos > 0,
                     modifier = Modifier.heightIn(min = 48.dp),
                     shape = ControlShape,
@@ -510,6 +540,7 @@ private fun SourceMetric(label: String, value: String, modifier: Modifier = Modi
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MediaSourceDialog(
     source: MediaLibrarySource?,
@@ -531,100 +562,248 @@ private fun MediaSourceDialog(
     var token by remember(source?.id) { mutableStateOf("") }
     var enabled by remember(source?.id) { mutableStateOf(source?.enabled ?: true) }
     val valid = name.isNotBlank() && baseUrl.startsWith("http") && rootPath.isNotBlank()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text(if (source == null) "添加媒体源" else "编辑媒体源") },
-        text = {
-            Column(
-                Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("名称") }, singleLine = true)
-                ChoiceRow(
-                    label = "服务类型",
-                    choices = listOf("alist" to "AList", "openlist" to "OpenList"),
-                    selected = provider,
-                    onSelected = { provider = it },
-                )
-                OutlinedTextField(baseUrl, { baseUrl = it }, Modifier.fillMaxWidth(), label = { Text("服务地址") }, singleLine = true)
-                OutlinedTextField(rootPath, { rootPath = it }, Modifier.fillMaxWidth(), label = { Text("根目录") }, singleLine = true)
-                ChoiceRow(
-                    label = "归属板块",
-                    choices = listOf(
-                        LibrarySection.FEED.apiValue to "Video",
-                        LibrarySection.ASMR.apiValue to "ASMR",
-                        LibrarySection.MOVIE.apiValue to "Movie",
-                    ),
-                    selected = section.apiValue,
-                    onSelected = { value ->
-                        section = LibrarySection.entries.first { it.apiValue == value }
-                        scanMode = if (section.usesTreeScan) "tree" else "authors_recursive"
-                    },
-                )
-                if (section == LibrarySection.ASMR) {
-                    ChoiceRow(
-                        label = "作者目录结构",
-                        choices = listOf("authors" to "一级作者目录", "authors_recursive" to "嵌套作者目录"),
-                        selected = scanMode,
-                        onSelected = { scanMode = it },
-                    )
-                }
-                ToggleRow("匿名访问", anonymous) { anonymous = it }
-                if (!anonymous) {
-                    OutlinedTextField(
-                        username,
-                        { username = it },
-                        Modifier.fillMaxWidth(),
-                        label = { Text(if (source?.usernameConfigured == true) "用户名（已配置）" else "用户名") },
-                        singleLine = true,
-                    )
-                    OutlinedTextField(
-                        password,
-                        { password = it },
-                        Modifier.fillMaxWidth(),
-                        label = { Text("密码（留空保持不变）") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true,
-                    )
-                    OutlinedTextField(
-                        token,
-                        { token = it },
-                        Modifier.fillMaxWidth(),
-                        label = { Text(if (source?.tokenConfigured == true) "令牌（已配置，留空保持）" else "令牌（可选）") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true,
-                    )
-                }
-                ToggleRow("启用媒体源", enabled) { enabled = it }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    onSave(
-                        MediaSourceDraft(
-                            name = name.trim(),
-                            provider = provider,
-                            baseUrl = baseUrl.trim(),
-                            rootPath = rootPath.trim(),
-                            section = section,
-                            scanMode = if (section.usesTreeScan) "tree" else scanMode,
-                            anonymous = anonymous,
-                            token = token,
-                            username = username,
-                            password = password,
-                            enabled = enabled,
-                        ),
-                    )
-                },
-                enabled = valid && !saving,
-            ) { Text(if (saving) "保存中" else "保存") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        sheetState = sheetState,
         containerColor = Raised,
-    )
+        dragHandle = { BottomSheetDefaults.DragHandle(color = Line) },
+    ) {
+        Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    if (source == null) Icons.Outlined.Add else Icons.Outlined.Edit,
+                    contentDescription = null,
+                    tint = TextSecondary,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.size(10.dp))
+                Text(
+                    if (source == null) "添加媒体源" else "编辑媒体源",
+                    modifier = Modifier.weight(1f),
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary,
+                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                )
+                GlassIconButton(label = "关闭", onClick = onDismiss, tint = TextSecondary) {
+                    Icon(Icons.Outlined.Close, contentDescription = null)
+                }
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 500.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+            ) {
+                FieldGroup("归属板块", Icons.Outlined.Category) {
+                    SectionTiles(section) { picked ->
+                        section = picked
+                        scanMode = if (picked.usesTreeScan) "tree" else "authors_recursive"
+                    }
+                }
+                FieldGroup("服务", Icons.Outlined.Cloud) {
+                    ChoiceRow(
+                        label = "服务类型",
+                        choices = listOf("alist" to "AList", "openlist" to "OpenList"),
+                        selected = provider,
+                        onSelected = { provider = it },
+                    )
+                    if (section == LibrarySection.ASMR) {
+                        ChoiceRow(
+                            label = "作者目录结构",
+                            choices = listOf("authors" to "一级作者目录", "authors_recursive" to "嵌套作者目录"),
+                            selected = scanMode,
+                            onSelected = { scanMode = it },
+                        )
+                    }
+                }
+                FieldGroup("基础信息", Icons.Outlined.Badge) {
+                    OutlinedTextField(
+                        name,
+                        { name = it },
+                        Modifier.fillMaxWidth(),
+                        label = { Text("名称") },
+                        leadingIcon = { Icon(Icons.Outlined.Badge, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        baseUrl,
+                        { baseUrl = it },
+                        Modifier.fillMaxWidth(),
+                        label = { Text("服务地址") },
+                        leadingIcon = { Icon(Icons.Outlined.Link, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        rootPath,
+                        { rootPath = it },
+                        Modifier.fillMaxWidth(),
+                        label = { Text("根目录") },
+                        leadingIcon = { Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                        singleLine = true,
+                    )
+                }
+                FieldGroup("鉴权", Icons.Outlined.Key) {
+                    ToggleRow("匿名访问", anonymous) { anonymous = it }
+                    if (!anonymous) {
+                        OutlinedTextField(
+                            username,
+                            { username = it },
+                            Modifier.fillMaxWidth(),
+                            label = { Text(if (source?.usernameConfigured == true) "用户名（已配置）" else "用户名") },
+                            leadingIcon = { Icon(Icons.Outlined.Badge, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            password,
+                            { password = it },
+                            Modifier.fillMaxWidth(),
+                            label = { Text("密码（留空保持不变）") },
+                            leadingIcon = { Icon(Icons.Outlined.Key, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            token,
+                            { token = it },
+                            Modifier.fillMaxWidth(),
+                            label = { Text(if (source?.tokenConfigured == true) "令牌（已配置，留空保持）" else "令牌（可选）") },
+                            leadingIcon = { Icon(Icons.Outlined.Key, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                        )
+                    }
+                    ToggleRow("启用媒体源", enabled) { enabled = it }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    shape = ControlShape,
+                ) { Text("取消") }
+                Button(
+                    onClick = {
+                        onSave(
+                            MediaSourceDraft(
+                                name = name.trim(),
+                                provider = provider,
+                                baseUrl = baseUrl.trim(),
+                                rootPath = rootPath.trim(),
+                                section = section,
+                                scanMode = if (section.usesTreeScan) "tree" else scanMode,
+                                anonymous = anonymous,
+                                token = token,
+                                username = username,
+                                password = password,
+                                enabled = enabled,
+                            ),
+                        )
+                    },
+                    enabled = valid && !saving,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    shape = ControlShape,
+                ) { Text(if (saving) "保存中" else "保存") }
+            }
+        }
+    }
 }
+
+@Composable
+private fun FieldGroup(
+    title: String,
+    icon: ImageVector,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            Icon(icon, contentDescription = null, tint = TextFaint, modifier = Modifier.size(15.dp))
+            Text(
+                title,
+                color = TextFaint,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp), content = content)
+    }
+}
+
+@Composable
+private fun SectionTiles(selected: LibrarySection, onSelected: (LibrarySection) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        LibrarySection.entries.forEach { entry ->
+            val active = entry == selected
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 62.dp)
+                    .clip(ControlShape)
+                    .background(if (active) Accent.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.03f))
+                    .border(1.dp, if (active) AccentSoft else Line, ControlShape)
+                    .clickable { onSelected(entry) }
+                    .padding(vertical = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Icon(
+                    entry.tileIcon,
+                    contentDescription = null,
+                    tint = if (active) AccentSoft else TextSecondary,
+                    modifier = Modifier.size(19.dp),
+                )
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    entry.tileLabel,
+                    color = if (active) TextPrimary else TextFaint,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+    }
+}
+
+private val LibrarySection.tileIcon: ImageVector
+    get() = when (this) {
+        LibrarySection.FEED -> Icons.Outlined.PlayCircle
+        LibrarySection.ASMR -> Icons.Outlined.Headphones
+        LibrarySection.MOVIE -> Icons.Outlined.Movie
+        LibrarySection.DRAMA -> Icons.Outlined.LiveTv
+    }
+
+private val LibrarySection.tileLabel: String
+    get() = when (this) {
+        LibrarySection.FEED -> "视频"
+        LibrarySection.ASMR -> "ASMR"
+        LibrarySection.MOVIE -> "电影"
+        LibrarySection.DRAMA -> "短剧"
+    }
+
+/// 电影和短剧都支持刮削：电影走元数据接口，短剧走 91crdj 剧目信息。
+private val MediaLibrarySource.supportsMetadata: Boolean
+    get() = section == LibrarySection.MOVIE || section == LibrarySection.DRAMA
+
+private val MediaLibrarySource.metadataActionKey: String
+    get() = if (section == LibrarySection.DRAMA) "drama-metadata" else "metadata"
+
+private val MediaLibrarySource.metadataSummary: MovieMetadataSummary?
+    get() = if (section == LibrarySection.DRAMA) dramaMetadata else movieMetadata
+
+private fun MediaLibrarySource.metadataStatus(status: AdminStatus): MovieMetadataStatus =
+    if (section == LibrarySection.DRAMA) status.dramaMetadata else status.movieMetadata
 
 @Composable
 private fun ChoiceRow(

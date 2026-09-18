@@ -199,11 +199,41 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     fun movieDetail(movieId: Long): MovieItem =
         MovieItem.fromJson(getJson("/api/movies/$movieId"))
 
+    fun dramas(
+        query: String = "",
+        limit: Int = DRAMA_PAGE_SIZE,
+        offset: Int = 0,
+    ): DramaPage {
+        val target = url("/api/dramas").newBuilder()
+            .addQueryParameter("limit", limit.toString())
+            .addQueryParameter("offset", offset.toString())
+            .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
+            .build()
+        val payload = getJson(target.toString())
+        val items = payload.optJSONArray("items")
+        val parsed = buildList {
+            if (items == null) return@buildList
+            for (index in 0 until items.length()) {
+                items.optJSONObject(index)?.let { add(DramaItem.fromJson(it)) }
+            }
+        }
+        return DramaPage(
+            items = parsed,
+            total = payload.optInt("total", parsed.size),
+            nextOffset = payload.optIntOrNull("nextOffset"),
+            scanRunning = payload.optJSONObject("scan")?.optBoolean("running") == true,
+        )
+    }
+
+    fun dramaDetail(dramaId: String): DramaDetail =
+        DramaDetail.fromJson(getJson("/api/dramas/$dramaId"))
+
     fun adminStatus(): AdminStatus {
         val payload = getJson("/api/admin/status")
         val library = payload.getJSONObject("library")
         val scan = payload.getJSONObject("scan")
         val movieMetadata = payload.optJSONObject("movieMetadata")
+        val dramaMetadata = payload.optJSONObject("dramaMetadata")
         val fastStart = payload.getJSONObject("fastStart")
         val summary = fastStart.getJSONObject("summary")
         val sources = payload.optJSONArray("sources")
@@ -213,6 +243,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             guangyaItems = library.optJSONObject("guangya")?.optInt("videos") ?: 0,
             asmrItems = library.optJSONObject("asmr")?.optInt("videos") ?: 0,
             movieItems = library.optJSONObject("movie")?.optInt("videos") ?: 0,
+            dramaItems = library.optJSONObject("drama")?.optInt("videos") ?: 0,
             scanRunning = scan.optBoolean("running"),
             scanLastSuccess = scan.optLong("lastSuccess").takeIf { it > 0L },
             scanLastError = scan.optNullableString("lastError"),
@@ -222,6 +253,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
                 }
             },
             movieMetadata = MovieMetadataStatus.fromJson(movieMetadata),
+            dramaMetadata = MovieMetadataStatus.fromJson(dramaMetadata),
             fastStartRunning = fastStart.optBoolean("running"),
             fastStartOptimized = summary.optInt("optimized"),
             fastStartIssues = summary.optInt("notOptimized") + summary.optInt("errors"),
@@ -234,6 +266,9 @@ class MediaApi(private val preferences: PlaybackPreferences) {
 
     fun startMovieMetadata(sourceId: String): Boolean =
         post("/api/admin/sources/$sourceId/metadata").optBoolean("started")
+
+    fun startDramaMetadata(sourceId: String): Boolean =
+        post("/api/admin/sources/$sourceId/drama-metadata").optBoolean("started")
 
     fun saveMediaSource(sourceId: String?, draft: MediaSourceDraft) {
         val body = JSONObject()
@@ -364,6 +399,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     private companion object {
         const val ASMR_PAGE_SIZE = 24
         const val MOVIE_PAGE_SIZE = 24
+        const val DRAMA_PAGE_SIZE = 24
         const val BASE_URL = "https://short.deepfuck.you/"
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }

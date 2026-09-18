@@ -93,6 +93,15 @@ class LibraryDatabase:
             if "scan_id" not in columns:
                 connection.execute("ALTER TABLE videos ADD COLUMN scan_id TEXT")
             self._migrate_video_path_uniqueness(connection)
+            # Short-drama episodes stay ordinary ``videos`` rows so playback,
+            # progress and prefetch are untouched; the series they belong to is
+            # just a nullable pointer back into ``dramas``.
+            video_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(videos)").fetchall()
+            }
+            if "series_id" not in video_columns:
+                connection.execute("ALTER TABLE videos ADD COLUMN series_id TEXT")
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS media_scan_jobs (
                     id TEXT PRIMARY KEY,
@@ -188,6 +197,29 @@ class LibraryDatabase:
                     ON movies(source, display_title COLLATE NOCASE);
                 CREATE INDEX IF NOT EXISTS idx_movies_match_status
                     ON movies(source, match_status, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_videos_series
+                    ON videos(series_id, active, id);
+                CREATE TABLE IF NOT EXISTS dramas (
+                    id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    root_path TEXT NOT NULL,
+                    folder TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    folder_title TEXT NOT NULL,
+                    category TEXT,
+                    code TEXT,
+                    poster_url TEXT,
+                    overview TEXT,
+                    tags TEXT,
+                    episode_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_status TEXT NOT NULL DEFAULT 'pending',
+                    scraped_at TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(source, folder)
+                );
+                CREATE INDEX IF NOT EXISTS idx_dramas_source
+                    ON dramas(source, title COLLATE NOCASE);
                 CREATE TABLE IF NOT EXISTS deleted_media_sources (
                     id TEXT PRIMARY KEY,
                     deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -941,6 +973,252 @@ class LibraryDatabase:
             connection.commit()
         return len(rows)
 
+    def sync_drama_index(self, source: str, root_path: str, builder: Any) -> int:
+        """Rebuild the series index for one short-drama source.
+
+        The resumable scan has already put every episode into ``videos``; this
+        only groups them into series, keeps each episode's ``series_id``
+        pointer in sync, and drops series whose folder no longer holds an
+        active episode. Artwork and synopses survive a rescan: re-indexing a
+        folder is not a reason to re-fetch what the site already gave us.
+        """
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, source, path, name
+                FROM videos
+                WHERE source = ? AND active = 1
+                ORDER BY id
+                """,
+                (source,),
+            ).fetchall()
+            series = builder(root_path, [dict(row) for row in rows])
+            # Drop every pointer first so episodes of a series that disappeared
+            # cannot keep an orphan ``series_id`` alive.
+            connection.execute(
+                "UPDATE videos SET series_id = NULL WHERE source = ? AND series_id IS NOT NULL",
+                (source,),
+            )
+            connection.executemany(
+                """
+                INSERT INTO dramas(
+                    id, source, root_path, folder, title, folder_title, category,
+                    code, episode_count
+                )
+                VALUES(
+                    :id, :source, :root_path, :folder, :title, :folder_title,
+                    :category, :code, :episode_count
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    root_path = excluded.root_path,
+                    folder = excluded.folder,
+                    folder_title = excluded.folder_title,
+                    category = excluded.category,
+                    code = COALESCE(excluded.code, dramas.code),
+                    -- Some downloader folders are named after the play button
+                    -- ("▶ 立即观看"); a metadata pass replaces those titles with
+                    -- the real one, and a rescan must not undo that.
+                    title = CASE
+                        WHEN dramas.metadata_status = 'matched' THEN dramas.title
+                        ELSE excluded.title
+                    END,
+                    episode_count = excluded.episode_count,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                [
+                    {
+                        "id": str(entry["id"]),
+                        "source": str(entry["source"]),
+                        "root_path": str(entry["root_path"]),
+                        "folder": str(entry["folder"]),
+                        "title": str(entry["folder_title"]),
+                        "folder_title": str(entry["folder_title"]),
+                        "category": entry.get("category"),
+                        "code": entry.get("code"),
+                        "episode_count": int(entry["episode_count"]),
+                    }
+                    for entry in series
+                ],
+            )
+            episodes = [
+                {"series_id": str(entry["id"]), "video_id": int(episode["video_id"])}
+                for entry in series
+                for episode in entry["episodes"]
+            ]
+            if episodes:
+                connection.executemany(
+                    "UPDATE videos SET series_id = :series_id WHERE id = :video_id",
+                    episodes,
+                )
+            drama_ids = [str(entry["id"]) for entry in series]
+            if drama_ids:
+                placeholders = ",".join("?" for _ in drama_ids)
+                connection.execute(
+                    f"DELETE FROM dramas WHERE source = ? AND id NOT IN ({placeholders})",
+                    [source, *drama_ids],
+                )
+            else:
+                connection.execute("DELETE FROM dramas WHERE source = ?", (source,))
+            connection.commit()
+        return len(series)
+
+    def dramas(
+        self,
+        *,
+        search: str = "",
+        limit: int = 24,
+        offset: int = 0,
+        sources: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "d.source IN")
+        # A folder with no active episode is not a browsable series; it shows up
+        # as an empty poster and only makes the wall look broken.
+        conditions = ["d.episode_count > 0", source_clause]
+        params: list[Any] = list(source_params)
+        if search:
+            escaped = self._escape_like(search)
+            conditions.append(
+                "(d.title LIKE ? ESCAPE '\\' OR d.folder_title LIKE ? ESCAPE '\\'"
+                " OR d.code LIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%"] * 3)
+        cover_rank = "CASE WHEN LOWER(COALESCE(d.poster_url, '')) <> '' THEN 0 ELSE 1 END"
+        params.extend([max(1, limit), max(0, offset)])
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT d.*
+                FROM dramas d
+                WHERE {' AND '.join(conditions)}
+                ORDER BY {cover_rank}, d.title COLLATE NOCASE, d.id
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def drama_count(self, *, search: str = "", sources: Sequence[str] = ()) -> int:
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "d.source IN")
+        conditions = ["d.episode_count > 0", source_clause]
+        params: list[Any] = list(source_params)
+        if search:
+            escaped = self._escape_like(search)
+            conditions.append(
+                "(d.title LIKE ? ESCAPE '\\' OR d.folder_title LIKE ? ESCAPE '\\'"
+                " OR d.code LIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%"] * 3)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT COUNT(*) FROM dramas d
+                WHERE {' AND '.join(conditions)}
+                """,
+                params,
+            ).fetchone()
+        return int(row[0] or 0)
+
+    def get_drama(self, drama_id: str, *, sources: Sequence[str] = ()) -> dict[str, Any] | None:
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "d.source IN")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT d.* FROM dramas d
+                WHERE d.id = ? AND {source_clause}
+                """,
+                [drama_id, *source_params],
+            ).fetchone()
+        return dict(row) if row else None
+
+    def drama_episodes(self, drama_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id AS video_id, name, path, size, modified, duration_seconds,
+                       thumb, media_format, media_kind
+                FROM videos
+                WHERE series_id = ? AND active = 1
+                """,
+                (drama_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def drama_metadata_candidates(
+        self,
+        *,
+        sources: Sequence[str] = (),
+        force: bool = False,
+    ) -> list[dict[str, Any]]:
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "d.source IN")
+        status_clause = (
+            ""
+            if force
+            else "AND d.metadata_status IN ('pending', 'unmatched')"
+        )
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT d.* FROM dramas d
+                WHERE d.episode_count > 0 AND {source_clause} {status_clause}
+                ORDER BY CASE d.metadata_status WHEN 'pending' THEN 0 ELSE 1 END, d.id
+                """,
+                source_params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def drama_metadata_summary(
+        self,
+        *,
+        sources: Sequence[str] = (),
+    ) -> dict[str, int | None]:
+        if not sources:
+            return {"total": 0, "pending": 0, "matched": 0, "unmatched": 0, "lastSuccess": None}
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "d.source IN")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN d.metadata_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                    SUM(CASE WHEN d.metadata_status = 'matched' THEN 1 ELSE 0 END) AS matched,
+                    SUM(CASE WHEN d.metadata_status = 'unmatched' THEN 1 ELSE 0 END) AS unmatched,
+                    MAX(CAST(strftime('%s', d.scraped_at) AS INTEGER)) AS last_success
+                FROM dramas d
+                WHERE d.episode_count > 0 AND {source_clause}
+                """,
+                source_params,
+            ).fetchone()
+        summary: dict[str, int | None] = {
+            key: int(row[key] or 0)
+            for key in ("total", "pending", "matched", "unmatched")
+        }
+        summary["lastSuccess"] = int(row["last_success"]) if row["last_success"] else None
+        return summary
+
+    def update_drama_metadata(self, drama_id: str, **values: Any) -> None:
+        allowed = {"title", "overview", "tags", "poster_url", "code", "category", "metadata_status"}
+        updates = {key: value for key, value in values.items() if key in allowed}
+        if not updates:
+            return
+        updates["scraped_at"] = "CURRENT_TIMESTAMP"
+        assignments = ", ".join(
+            f"{key} = {value}" if value == "CURRENT_TIMESTAMP" else f"{key} = ?"
+            for key, value in updates.items()
+        )
+        params = [value for value in updates.values() if value != "CURRENT_TIMESTAMP"]
+        params.append(drama_id)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                f"UPDATE dramas SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                params,
+            )
+            connection.commit()
+
     def movies(
         self,
         *,
@@ -1198,6 +1476,7 @@ class LibraryDatabase:
                 connection.rollback()
                 return False
             connection.execute("DELETE FROM movies WHERE source = ?", (source_id,))
+            connection.execute("DELETE FROM dramas WHERE source = ?", (source_id,))
             connection.execute("DELETE FROM videos WHERE source = ?", (source_id,))
             # A removed library must not leave its traversal history behind:
             # orphaned jobs kept reporting a half-finished scan for a source the

@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,12 +36,14 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.VolumeOff
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Forward10
@@ -49,9 +52,12 @@ import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay10
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Sort
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -227,6 +233,7 @@ private fun MovieCatalog(
     onRetry: () -> Unit,
 ) {
     val focusManager = LocalFocusManager.current
+    var sortMenuOpen by remember { mutableStateOf(false) }
     Column(
         Modifier
             .fillMaxSize()
@@ -237,16 +244,8 @@ private fun MovieCatalog(
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Column(Modifier.width(62.dp)) {
-                Text("片库", color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                Text(
-                    state.movieTotal.toString(),
-                    color = TextFaint,
-                    style = MaterialTheme.typography.labelSmall,
-                )
-            }
             OutlinedTextField(
                 value = state.movieQuery,
                 onValueChange = onQuery,
@@ -274,31 +273,49 @@ private fun MovieCatalog(
                     cursorColor = AccentSoft,
                 ),
             )
+            Box {
+                GlassIconButton(
+                    label = "排序",
+                    onClick = { sortMenuOpen = true },
+                ) {
+                    Icon(Icons.Outlined.Sort, contentDescription = null)
+                }
+                DropdownMenu(
+                    expanded = sortMenuOpen,
+                    onDismissRequest = { sortMenuOpen = false },
+                    containerColor = RaisedStrong,
+                    shape = GlassPanelShape,
+                    shadowElevation = 0.dp,
+                ) {
+                    MovieSort.entries.forEach { sort ->
+                        DropdownMenuItem(
+                            text = { Text(sort.label) },
+                            trailingIcon = {
+                                if (state.movieSort == sort.value) {
+                                    Icon(Icons.Outlined.Check, contentDescription = null)
+                                }
+                            },
+                            onClick = {
+                                sortMenuOpen = false
+                                onSort(sort.value)
+                            },
+                        )
+                    }
+                }
+            }
         }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp)
-                .padding(bottom = 6.dp),
+                .padding(bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("排序", color = TextFaint, style = MaterialTheme.typography.labelSmall)
-            listOf("cover" to "封面优先", "title" to "标题").forEach { (value, label) ->
-                val selected = state.movieSort == value
-                Button(
-                    onClick = { onSort(value) },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (selected) AccentSoft else Color.Transparent,
-                        contentColor = if (selected) Color.Black else TextSecondary,
-                    ),
-                    shape = RoundedCornerShape(999.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                    modifier = Modifier.height(30.dp),
-                ) {
-                    Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                }
-            }
+            MovieStatChip("片库", state.movieTotal.toString())
+            MovieStatChip("已载入", state.movieItems.size.toString())
+            MovieStatChip("排序", MovieSort.labelOf(state.movieSort))
         }
 
         when {
@@ -681,7 +698,7 @@ private fun MovieHero(movie: MovieItem, imageLoader: ImageLoader) {
 }
 
 @Composable
-private fun MoviePlayer(
+internal fun MoviePlayer(
     player: PlayerSnapshot,
     exoPlayer: ExoPlayer,
     muted: Boolean,
@@ -691,6 +708,7 @@ private fun MoviePlayer(
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
+    onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var chromeVisible by remember(fullscreen) { mutableStateOf(true) }
@@ -761,6 +779,15 @@ private fun MoviePlayer(
 
         val controlsVisible = !fullscreen || chromeVisible
         if (controlsVisible) {
+            onBack?.let { back ->
+                GlassIconButton(
+                    label = "返回",
+                    onClick = back,
+                    modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(6.dp),
+                ) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
+                }
+            }
             if (!player.playWhenReady || fullscreen) {
                 Row(
                     modifier = Modifier.align(Alignment.Center),
@@ -870,3 +897,34 @@ private fun movieMeta(movie: MovieItem): String = buildList {
     movie.runtimeMinutes?.takeIf { it > 0 }?.let { add("$it 分钟") }
     movie.rating?.takeIf { it > 0.0 }?.let { add("评分 ${String.format(java.util.Locale.ROOT, "%.1f", it)}") }
 }.joinToString("  ·  ")
+
+/** Sort values mirror the API contract; the labels belong to the UI. */
+internal enum class MovieSort(val value: String, val label: String) {
+    COVER("cover", "封面优先"),
+    TITLE("title", "标题"),
+    ;
+
+    companion object {
+        fun labelOf(value: String): String =
+            entries.firstOrNull { it.value == value }?.label ?: COVER.label
+    }
+}
+
+@Composable
+private fun MovieStatChip(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .glassSurface(shape = RoundedCornerShape(999.dp), fill = GlassFillSoft)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(label, color = TextFaint, style = MaterialTheme.typography.labelSmall)
+        Text(
+            value,
+            color = TextPrimary,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}

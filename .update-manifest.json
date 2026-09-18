@@ -1,8 +1,8 @@
 {
-  "versionCode": 170,
-  "versionName": "1.6.0-beta.11",
-  "apkFile": "deepfuck-android-v1.6.0-beta.11.apk",
-  "sha256": "a9364f9f6a1a6464001bdb9cf2d268776ab0ce74150dc450caff8345767cb972",
-  "size": 4211000,
-  "notes": "修复扫描卡死：反复失败的目录会跳过并完成扫描，扫描中重启后也能续扫；电影新增共享元数据源，封面覆盖更全。"
+  "versionCode": 172,
+  "versionName": "1.6.0-beta.13",
+  "apkFile": "deepfuck-android-v1.6.0-beta.13.apk",
+  "sha256": "0c3f1379f99b12d90846cdfa0df81448054f26553f9d3f3192bfcdd82addb489",
+  "size": 4260152,
+  "notes": "新增短剧栏目：海报墙、详情页、选集播放与自动续播；电影区头部重排为「搜索 + 排序 + 片库统计」；管理页新增媒体源改为分组弹层。"
 }

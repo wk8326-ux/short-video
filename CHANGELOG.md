@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.13] - 2026-09-19
+
+### Added
+
+- A fifth section, `短剧`, after the movie wall: one card per series, and a series opens an episode picker. Series
+  are grouped server-side from their folder (`<剧名> [91crdj-<id>]`), and each episode is an ordinary row in `videos`,
+  so playback, progress, prefetch and the cache keys are reused as they are.
+- A `drama` media-source section alongside `feed` / `asmr` / `movie`. Scans stay manual, and a re-scan of the feed
+  can no longer touch the drama library or the other way round.
+- Series titles and posters come from the 91crdj detail page, one request per series, written once and cached in the
+  database. Placeholder folder names such as `▶ 立即观看` are replaced by the real title.
+
+### Changed
+
+- Reworked the movie header: search plus a sort icon button on one row, and the library totals move to a horizontally
+  scrollable stats chip row underneath, so long numbers no longer wrap.
+- Reworked the media-source editor into a full-height bottom sheet: the four sections are equal-width icon tiles
+  (视频 / ASMR / 电影 / 短剧), fields carry leading icons, and the save/cancel pair stays pinned at the bottom.
+- The media library summary in the management screen now reports the drama count, and a drama source shows its own
+  scrape button and match summary.
+- Re-balanced the top tab bar for five sections so it no longer overlaps the overflow button on narrow screens.
+
 ## [1.6.0-beta.12] - 2026-09-18
 
 ### Changed
