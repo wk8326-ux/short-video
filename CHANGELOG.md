@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.14] - 2026-09-19
+
+### Added
+
+- The movie wall now mirrors the libraries the user added: one section per media source, six posters each, and a
+  `加载更多` button that only ever extends its own section. The wall used to merge every library into a single grid.
+- A three-line button in the movie header jumps straight to a library, so a long wall does not need scrolling.
+- The media-source editor offers the service addresses already typed in, plus the root folders used with the picked
+  address, so adding a library is one tap plus a folder.
+
+### Changed
+
+- Media-source actions in the management screen are icon-only (edit / scan / refresh covers / delete) with 48dp touch
+  targets, so a long name or a busier row no longer squeezes the buttons into two lines.
+- Clearing the movie search box returns to the wall that is already loaded instead of refetching it, so the sections
+  the user expanded survive the round trip.
+
+### Fixed
+
+- Library sections now follow the order the user added them. The registry rebuild collapsed the database ordering into
+  a `set`, so the wall and the management list could order the same libraries differently on every restart; ties inside
+  the same second now fall back to `rowid` instead of the library name.
+- A failed `加载更多` reports inside its own section. It used to be stored in the catalogue error field, which the wall
+  only renders while it is empty, so the failure looked like nothing had happened.
+
 ## [1.6.0-beta.13] - 2026-09-19
 
 ### Added

@@ -36,6 +36,7 @@ import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.data.MediaSourceDraft
+import you.deepfuck.shortvideo.data.MovieGroup
 import you.deepfuck.shortvideo.data.MovieItem
 import you.deepfuck.shortvideo.data.PlaybackPreferences
 import you.deepfuck.shortvideo.media.PlaybackEngine
@@ -78,6 +79,10 @@ data class AppUiState(
     val movieError: String? = null,
     val movieQuery: String = "",
     val movieSort: String = "cover",
+    val movieGroups: List<MovieGroup> = emptyList(),
+    val movieGroupsLoading: Boolean = false,
+    val movieGroupLoading: Set<String> = emptySet(),
+    val movieGroupErrors: Map<String, String> = emptyMap(),
     val movieDetailLoading: Boolean = false,
     val selectedMovie: MovieItem? = null,
     val dramaItems: List<DramaItem> = emptyList(),
@@ -161,6 +166,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var movieJob: Job? = null
     private var movieSearchJob: Job? = null
     private var movieDetailJob: Job? = null
+    private val movieGroupJobs = mutableMapOf<String, Job>()
     private var movieRequestGeneration = 0L
     private var movieCatalogDirty = false
     private var dramaJob: Job? = null
@@ -261,6 +267,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieJob?.cancel()
             movieSearchJob?.cancel()
             movieDetailJob?.cancel()
+            cancelMovieGroupLoads()
             movieRequestGeneration += 1L
         }
         if (previousSurface == MediaSurface.DRAMA) {
@@ -291,6 +298,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             feedError = null,
             asmrError = null,
             movieError = null,
+            movieGroupLoading = emptySet(),
+            movieGroupErrors = emptyMap(),
             dramaError = null,
         )
         playback.stop()
@@ -510,6 +519,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (sort == mutableState.value.movieSort) return
         movieJob?.cancel()
         movieSearchJob?.cancel()
+        cancelMovieGroupLoads()
         movieRequestGeneration += 1L
         mutableState.value = mutableState.value.copy(movieSort = sort, movieError = null)
         if (mutableState.value.surface == MediaSurface.MOVIE) loadMovies(reset = true)
@@ -519,8 +529,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (query == mutableState.value.movieQuery) return
         movieJob?.cancel()
         movieSearchJob?.cancel()
+        cancelMovieGroupLoads()
         movieRequestGeneration += 1L
-        mutableState.value = mutableState.value.copy(movieQuery = query, movieError = null)
+        mutableState.value = mutableState.value.copy(
+            movieQuery = query,
+            movieError = null,
+            movieLoading = false,
+            movieGroupsLoading = false,
+        )
+        // Clearing the box returns to the wall that is already loaded: refetching
+        // it would drop the sections the user had expanded.
+        if (query.isBlank() && !movieCatalogDirty && mutableState.value.movieGroups.isNotEmpty()) {
+            // The header counts the whole library, so it cannot keep the number
+            // the search left behind.
+            val groups = mutableState.value.movieGroups
+            mutableState.value = mutableState.value.copy(movieTotal = groups.sumOf { it.total })
+            return
+        }
         movieSearchJob = viewModelScope.launch {
             delay(320)
             if (mutableState.value.surface == MediaSurface.MOVIE) loadMovies(reset = true)
@@ -533,11 +558,83 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = mutableState.value
         if (
             state.surface == MediaSurface.MOVIE &&
+            state.movieQuery.isNotBlank() &&
             !state.movieLoading &&
             state.movieNextOffset != null
         ) {
             loadMovies(reset = false)
         }
+    }
+
+    /**
+     * Extends exactly one section of the wall.
+     *
+     * Sections load independently because a wall can hold libraries of very
+     * different sizes; a shared cursor would let a small library consume the
+     * window of a large one.
+     */
+    fun loadMoreMovieGroup(sourceId: String) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.MOVIE) return
+        val group = state.movieGroups.firstOrNull { it.sourceId == sourceId } ?: return
+        val offset = group.nextOffset ?: return
+        if (sourceId in state.movieGroupLoading) return
+        val requestedQuery = state.movieQuery.trim()
+        val requestedSort = state.movieSort
+        val requestGeneration = movieRequestGeneration
+        mutableState.value = state.copy(
+            movieGroupLoading = state.movieGroupLoading + sourceId,
+            movieGroupErrors = state.movieGroupErrors - sourceId,
+            movieError = null,
+        )
+        movieGroupJobs[sourceId]?.cancel()
+        movieGroupJobs[sourceId] = viewModelScope.launch {
+            runApi {
+                api.movieGroupItems(
+                    sourceId = sourceId,
+                    offset = offset,
+                    query = requestedQuery,
+                    sort = requestedSort,
+                )
+            }
+                .onSuccess { page ->
+                    val current = mutableState.value
+                    if (requestGeneration != movieRequestGeneration) return@onSuccess
+                    val incoming = page.items.map { it.withResumePosition() }
+                    val updated = current.movieGroups.map { group ->
+                        if (group.sourceId != sourceId) {
+                            group
+                        } else {
+                            group.replaceItems(
+                                items = mergeMoviePages(group.items, incoming, reset = false),
+                                nextOffset = page.nextOffset,
+                                total = maxOf(page.total, group.items.size + incoming.size),
+                            )
+                        }
+                    }
+                    mutableState.value = current.copy(
+                        movieGroups = updated,
+                        movieGroupLoading = current.movieGroupLoading - sourceId,
+                        movieGroupErrors = current.movieGroupErrors - sourceId,
+                    )
+                }
+                .onFailure { error ->
+                    val current = mutableState.value
+                    if (requestGeneration != movieRequestGeneration) return@onFailure
+                    if (!handleUnauthorized(error)) {
+                        mutableState.value = current.copy(
+                            movieGroupLoading = current.movieGroupLoading - sourceId,
+                            movieGroupErrors = current.movieGroupErrors +
+                                (sourceId to "这一段暂时载入不了，稍后再试"),
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun cancelMovieGroupLoads() {
+        movieGroupJobs.values.forEach(Job::cancel)
+        movieGroupJobs.clear()
     }
 
     fun selectMovie(movie: MovieItem) {
@@ -560,6 +657,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     mutableState.value = state.copy(
                         selectedMovie = resolved,
                         movieItems = state.movieItems.map { if (it.id == resolved.id) resolved else it },
+                        movieGroups = state.movieGroups.map { it.withItem(resolved) },
                         movieDetailLoading = false,
                     )
                 }
@@ -1263,7 +1361,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             nowPlaying = null,
             movieError = null,
         )
-        if (movieCatalogDirty || mutableState.value.movieItems.isEmpty()) {
+        val catalogEmpty = mutableState.value.movieGroups.isEmpty() &&
+            mutableState.value.movieItems.isEmpty()
+        if (movieCatalogDirty || catalogEmpty) {
             loadMovies(reset = true)
         }
     }
@@ -1335,6 +1435,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadMovies(reset: Boolean) {
         val state = mutableState.value
         if (state.surface != MediaSurface.MOVIE) return
+        // An empty query is the browsable wall (grouped by media source); a
+        // query is a flat lookup across every library.
+        if (state.movieQuery.isBlank()) {
+            loadMovieGroups(reset)
+            return
+        }
         val offset = if (reset) 0 else state.movieNextOffset ?: return
         if (reset) movieJob?.cancel() else if (state.movieLoading) return
         val requestedQuery = state.movieQuery.trim()
@@ -1402,6 +1508,75 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             resumePositionMs = preferences.position(videoId),
         )
 
+    private fun loadMovieGroups(reset: Boolean) {
+        val state = mutableState.value
+        if (!reset && state.movieGroupsLoading) return
+        movieJob?.cancel()
+        val requestedSort = state.movieSort
+        val requestGeneration = ++movieRequestGeneration
+        mutableState.value = state.copy(
+            movieGroupsLoading = true,
+            movieLoading = true,
+            movieError = null,
+        )
+        movieJob = viewModelScope.launch {
+            runApi { api.movieGroups(sort = requestedSort) }
+                .onSuccess { page ->
+                    val current = mutableState.value
+                    if (
+                        !shouldApplyMovieResponse(
+                            requestGeneration = requestGeneration,
+                            currentGeneration = movieRequestGeneration,
+                            requestedQuery = "",
+                            currentQuery = current.movieQuery.trim(),
+                            requestedSort = requestedSort,
+                            currentSort = current.movieSort,
+                            currentSurface = current.surface,
+                        )
+                    ) return@onSuccess
+                    movieCatalogDirty = false
+                    mutableState.value = current.copy(
+                        movieGroups = page.groups.map { group ->
+                            group.replaceItems(
+                                items = group.items.map { it.withResumePosition() },
+                                nextOffset = group.nextOffset,
+                            )
+                        },
+                        movieTotal = page.total,
+                        movieGroupsLoading = false,
+                        movieGroupErrors = emptyMap(),
+                        movieLoading = false,
+                        movieError = null,
+                    )
+                    if (page.groups.isEmpty() && page.scanRunning) {
+                        delay(1_500)
+                        loadMovieGroups(reset = true)
+                    }
+                }
+                .onFailure { error ->
+                    val current = mutableState.value
+                    if (
+                        !shouldApplyMovieResponse(
+                            requestGeneration = requestGeneration,
+                            currentGeneration = movieRequestGeneration,
+                            requestedQuery = "",
+                            currentQuery = current.movieQuery.trim(),
+                            requestedSort = requestedSort,
+                            currentSort = current.movieSort,
+                            currentSurface = current.surface,
+                        )
+                    ) return@onFailure
+                    if (!handleUnauthorized(error)) {
+                        mutableState.value = current.copy(
+                            movieGroupsLoading = false,
+                            movieLoading = false,
+                            movieError = "电影目录暂时无法载入",
+                        )
+                    }
+                }
+        }
+    }
+
     private fun updateMovieResumePosition() {
         val state = mutableState.value
         val selected = state.selectedMovie ?: return
@@ -1411,6 +1586,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = state.copy(
             selectedMovie = updated,
             movieItems = state.movieItems.map { if (it.id == updated.id) updated else it },
+            movieGroups = state.movieGroups.map { it.withItem(updated) },
         )
     }
 

@@ -75,11 +75,14 @@ class MediaSourceRegistry:
         await self.reload()
 
     async def reload(self) -> None:
-        source_ids = {
+        # Order matters: the wall and the management list render sections in the
+        # order the user added them, so the registry must keep the database's
+        # ordering instead of collapsing it into a set.
+        source_ids = tuple(
             source["id"]
             for source in self.database.list_media_sources(include_disabled=False)
-        }
-        for source_id in set(self._runtimes) - source_ids:
+        )
+        for source_id in set(self._runtimes) - set(source_ids):
             await self._close(source_id)
         for source_id in source_ids:
             await self.reload_source(source_id)
@@ -136,6 +139,11 @@ class MediaSourceRegistry:
             for source_id, runtime in self._runtimes.items()
             if section is None or runtime.config["section"] == section
         )
+
+    def name(self, source_id: str) -> str:
+        """Return the label the user gave this source, for grouping in the UI."""
+        runtime = self._runtimes.get(source_id)
+        return str(runtime.config["name"]) if runtime else source_id
 
     async def close(self) -> None:
         for source_id in list(self._runtimes):

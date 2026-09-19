@@ -3,6 +3,7 @@ package you.deepfuck.shortvideo.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -56,6 +57,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -298,8 +300,15 @@ internal fun ManagementScreen(
         )
     }
     if (sourceDialogOpen) {
+        // Addresses the user already typed are offered again so a new library
+        // only needs its folder, not the whole URL.
+        val history = state.adminStatus?.sources.orEmpty()
+            .filter { it.id != editingSource?.id }
+            .map { it.baseUrl.trim() to it.rootPath.trim() }
+            .filter { it.first.isNotBlank() }
         MediaSourceDialog(
             source = editingSource,
+            history = history,
             saving = "source-${editingSource?.id ?: "new"}" in state.adminActions,
             onDismiss = { sourceDialogOpen = false },
             onSave = { draft ->
@@ -468,52 +477,92 @@ private fun MediaSourceRow(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(
+            // Icon-only actions keep the row compact; the label doubles as the
+            // accessibility text via GlassIconButton.
+            GlassIconButton(
+                label = "编辑媒体源",
                 onClick = onEdit,
                 enabled = !busy && !metadataBusy,
-                modifier = Modifier.heightIn(min = 48.dp),
+                tint = TextSecondary,
             ) {
                 Icon(Icons.Outlined.Edit, contentDescription = null)
-                Spacer(Modifier.size(6.dp))
-                Text("编辑")
             }
-            TextButton(
+            Spacer(Modifier.size(4.dp))
+            GlassIconButton(
+                label = "删除媒体源",
                 onClick = onDelete,
                 enabled = !busy && !metadataBusy && !deleting,
-                modifier = Modifier.heightIn(min = 48.dp),
+                tint = androidx.compose.material3.MaterialTheme.colorScheme.error,
             ) {
-                Icon(Icons.Outlined.DeleteOutline, contentDescription = "删除媒体源")
+                Icon(Icons.Outlined.DeleteOutline, contentDescription = null)
             }
             Spacer(Modifier.weight(1f))
-            OutlinedButton(
+            GlassIconButton(
+                label = if (busy) "正在扫描" else "扫描媒体源",
                 onClick = { onScan(source.id) },
                 enabled = source.enabled && !busy && !metadataBusy,
-                modifier = Modifier.heightIn(min = 48.dp),
-                shape = ControlShape,
+                tint = if (busy) TextSecondary else Color.White,
             ) {
                 if (busy) {
-                    CircularProgressIndicator(Modifier.size(17.dp), color = TextSecondary, strokeWidth = 2.dp)
+                    CircularProgressIndicator(Modifier.size(18.dp), color = TextSecondary, strokeWidth = 2.dp)
                 } else {
                     Icon(Icons.Outlined.Refresh, contentDescription = null)
                 }
-                Spacer(Modifier.size(7.dp))
-                Text(if (busy) "扫描中" else "扫描")
             }
             if (source.supportsMetadata) {
-                Spacer(Modifier.size(8.dp))
-                OutlinedButton(
+                Spacer(Modifier.size(4.dp))
+                GlassIconButton(
+                    label = if (metadataBusy) "正在匹配封面" else "刷新封面",
                     onClick = { onMetadata(source.id) },
                     enabled = source.enabled && !busy && !metadataBusy && !otherMetadataBusy && source.videos > 0,
-                    modifier = Modifier.heightIn(min = 48.dp),
-                    shape = ControlShape,
+                    tint = if (metadataBusy) TextSecondary else Color.White,
                 ) {
                     if (metadataBusy) {
-                        CircularProgressIndicator(Modifier.size(17.dp), color = TextSecondary, strokeWidth = 2.dp)
+                        CircularProgressIndicator(Modifier.size(18.dp), color = TextSecondary, strokeWidth = 2.dp)
                     } else {
                         Icon(Icons.Outlined.ImageSearch, contentDescription = null)
                     }
-                    Spacer(Modifier.size(7.dp))
-                    Text(if (metadataBusy) "匹配中" else "刷新封面")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SuggestionRow(
+    label: String,
+    options: List<String>,
+    onPick: (String) -> Unit,
+) {
+    if (options.isEmpty()) return
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            label,
+            color = TextFaint,
+            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            options.forEach { option ->
+                Surface(
+                    onClick = { onPick(option) },
+                    color = RaisedStrong,
+                    contentColor = TextSecondary,
+                    shape = ControlShape,
+                    modifier = Modifier.heightIn(min = 40.dp),
+                ) {
+                    Box(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            option,
+                            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                        )
+                    }
                 }
             }
         }
@@ -544,6 +593,7 @@ private fun SourceMetric(label: String, value: String, modifier: Modifier = Modi
 @Composable
 private fun MediaSourceDialog(
     source: MediaLibrarySource?,
+    history: List<Pair<String, String>>,
     saving: Boolean,
     onDismiss: () -> Unit,
     onSave: (MediaSourceDraft) -> Unit,
@@ -562,6 +612,12 @@ private fun MediaSourceDialog(
     var token by remember(source?.id) { mutableStateOf("") }
     var enabled by remember(source?.id) { mutableStateOf(source?.enabled ?: true) }
     val valid = name.isNotBlank() && baseUrl.startsWith("http") && rootPath.isNotBlank()
+    val knownAddresses = history.map { it.first }.distinct().filter { it != baseUrl.trim() }
+    val knownRoots = history
+        .filter { it.first == baseUrl.trim() }
+        .map { it.second }
+        .distinct()
+        .filter { it.isNotBlank() && it != rootPath.trim() }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -640,6 +696,11 @@ private fun MediaSourceDialog(
                         leadingIcon = { Icon(Icons.Outlined.Link, contentDescription = null, modifier = Modifier.size(18.dp)) },
                         singleLine = true,
                     )
+                    SuggestionRow(
+                        label = "用过",
+                        options = knownAddresses,
+                        onPick = { baseUrl = it },
+                    )
                     OutlinedTextField(
                         rootPath,
                         { rootPath = it },
@@ -647,6 +708,11 @@ private fun MediaSourceDialog(
                         label = { Text("根目录") },
                         leadingIcon = { Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp)) },
                         singleLine = true,
+                    )
+                    SuggestionRow(
+                        label = "该地址用过",
+                        options = knownRoots,
+                        onPick = { rootPath = it },
                     )
                 }
                 FieldGroup("鉴权", Icons.Outlined.Key) {

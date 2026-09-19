@@ -45,7 +45,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.13"
+APP_VERSION = "1.6.0-beta.14"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -1132,11 +1132,13 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         "matchStatus": row.get("match_status") or "pending",
         "matchConfidence": row.get("match_confidence"),
         "playUrl": f"/api/videos/{row['video_id']}/play",
+        # Search results are flat, so the client needs the library name to tell
+        # two same-titled entries apart.
+        "source": row.get("source"),
         "modified": row.get("modified"),
         "duration": row.get("duration_seconds"),
     }
     if detail:
-        payload["source"] = row.get("source")
         payload["path"] = row.get("path")
         payload["size"] = row.get("size")
         payload["format"] = row.get("media_format")
@@ -1798,7 +1800,9 @@ async def prewarm_movie_wall_images(rows: list[dict[str, Any]], *, limit: int = 
     async def warm(row: dict[str, Any]) -> None:
         async with semaphore:
             await prewarm_movie_image(
-                row.get("backdrop_url") or row.get("poster_url") or row.get("thumb")
+                # The wall renders the landscape cover, so warming the
+                # backdrop first only wasted a download slot.
+                row.get("poster_url") or row.get("thumb") or row.get("backdrop_url")
             )
 
     await asyncio.gather(*(warm(row) for row in rows[:limit]))
@@ -2006,6 +2010,104 @@ async def asmr_author_items(
         "total": total,
         "nextOffset": offset + len(rows) if limit is not None and offset + len(rows) < total else None,
     }
+
+
+def _movie_group_payload(
+    source_id: str,
+    rows: list[dict[str, Any]],
+    *,
+    total: int,
+    offset: int,
+) -> dict[str, Any]:
+    loaded = offset + len(rows)
+    return {
+        "sourceId": source_id,
+        "name": source_registry.name(source_id),
+        "items": [public_movie(row) for row in rows],
+        "total": total,
+        "nextOffset": loaded if loaded < total else None,
+    }
+
+
+@app.get("/api/movies/groups")
+async def movie_groups(
+    q: str = Query(default="", max_length=100),
+    perGroup: int = Query(default=6, ge=1, le=24),
+    sort: str = Query(default="cover", pattern="^(cover|title)$"),
+) -> dict[str, Any]:
+    """Group the wall by media source so the UI mirrors how libraries are added.
+
+    Counting per source first keeps a source without movies out of the wall
+    entirely, instead of rendering an empty section the user cannot explain.
+    """
+    sources = source_registry.ids("movie")
+    search = q.strip()
+    counts = await asyncio.to_thread(
+        database.movie_source_counts,
+        search=search,
+        sources=sources,
+    )
+    ordered = [source for source in sources if counts.get(source, 0) > 0]
+    pages = await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                database.movies,
+                search=search,
+                limit=perGroup,
+                offset=0,
+                sources=(source,),
+                sort=sort,
+            )
+            for source in ordered
+        )
+    )
+    groups = [
+        _movie_group_payload(source, rows, total=counts[source], offset=0)
+        for source, rows in zip(ordered, pages)
+    ]
+    if groups:
+        # Only the first two sections can be on screen before the user scrolls.
+        spawn_background(
+            prewarm_movie_wall_images(
+                [row for group_rows in pages[:2] for row in group_rows],
+                limit=perGroup * 2,
+            ),
+            name="prewarm-movie-wall-groups",
+        )
+    return {
+        "groups": groups,
+        "total": sum(counts.get(source, 0) for source in ordered),
+        "scan": {
+            "running": any(
+                scan_state["sources"].get(source, {}).get("running") for source in sources
+            )
+        },
+    }
+
+
+@app.get("/api/movies/groups/{source_id}")
+async def movie_group_items(
+    source_id: str,
+    q: str = Query(default="", max_length=100),
+    limit: int = Query(default=6, ge=1, le=60),
+    offset: int = Query(default=0, ge=0),
+    sort: str = Query(default="cover", pattern="^(cover|title)$"),
+) -> dict[str, Any]:
+    if source_id not in source_registry.ids("movie"):
+        raise HTTPException(status_code=404, detail="Media source not found")
+    search = q.strip()
+    rows, total = await asyncio.gather(
+        asyncio.to_thread(
+            database.movies,
+            search=search,
+            limit=limit,
+            offset=offset,
+            sources=(source_id,),
+            sort=sort,
+        ),
+        asyncio.to_thread(database.movie_count, search=search, sources=(source_id,)),
+    )
+    return _movie_group_payload(source_id, rows, total=total, offset=offset)
 
 
 @app.get("/api/movies")

@@ -203,6 +203,57 @@ data class MoviePage(
     val scanRunning: Boolean,
 )
 
+/**
+ * One section of the movie wall: exactly one media source the user added.
+ *
+ * [nextOffset] is the cursor of this section alone, so "load more" can never
+ * pull titles from another library into it.
+ */
+data class MovieGroup(
+    val sourceId: String,
+    val name: String,
+    val total: Int,
+    val items: List<MovieItem>,
+    val nextOffset: Int?,
+) {
+    val hasMore: Boolean get() = nextOffset != null
+
+    fun replaceItems(
+        items: List<MovieItem>,
+        nextOffset: Int?,
+        total: Int = this.total,
+    ): MovieGroup = copy(items = items, nextOffset = nextOffset, total = total)
+
+    /** Swaps one loaded title in place, e.g. after its detail resolves. */
+    fun withItem(movie: MovieItem): MovieGroup =
+        if (items.none { it.id == movie.id }) this else copy(
+            items = items.map { if (it.id == movie.id) movie else it },
+        )
+
+    companion object {
+        fun fromJson(value: JSONObject): MovieGroup = MovieGroup(
+            sourceId = value.optString("sourceId"),
+            name = value.optString("name"),
+            total = value.optInt("total"),
+            items = value.optObjectList("items", MovieItem::fromJson),
+            nextOffset = value.optNullableInt("nextOffset"),
+        )
+    }
+}
+
+data class MovieGroupPage(
+    val groups: List<MovieGroup>,
+    val total: Int,
+    val scanRunning: Boolean,
+)
+
+data class MovieGroupItems(
+    val sourceId: String,
+    val items: List<MovieItem>,
+    val total: Int,
+    val nextOffset: Int?,
+)
+
 data class DramaItem(
     val id: String,
     val title: String,
@@ -439,6 +490,15 @@ private fun JSONObject.optStringList(name: String): List<String> =
         buildList {
             for (index in 0 until array.length()) {
                 array.optString(index).trim().takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
+    }.orEmpty()
+
+private fun <T> JSONObject.optObjectList(name: String, parse: (JSONObject) -> T): List<T> =
+    optJSONArray(name)?.let { array ->
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optJSONObject(index)?.let { add(parse(it)) }
             }
         }
     }.orEmpty()

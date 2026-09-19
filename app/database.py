@@ -1284,6 +1284,41 @@ class LibraryDatabase:
             ).fetchone()
         return int(row[0] or 0)
 
+    def movie_source_counts(
+        self,
+        *,
+        search: str = "",
+        sources: Sequence[str] = (),
+    ) -> dict[str, int]:
+        """Count the indexed movies of every media source in one query.
+
+        The grouped wall needs a per-source total before it decides which
+        sections to render, so counting per source in the client would mean
+        one round trip per section.
+        """
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        conditions = ["v.active = 1", source_clause]
+        params: list[Any] = list(source_params)
+        if search:
+            escaped = self._escape_like(search)
+            conditions.append(
+                "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%", f"%{escaped}%"])
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT m.source AS source, COUNT(*) AS total
+                FROM movies m
+                JOIN videos v ON v.id = m.video_id
+                WHERE {' AND '.join(conditions)}
+                GROUP BY m.source
+                """,
+                params,
+            ).fetchall()
+        return {str(row["source"]): int(row["total"] or 0) for row in rows}
+
     def get_movie(self, movie_id: int, *, sources: Sequence[str] = ()) -> dict[str, Any] | None:
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "m.source IN")
@@ -1516,7 +1551,9 @@ class LibraryDatabase:
                 LEFT JOIN videos v ON v.source = s.id AND v.active = 1
                 {enabled_clause}
                 GROUP BY s.id
-                ORDER BY s.section, s.created_at, s.name COLLATE NOCASE
+                -- rowid breaks ties inside the same second, so sections keep
+                -- the order they were added in.
+                ORDER BY s.section, s.created_at, s.rowid
                 """
             ).fetchall()
         return [self._normalize_source(row) for row in rows]
@@ -1527,7 +1564,7 @@ class LibraryDatabase:
                 """
                 SELECT id FROM media_sources
                 WHERE section = ? AND enabled = 1
-                ORDER BY created_at, id
+                ORDER BY created_at, rowid
                 """,
                 (section,),
             ).fetchall()

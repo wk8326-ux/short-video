@@ -1,8 +1,8 @@
 {
-  "versionCode": 172,
-  "versionName": "1.6.0-beta.13",
-  "apkFile": "deepfuck-android-v1.6.0-beta.13.apk",
-  "sha256": "0c3f1379f99b12d90846cdfa0df81448054f26553f9d3f3192bfcdd82addb489",
-  "size": 4260152,
-  "notes": "新增短剧栏目：海报墙、详情页、选集播放与自动续播；电影区头部重排为「搜索 + 排序 + 片库统计」；管理页新增媒体源改为分组弹层。"
+  "versionCode": 173,
+  "versionName": "1.6.0-beta.14",
+  "apkFile": "deepfuck-android-v1.6.0-beta.14.apk",
+  "sha256": "1b839b54b3e01801468d8a548c48b48573d4bada028ecf473a14fcaa705fe8a4",
+  "size": 4276536,
+  "notes": "电影墙改为按媒体源分组：每个媒体库单独一段，先展示 6 部并可单独「加载更多」，右上角菜单可直接跳到指定媒体库；分组名称与顺序和管理页一致。管理页媒体源操作改为纯图标按钮。新增媒体库时，地址与根目录会列出历史填写过的候选，点选即可。"
 }

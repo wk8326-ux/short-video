@@ -199,6 +199,51 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     fun movieDetail(movieId: Long): MovieItem =
         MovieItem.fromJson(getJson("/api/movies/$movieId"))
 
+    /**
+     * The grouped wall: one section per media source, each previewing [perGroup]
+     * titles plus its own cursor.
+     */
+    fun movieGroups(
+        query: String = "",
+        perGroup: Int = MOVIE_GROUP_SIZE,
+        sort: String = "cover",
+    ): MovieGroupPage {
+        val target = url("/api/movies/groups").newBuilder()
+            .addQueryParameter("perGroup", perGroup.toString())
+            .addQueryParameter("sort", sort)
+            .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
+            .build()
+        val payload = getJson(target.toString())
+        return MovieGroupPage(
+            groups = payload.optObjectList("groups", MovieGroup::fromJson),
+            total = payload.optInt("total"),
+            scanRunning = payload.optJSONObject("scan")?.optBoolean("running") == true,
+        )
+    }
+
+    fun movieGroupItems(
+        sourceId: String,
+        offset: Int,
+        limit: Int = MOVIE_GROUP_SIZE,
+        query: String = "",
+        sort: String = "cover",
+    ): MovieGroupItems {
+        val target = url("/api/movies/groups").newBuilder()
+            .addPathSegment(sourceId)
+            .addQueryParameter("limit", limit.toString())
+            .addQueryParameter("offset", offset.toString())
+            .addQueryParameter("sort", sort)
+            .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
+            .build()
+        val payload = getJson(target.toString())
+        return MovieGroupItems(
+            sourceId = sourceId,
+            items = payload.optObjectList("items", MovieItem::fromJson),
+            total = payload.optInt("total"),
+            nextOffset = payload.optIntOrNull("nextOffset"),
+        )
+    }
+
     fun dramas(
         query: String = "",
         limit: Int = DRAMA_PAGE_SIZE,
@@ -399,6 +444,8 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     private companion object {
         const val ASMR_PAGE_SIZE = 24
         const val MOVIE_PAGE_SIZE = 24
+        // Two rows of three on a phone; the wall asks for the next slice on tap.
+        const val MOVIE_GROUP_SIZE = 6
         const val DRAMA_PAGE_SIZE = 24
         const val BASE_URL = "https://short.deepfuck.you/"
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
@@ -407,3 +454,12 @@ class MediaApi(private val preferences: PlaybackPreferences) {
 
 private fun JSONObject.optIntOrNull(name: String): Int? =
     if (isNull(name) || !has(name)) null else optInt(name)
+
+private fun <T> JSONObject.optObjectList(name: String, parse: (JSONObject) -> T): List<T> =
+    optJSONArray(name)?.let { array ->
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optJSONObject(index)?.let { add(parse(it)) }
+            }
+        }
+    }.orEmpty()

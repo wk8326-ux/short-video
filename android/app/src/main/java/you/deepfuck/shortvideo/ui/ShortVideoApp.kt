@@ -231,6 +231,7 @@ fun ShortVideoApp(
                                 onBack = viewModel::closeMovieDetail,
                                 onPlay = viewModel::playMovie,
                                 onLoadMore = viewModel::loadMoreMovies,
+                                onLoadMoreGroup = viewModel::loadMoreMovieGroup,
                                 onRetry = viewModel::retryMovies,
                                 onTogglePlayback = viewModel::togglePlayback,
                                 onMuted = viewModel::setMuted,
