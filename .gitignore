@@ -34,5 +34,6 @@ test-results/
 .deploy/
 tmp-*.json
 tmp-diag*/
+.tmp-*
 deepfuck-android-*.apk
 short-video-android-*.apk

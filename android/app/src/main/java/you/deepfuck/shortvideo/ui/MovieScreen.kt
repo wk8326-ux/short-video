@@ -5,9 +5,9 @@
 package you.deepfuck.shortvideo.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,11 +35,10 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import androidx.compose.material.icons.automirrored.outlined.Sort
 import androidx.compose.material.icons.automirrored.outlined.VolumeOff
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Pause
@@ -53,8 +52,6 @@ import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay10
-import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.Sort
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -64,8 +61,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -88,11 +83,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
@@ -117,13 +110,13 @@ internal fun MovieScreen(
     imageLoader: ImageLoader,
     fullscreen: Boolean,
     listPosition: ListPosition,
-    onQuery: (String) -> Unit,
-    onSort: (String) -> Unit,
     onSelect: (MovieItem) -> Unit,
     onBack: () -> Unit,
     onPlay: (MovieItem) -> Unit,
-    onLoadMore: () -> Unit,
-    onLoadMoreGroup: (String) -> Unit,
+    onOpenGroup: (String) -> Unit,
+    onCloseGroup: () -> Unit,
+    onGroupSort: (String) -> Unit,
+    onLoadMoreGroup: () -> Unit,
     onRetry: () -> Unit,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
@@ -140,10 +133,7 @@ internal fun MovieScreen(
         initialFirstVisibleItemIndex = safePosition.index,
         initialFirstVisibleItemScrollOffset = safePosition.offset,
     )
-    val searchGridState = rememberLazyGridState()
     var listPositionRestored by remember { mutableStateOf(false) }
-    var observedQuery by remember { mutableStateOf(state.movieQuery) }
-    val searching = state.movieQuery.isNotBlank()
     LaunchedEffect(state.movieGroups.size) {
         if (!listPositionRestored && state.movieGroups.isNotEmpty()) {
             val restored = initialListPosition.clamp(state.movieGroups.size)
@@ -151,45 +141,16 @@ internal fun MovieScreen(
             listPositionRestored = true
         }
     }
-    LaunchedEffect(state.movieQuery) {
-        if (state.movieQuery != observedQuery) {
-            observedQuery = state.movieQuery
-            wallState.scrollToItem(0)
-            onListPosition(ListPosition())
-        }
-    }
 
-    if (!searching) {
-        TrackMovieWall(
-            listState = wallState,
-            itemCount = state.movieGroups.size,
-            enabled = listPositionRestored,
-            onListPosition = onListPosition,
-        )
-    } else {
-        TrackMovieGrid(
-            gridState = searchGridState,
-            itemCount = state.movieItems.size,
-            loading = state.movieLoading,
-            hasMore = state.movieNextOffset != null,
-            onLoadMore = onLoadMore,
-        )
-    }
+    TrackMovieWall(
+        listState = wallState,
+        itemCount = state.movieGroups.size,
+        enabled = listPositionRestored,
+        onListPosition = onListPosition,
+    )
 
     val movie = state.selectedMovie
-    if (movie == null) {
-        MovieCatalog(
-            state = state,
-            imageLoader = imageLoader,
-            wallState = wallState,
-            searchGridState = searchGridState,
-            onQuery = onQuery,
-            onSort = onSort,
-            onSelect = onSelect,
-            onLoadMoreGroup = onLoadMoreGroup,
-            onRetry = onRetry,
-        )
-    } else {
+    if (movie != null) {
         MovieDetail(
             movie = movie,
             detailLoading = state.movieDetailLoading,
@@ -208,7 +169,34 @@ internal fun MovieScreen(
             onSeekBy = onSeekBy,
             onFullscreen = onFullscreen,
         )
+        return
     }
+
+    if (state.openMovieGroupId != null) {
+        MovieLibraryPage(
+            name = state.openMovieGroupName,
+            items = state.openMovieGroupItems,
+            total = state.openMovieGroupTotal,
+            loading = state.openMovieGroupLoading,
+            error = state.openMovieGroupError,
+            sort = state.openMovieGroupSort,
+            imageLoader = imageLoader,
+            onBack = onCloseGroup,
+            onSort = onGroupSort,
+            onSelect = onSelect,
+            onLoadMore = onLoadMoreGroup,
+        )
+        return
+    }
+
+    MovieCatalog(
+        state = state,
+        imageLoader = imageLoader,
+        wallState = wallState,
+        onSelect = onSelect,
+        onOpenGroup = onOpenGroup,
+        onRetry = onRetry,
+    )
 }
 
 /** Remembers which library section the user scrolled away from. */
@@ -232,7 +220,7 @@ private fun TrackMovieWall(
     }
 }
 
-/** Pages the flat search result grid; the wall pages per section instead. */
+/** Pages the grid of a library opened on its own page. */
 @Composable
 private fun TrackMovieGrid(
     gridState: LazyGridState,
@@ -250,23 +238,24 @@ private fun TrackMovieGrid(
     }
 }
 
+/**
+ * The wall: one section per media source.
+ *
+ * Search, sort and the counting chips used to live here. A library of a few
+ * thousand titles is browsed by opening it, so the header keeps only the
+ * library jump menu and each section carries its own "加载更多" entry point.
+ */
 @Composable
 private fun MovieCatalog(
     state: AppUiState,
     imageLoader: ImageLoader,
     wallState: LazyListState,
-    searchGridState: LazyGridState,
-    onQuery: (String) -> Unit,
-    onSort: (String) -> Unit,
     onSelect: (MovieItem) -> Unit,
-    onLoadMoreGroup: (String) -> Unit,
+    onOpenGroup: (String) -> Unit,
     onRetry: () -> Unit,
 ) {
-    val focusManager = LocalFocusManager.current
     val scope = rememberCoroutineScope()
-    var sortMenuOpen by remember { mutableStateOf(false) }
     var jumpMenuOpen by remember { mutableStateOf(false) }
-    val searching = state.movieQuery.isNotBlank()
     Column(
         Modifier
             .fillMaxSize()
@@ -275,163 +264,53 @@ private fun MovieCatalog(
             .padding(top = 62.dp),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 12.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            OutlinedTextField(
-                value = state.movieQuery,
-                onValueChange = onQuery,
-                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                singleLine = true,
-                placeholder = { Text("搜索片名") },
-                leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
-                trailingIcon = if (state.movieQuery.isNotEmpty()) {
-                    {
-                        IconButton(onClick = { onQuery("") }) {
-                            Icon(Icons.Outlined.Close, contentDescription = "清除搜索")
-                        }
-                    }
-                } else {
-                    null
-                },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
-                shape = ControlShape,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = CanvasSoft,
-                    unfocusedContainerColor = CanvasSoft,
-                    focusedBorderColor = GlassLine,
-                    unfocusedBorderColor = Line,
-                    cursorColor = AccentSoft,
-                ),
-            )
+            Spacer(Modifier.weight(1f))
+            // Quick jump between libraries: the wall is grouped by media source,
+            // so the menu mirrors that order.
             Box {
                 GlassIconButton(
-                    label = "排序",
-                    onClick = { sortMenuOpen = true },
+                    label = "媒体库导航",
+                    onClick = { jumpMenuOpen = true },
                 ) {
-                    Icon(Icons.Outlined.Sort, contentDescription = null)
+                    Icon(Icons.Outlined.Menu, contentDescription = null)
                 }
                 DropdownMenu(
-                    expanded = sortMenuOpen,
-                    onDismissRequest = { sortMenuOpen = false },
+                    expanded = jumpMenuOpen,
+                    onDismissRequest = { jumpMenuOpen = false },
                     containerColor = RaisedStrong,
                     shape = GlassPanelShape,
                     shadowElevation = 0.dp,
                 ) {
-                    MovieSort.entries.forEach { sort ->
+                    state.movieGroups.forEachIndexed { index, group ->
                         DropdownMenuItem(
-                            text = { Text(sort.label) },
+                            text = {
+                                Text(
+                                    group.name,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
                             trailingIcon = {
-                                if (state.movieSort == sort.value) {
+                                if (wallState.firstVisibleItemIndex == index) {
                                     Icon(Icons.Outlined.Check, contentDescription = null)
                                 }
                             },
                             onClick = {
-                                sortMenuOpen = false
-                                onSort(sort.value)
+                                jumpMenuOpen = false
+                                scope.launch { wallState.animateScrollToItem(index) }
                             },
                         )
                     }
                 }
             }
-            // Quick jump between libraries: the wall is grouped by media source,
-            // so the menu mirrors that order.
-            if (state.movieGroups.size > 1) {
-                Box {
-                    GlassIconButton(
-                        label = "媒体库导航",
-                        onClick = { jumpMenuOpen = true },
-                    ) {
-                        Icon(Icons.Outlined.Menu, contentDescription = null)
-                    }
-                    DropdownMenu(
-                        expanded = jumpMenuOpen,
-                        onDismissRequest = { jumpMenuOpen = false },
-                        containerColor = RaisedStrong,
-                        shape = GlassPanelShape,
-                        shadowElevation = 0.dp,
-                    ) {
-                        state.movieGroups.forEachIndexed { index, group ->
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        group.name,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                },
-                                trailingIcon = {
-                                    if (wallState.firstVisibleItemIndex == index) {
-                                        Icon(Icons.Outlined.Check, contentDescription = null)
-                                    }
-                                },
-                                onClick = {
-                                    jumpMenuOpen = false
-                                    scope.launch { wallState.animateScrollToItem(index) }
-                                },
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp)
-                .padding(bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            MovieStatChip("片库", state.movieTotal.toString())
-            if (searching) {
-                MovieStatChip("已载入", state.movieItems.size.toString())
-            } else {
-                MovieStatChip("媒体源", state.movieGroups.size.toString())
-            }
-            MovieStatChip("排序", MovieSort.labelOf(state.movieSort))
         }
 
         when {
-            searching -> {
-                when {
-                    state.movieItems.isEmpty() && state.movieLoading -> MovieSkeletonGrid()
-                    state.movieItems.isEmpty() && state.movieError != null -> MovieCatalogState(
-                        icon = Icons.Outlined.Refresh,
-                        title = state.movieError,
-                        action = "重试",
-                        onAction = onRetry,
-                    )
-                    state.movieItems.isEmpty() -> MovieCatalogState(
-                        icon = Icons.Outlined.Movie,
-                        title = "没有匹配的电影",
-                        action = "清除搜索",
-                        onAction = { onQuery("") },
-                    )
-                    else -> LazyVerticalGrid(
-                        columns = GridCells.Adaptive(148.dp),
-                        state = searchGridState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 34.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(18.dp),
-                    ) {
-                        items(state.movieItems, key = MovieItem::id) { movie ->
-                            MoviePoster(movie, imageLoader, onClick = { onSelect(movie) })
-                        }
-                        if (state.movieLoading) {
-                            item(span = { GridItemSpan(maxLineSpan) }) {
-                                Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
-                                    CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
             state.movieGroups.isEmpty() && state.movieError != null -> MovieCatalogState(
                 icon = Icons.Outlined.Refresh,
                 title = state.movieError,
@@ -455,10 +334,8 @@ private fun MovieCatalog(
                         MovieGroupSection(
                             group = group,
                             imageLoader = imageLoader,
-                            loadingMore = group.sourceId in state.movieGroupLoading,
-                            error = state.movieGroupErrors[group.sourceId],
                             onSelect = onSelect,
-                            onLoadMore = { onLoadMoreGroup(group.sourceId) },
+                            onOpenGroup = { onOpenGroup(group.sourceId) },
                         )
                     }
                 }
@@ -478,15 +355,15 @@ private fun MovieCatalog(
 private fun MovieGroupSection(
     group: MovieGroup,
     imageLoader: ImageLoader,
-    loadingMore: Boolean,
-    error: String?,
     onSelect: (MovieItem) -> Unit,
-    onLoadMore: () -> Unit,
+    onOpenGroup: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 12.dp)) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .clip(ControlShape)
+                .clickable(onClick = onOpenGroup)
                 .padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -534,38 +411,172 @@ private fun MovieGroupSection(
         if (group.hasMore) {
             val remaining = (group.total - group.items.size).coerceAtLeast(0)
             Surface(
-                onClick = onLoadMore,
+                onClick = onOpenGroup,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 10.dp)
                     .heightIn(min = 48.dp),
-                color = Raised,
+                color = GlassFillSoft,
                 contentColor = TextSecondary,
-                shape = RoundedCornerShape(10.dp),
+                shape = ControlShape,
             ) {
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    if (loadingMore) {
-                        CircularProgressIndicator(Modifier.size(20.dp), color = TextSecondary, strokeWidth = 2.dp)
-                    } else {
-                        Text(
-                            if (remaining > 0) "加载更多 · 还有 $remaining 部" else "加载更多",
-                            style = MaterialTheme.typography.labelLarge,
-                            maxLines = 1,
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    Text(
+                        if (remaining > 0) "加载更多 · 还有 $remaining 部" else "加载更多",
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        Icons.AutoMirrored.Outlined.ArrowForward,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One library, opened full screen.
+ *
+ * Same wall language as the main page, but with the whole library, its own
+ * cursor and a sort control: a library of a few thousand posters cannot be
+ * appended to a shared page without burying every other library.
+ */
+@Composable
+private fun MovieLibraryPage(
+    name: String,
+    items: List<MovieItem>,
+    total: Int,
+    loading: Boolean,
+    error: String?,
+    sort: String,
+    imageLoader: ImageLoader,
+    onBack: () -> Unit,
+    onSort: (String) -> Unit,
+    onSelect: (MovieItem) -> Unit,
+    onLoadMore: () -> Unit,
+) {
+    val gridState = rememberLazyGridState()
+    var sortMenuOpen by remember { mutableStateOf(false) }
+    val hasMore = items.size < total
+    TrackMovieGrid(
+        gridState = gridState,
+        itemCount = items.size,
+        loading = loading,
+        hasMore = hasMore,
+        onLoadMore = onLoadMore,
+    )
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Canvas)
+            .statusBarsPadding()
+            .padding(top = 62.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            GlassIconButton(label = "返回电影墙", onClick = onBack) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    name,
+                    color = TextPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    if (total > 0) "共 $total 部" else "正在统计…",
+                    color = TextFaint,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                )
+            }
+            Box {
+                GlassIconButton(
+                    label = "排序",
+                    onClick = { sortMenuOpen = true },
+                ) {
+                    Icon(Icons.AutoMirrored.Outlined.Sort, contentDescription = null)
+                }
+                DropdownMenu(
+                    expanded = sortMenuOpen,
+                    onDismissRequest = { sortMenuOpen = false },
+                    containerColor = RaisedStrong,
+                    shape = GlassPanelShape,
+                    shadowElevation = 0.dp,
+                ) {
+                    MovieSort.entries.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.label) },
+                            trailingIcon = {
+                                if (sort == option.value) {
+                                    Icon(Icons.Outlined.Check, contentDescription = null)
+                                }
+                            },
+                            onClick = {
+                                sortMenuOpen = false
+                                onSort(option.value)
+                            },
                         )
                     }
                 }
             }
         }
-        // A failed section stays visible with its own message: the wall itself
-        // is fine, only this library's next page failed.
-        error?.let {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                it,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp),
+
+        when {
+            items.isEmpty() && loading -> MovieSkeletonGrid()
+            items.isEmpty() && error != null -> MovieCatalogState(
+                icon = Icons.Outlined.Refresh,
+                title = error,
+                action = "重试",
+                onAction = onLoadMore,
             )
+            items.isEmpty() -> MovieCatalogState(
+                icon = Icons.Outlined.Movie,
+                title = "这个媒体库还没有影片",
+                action = null,
+                onAction = {},
+            )
+            else -> LazyVerticalGrid(
+                columns = GridCells.Adaptive(148.dp),
+                state = gridState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 34.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+            ) {
+                items(items, key = MovieItem::id) { movie ->
+                    MoviePoster(movie, imageLoader, onClick = { onSelect(movie) })
+                }
+                if (loading) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
+                        }
+                    }
+                } else if (hasMore) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
+                            Text("正在载入更多…", color = TextFaint, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -862,7 +873,6 @@ private fun MovieDetail(
 
 /** Raw provider ids come straight from the API, so keep the UI labels here. */
 private fun metadataProviderLabel(provider: String): String = when (provider.lowercase()) {
-    "tmdb" -> "TMDB"
     "shared" -> "共享元数据"
     else -> provider.uppercase()
 }
@@ -1116,29 +1126,11 @@ private fun movieMeta(movie: MovieItem): String = buildList {
 internal enum class MovieSort(val value: String, val label: String) {
     COVER("cover", "封面优先"),
     TITLE("title", "标题"),
+    TIME("time", "按时间"),
     ;
 
     companion object {
         fun labelOf(value: String): String =
             entries.firstOrNull { it.value == value }?.label ?: COVER.label
-    }
-}
-
-@Composable
-private fun MovieStatChip(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .glassSurface(shape = RoundedCornerShape(999.dp), fill = GlassFillSoft)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Text(label, color = TextFaint, style = MaterialTheme.typography.labelSmall)
-        Text(
-            value,
-            color = TextPrimary,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
     }
 }

@@ -140,6 +140,13 @@ fun ShortVideoApp(
     }
     BackHandler(
         enabled = !fullscreen && !state.showManagement &&
+            state.surface == MediaSurface.MOVIE && state.selectedMovie == null &&
+            state.openMovieGroupId != null,
+    ) {
+        viewModel.closeMovieGroup()
+    }
+    BackHandler(
+        enabled = !fullscreen && !state.showManagement &&
             state.surface == MediaSurface.DRAMA && state.selectedDrama != null && state.nowPlaying != null,
     ) {
         viewModel.stopDramaPlayback()
@@ -164,8 +171,6 @@ fun ShortVideoApp(
                 onBack = viewModel::hideManagement,
                 onRefresh = viewModel::loadAdminStatus,
                 onScanSource = viewModel::startLibraryScan,
-                onMovieMetadata = viewModel::startMovieMetadata,
-                onDramaMetadata = viewModel::startDramaMetadata,
                 onSaveSource = viewModel::saveMediaSource,
                 onDeleteSource = viewModel::deleteMediaSource,
                 onFastStart = viewModel::startFastStartCheck,
@@ -225,12 +230,12 @@ fun ShortVideoApp(
                                 imageLoader = viewModel.movieImageLoader,
                                 fullscreen = fullscreen,
                                 listPosition = viewModel.movieListPosition(),
-                                onQuery = viewModel::setMovieQuery,
-                                onSort = viewModel::setMovieSort,
                                 onSelect = viewModel::selectMovie,
                                 onBack = viewModel::closeMovieDetail,
                                 onPlay = viewModel::playMovie,
-                                onLoadMore = viewModel::loadMoreMovies,
+                                onOpenGroup = viewModel::openMovieGroup,
+                                onCloseGroup = viewModel::closeMovieGroup,
+                                onGroupSort = viewModel::setMovieGroupSort,
                                 onLoadMoreGroup = viewModel::loadMoreMovieGroup,
                                 onRetry = viewModel::retryMovies,
                                 onTogglePlayback = viewModel::togglePlayback,

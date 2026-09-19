@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.15] - 2026-09-19
+
+### Added
+
+- A finished `短剧` episode now rolls on to the next part of the series, the way a series player would. The previous
+  episode stayed on screen after playback ended, so the last frame froze until the user tapped the next part.
+- `加载更多` opens the library on its own page: the whole library, its own cursor, and a sort control offering
+  `封面优先` / `标题` / `按时间`. The button used to append a few more posters to the wall, which buried every other
+  library below the one being expanded, so it read as a dead end rather than an entry point.
+
+### Changed
+
+- The movie header keeps only the three-line library menu. Search, the sort chip and the library/source chips are gone;
+  a few hundred titles per library are browsed by opening the library, so the controls were duplicating the navigation.
+- Media-source rows are about half their old height: name, item count and section on the first line, icon-only
+  `编辑` / `扫描` / `删除` on the second. The metric wall and the cover-refresh button underneath are gone, so a dozen
+  libraries now fit on one screen.
+- Scanning a movie library finishes the covers on its own, so the manual match button was removed.
+
+### Removed
+
+- TMDB is gone. The shared metadata catalogue is the only artwork source now, so a title the catalogue does not know
+  lands in `需确认` instead of being filled from a second provider.
+
 ## [1.6.0-beta.14] - 2026-09-19
 
 ### Added

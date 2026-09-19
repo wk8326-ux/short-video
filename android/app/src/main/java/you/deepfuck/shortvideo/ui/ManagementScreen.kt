@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -34,7 +35,6 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.IosShare
-import androidx.compose.material.icons.outlined.ImageSearch
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Key
@@ -77,16 +77,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.unit.dp
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import you.deepfuck.shortvideo.AppUiState
 import you.deepfuck.shortvideo.data.AdminStatus
 import you.deepfuck.shortvideo.data.LibrarySection
 import you.deepfuck.shortvideo.data.MediaLibrarySource
 import you.deepfuck.shortvideo.data.MediaSourceDraft
-import you.deepfuck.shortvideo.data.MovieMetadataSummary
-import you.deepfuck.shortvideo.data.MovieMetadataStatus
 
 @Composable
 internal fun ManagementScreen(
@@ -94,8 +89,6 @@ internal fun ManagementScreen(
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onScanSource: (String) -> Unit,
-    onMovieMetadata: (String) -> Unit,
-    onDramaMetadata: (String) -> Unit,
     onSaveSource: (String?, MediaSourceDraft) -> Unit,
     onDeleteSource: (String) -> Unit,
     onFastStart: () -> Unit,
@@ -191,22 +184,13 @@ internal fun ManagementScreen(
                         Spacer(Modifier.height(18.dp))
                         status.sources.forEachIndexed { index, source ->
                             if (index > 0) {
-                                Spacer(Modifier.height(12.dp))
+                                Spacer(Modifier.height(8.dp))
                             }
                             MediaSourceRow(
                                 source = source,
                                 starting = "scan-${source.id}" in state.adminActions,
-                                metadataStatus = source.metadataStatus(status),
-                                metadataStarting = "${source.metadataActionKey}-${source.id}" in state.adminActions,
                                 deleting = "delete-source-${source.id}" in state.adminActions,
                                 onScan = onScanSource,
-                                onMetadata = { id ->
-                                    if (source.section == LibrarySection.DRAMA) {
-                                        onDramaMetadata(id)
-                                    } else {
-                                        onMovieMetadata(id)
-                                    }
-                                },
                                 onEdit = {
                                     editingSource = source
                                     sourceDialogOpen = true
@@ -346,133 +330,58 @@ internal fun ManagementScreen(
 private fun MediaSourceRow(
     source: MediaLibrarySource,
     starting: Boolean,
-    metadataStatus: MovieMetadataStatus,
-    metadataStarting: Boolean,
     deleting: Boolean,
     onScan: (String) -> Unit,
-    onMetadata: (String) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val busy = source.scan.running || starting
-    val metadataBusy = metadataStarting || (
-        metadataStatus.running && metadataStatus.sourceId == source.id
-    )
-    val otherMetadataBusy = metadataStatus.running && metadataStatus.sourceId != source.id
-    val statusLabel = when {
-        busy -> "扫描中"
-        !source.enabled -> "已停用"
-        source.scan.lastError != null -> "需检查"
-        source.scan.lastSuccess != null -> "已索引"
-        else -> "待扫描"
-    }
+    // Two lines only: identity on the first, actions on the second. The wall of
+    // metrics that used to live here pushed a dozen libraries past a screen.
     Column(
         Modifier
             .fillMaxWidth()
             .glassSurface(fill = Raised, line = Line)
-            .padding(14.dp),
+            .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 6.dp),
     ) {
-        Row(verticalAlignment = Alignment.Top) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    source.name,
-                    color = TextPrimary,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    "${source.baseUrl}${source.rootPath}",
-                    color = TextFaint,
-                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .clip(ControlShape)
-                    .background(Accent.copy(alpha = 0.12f))
-                    .padding(horizontal = 8.dp, vertical = 5.dp),
-            ) {
-                Text(
-                    source.section.label,
-                    color = AccentSoft,
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                )
-            }
-        }
-        HorizontalDivider(Modifier.padding(top = 14.dp, bottom = 10.dp), color = Line)
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            SourceMetric("媒体数量", source.videos.toString(), Modifier.weight(1f))
-            SourceMetric("目录", source.scan.directories.toString(), Modifier.weight(1f))
-            SourceMetric("当前状态", statusLabel, Modifier.weight(1f))
-        }
-        source.scan.lastSuccess?.let {
-            Spacer(Modifier.height(10.dp))
             Text(
-                "上次扫描 ${formatTimestamp(it)}",
-                color = TextFaint,
+                source.name,
+                modifier = Modifier.weight(1f, fill = false),
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                source.videos.toString(),
+                color = TextSecondary,
+                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                source.section.label,
+                color = AccentSoft,
                 style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                maxLines = 1,
             )
         }
-        source.scan.lastError?.let {
-            Spacer(Modifier.height(8.dp))
+        source.scan.lastError?.let { message ->
+            Spacer(Modifier.height(2.dp))
             Text(
-                it,
+                message,
                 color = androidx.compose.material3.MaterialTheme.colorScheme.error,
-                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        if (source.supportsMetadata) {
-            val metadata = source.metadataSummary
-            HorizontalDivider(Modifier.padding(top = 14.dp, bottom = 12.dp), color = Line)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                SourceMetric("已匹配", (metadata?.matched ?: 0).toString(), Modifier.weight(1f))
-                SourceMetric("待处理", (metadata?.pending ?: 0).toString(), Modifier.weight(1f))
-                SourceMetric("需确认", (metadata?.needsReview ?: 0).toString(), Modifier.weight(1f))
-            }
-            if (metadataBusy) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "正在匹配封面 ${metadataStatus.checked} / ${metadataStatus.total}",
-                    color = TextSecondary,
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                )
-            } else if ((metadata?.total ?: 0) == 0) {
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "先扫描媒体源，再匹配封面和资料。",
-                    color = TextFaint,
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                )
-            } else {
-                metadata?.lastSuccess?.let {
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        "上次匹配 ${formatTimestamp(it)}",
-                        color = TextFaint,
-                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                    )
-                }
-                metadataStatus.lastError.takeIf { metadataStatus.sourceId == source.id }?.let {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        it,
-                        color = androidx.compose.material3.MaterialTheme.colorScheme.error,
-                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        }
-        Spacer(Modifier.height(10.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -482,25 +391,16 @@ private fun MediaSourceRow(
             GlassIconButton(
                 label = "编辑媒体源",
                 onClick = onEdit,
-                enabled = !busy && !metadataBusy,
+                enabled = !busy && !deleting,
                 tint = TextSecondary,
             ) {
                 Icon(Icons.Outlined.Edit, contentDescription = null)
             }
             Spacer(Modifier.size(4.dp))
             GlassIconButton(
-                label = "删除媒体源",
-                onClick = onDelete,
-                enabled = !busy && !metadataBusy && !deleting,
-                tint = androidx.compose.material3.MaterialTheme.colorScheme.error,
-            ) {
-                Icon(Icons.Outlined.DeleteOutline, contentDescription = null)
-            }
-            Spacer(Modifier.weight(1f))
-            GlassIconButton(
                 label = if (busy) "正在扫描" else "扫描媒体源",
                 onClick = { onScan(source.id) },
-                enabled = source.enabled && !busy && !metadataBusy,
+                enabled = source.enabled && !busy,
                 tint = if (busy) TextSecondary else Color.White,
             ) {
                 if (busy) {
@@ -509,20 +409,14 @@ private fun MediaSourceRow(
                     Icon(Icons.Outlined.Refresh, contentDescription = null)
                 }
             }
-            if (source.supportsMetadata) {
-                Spacer(Modifier.size(4.dp))
-                GlassIconButton(
-                    label = if (metadataBusy) "正在匹配封面" else "刷新封面",
-                    onClick = { onMetadata(source.id) },
-                    enabled = source.enabled && !busy && !metadataBusy && !otherMetadataBusy && source.videos > 0,
-                    tint = if (metadataBusy) TextSecondary else Color.White,
-                ) {
-                    if (metadataBusy) {
-                        CircularProgressIndicator(Modifier.size(18.dp), color = TextSecondary, strokeWidth = 2.dp)
-                    } else {
-                        Icon(Icons.Outlined.ImageSearch, contentDescription = null)
-                    }
-                }
+            Spacer(Modifier.size(4.dp))
+            GlassIconButton(
+                label = "删除媒体源",
+                onClick = onDelete,
+                enabled = !busy && !deleting,
+                tint = androidx.compose.material3.MaterialTheme.colorScheme.error,
+            ) {
+                Icon(Icons.Outlined.DeleteOutline, contentDescription = null)
             }
         }
     }
@@ -566,26 +460,6 @@ private fun SuggestionRow(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun SourceMetric(label: String, value: String, modifier: Modifier = Modifier) {
-    Column(modifier) {
-        Text(
-            value,
-            color = TextPrimary,
-            fontWeight = FontWeight.SemiBold,
-            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.height(3.dp))
-        Text(
-            label,
-            color = TextFaint,
-            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-        )
     }
 }
 
@@ -858,19 +732,6 @@ private val LibrarySection.tileLabel: String
         LibrarySection.DRAMA -> "短剧"
     }
 
-/// 电影和短剧都支持刮削：电影走元数据接口，短剧走 91crdj 剧目信息。
-private val MediaLibrarySource.supportsMetadata: Boolean
-    get() = section == LibrarySection.MOVIE || section == LibrarySection.DRAMA
-
-private val MediaLibrarySource.metadataActionKey: String
-    get() = if (section == LibrarySection.DRAMA) "drama-metadata" else "metadata"
-
-private val MediaLibrarySource.metadataSummary: MovieMetadataSummary?
-    get() = if (section == LibrarySection.DRAMA) dramaMetadata else movieMetadata
-
-private fun MediaLibrarySource.metadataStatus(status: AdminStatus): MovieMetadataStatus =
-    if (section == LibrarySection.DRAMA) status.dramaMetadata else status.movieMetadata
-
 @Composable
 private fun ChoiceRow(
     label: String,
@@ -1003,9 +864,3 @@ private fun Facts(values: List<Pair<String, String>>) {
 private fun SectionDivider() {
     HorizontalDivider(modifier = Modifier.padding(vertical = 28.dp), color = Line)
 }
-
-private fun formatTimestamp(seconds: Long): String = runCatching {
-    FORMATTER.format(Instant.ofEpochSecond(seconds).atZone(ZoneId.systemDefault()))
-}.getOrDefault("扫描时间未知")
-
-private val FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")

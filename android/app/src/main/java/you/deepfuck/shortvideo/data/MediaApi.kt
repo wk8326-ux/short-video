@@ -441,11 +441,14 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     private fun url(path: String) = baseUrl.resolve(path)
         ?: throw IllegalArgumentException("Invalid API path: $path")
 
-    private companion object {
+    internal companion object {
         const val ASMR_PAGE_SIZE = 24
         const val MOVIE_PAGE_SIZE = 24
         // Two rows of three on a phone; the wall asks for the next slice on tap.
         const val MOVIE_GROUP_SIZE = 6
+        // One library opened on its own page: bigger slices keep scrolling
+        // smooth without a request per swipe.
+        const val MOVIE_LIBRARY_PAGE_SIZE = 60
         const val DRAMA_PAGE_SIZE = 24
         const val BASE_URL = "https://short.deepfuck.you/"
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
