@@ -1,3 +1,4 @@
+import sqlite3
 import time
 
 import httpx
@@ -786,3 +787,152 @@ async def test_a_day_old_mirror_is_walked_even_when_the_version_matches():
     # No probe at all: the day-old mirror goes straight back to the full walk.
     assert limits and all(limit != 1 for limit in limits)
     await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_reuses_the_mirror_file_instead_of_walking_again(tmp_path):
+    """The catalogue is mirrored to disk, so a redeploy does not re-walk it."""
+    path = tmp_path / "shared-metadata-index.db"
+    walked: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        walked.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "total": 2,
+                "index_version": "inventory-v3",
+                "items": [
+                    _entry(
+                        "ABP-485",
+                        "ABP-485",
+                        "第一条",
+                        media_path="ABP-485/ABP-485.mp4",
+                        cloud_path="/光鸭/关键词分类/ABP-485/ABP-485.mp4",
+                    ),
+                    _entry("KCPN-054", "KCPN-054", "第二条"),
+                ],
+            },
+        )
+
+    http_client = _client(handler)
+    first = SharedMetadataClient(base_url=BASE, token="t", client=http_client, cache_path=path)
+    await first.index()
+
+    assert path.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+    assert walked == ["/api/shared-metadata/index"]
+
+    # A second process -- a container that came back up -- finds the file.
+    async def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a restart must not re-walk a mirror that is still fresh")
+
+    other_http = _client(refuse)
+    second = SharedMetadataClient(base_url=BASE, token="t", client=other_http, cache_path=path)
+    restored = await second.index()
+    await http_client.aclose()
+    await other_http.aclose()
+
+    assert restored.version == "inventory-v3"
+    assert restored.names["abp485"]["title"] == "第一条"
+    assert restored.paths["abp-485/abp-485.mp4"]["title"] == "第一条"
+    assert second._walked_at == second._index_at
+
+
+@pytest.mark.asyncio
+async def test_the_superseded_json_mirror_is_removed_once_the_db_exists(tmp_path):
+    """The old JSON mirror is megabytes nothing reads any more."""
+    legacy = tmp_path / "shared-metadata-index.json"
+    legacy.write_text('{"fetchedAt": 0, "items": []}', encoding="utf-8")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "total": 1, "items": [_entry("ABP-485", "ABP-485")]})
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(
+        base_url=BASE,
+        token="t",
+        client=http_client,
+        cache_path=tmp_path / "shared-metadata-index.db",
+    )
+    await client.index()
+    await http_client.aclose()
+
+    assert not legacy.exists()
+    assert (tmp_path / "shared-metadata-index.db").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_catalogue_does_not_replace_a_working_mirror(tmp_path):
+    """A catalogue that answers with nothing is not a reason to lose covers."""
+    path = tmp_path / "shared-metadata-index.db"
+    paying = True
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if not paying:
+            return httpx.Response(
+                200, json={"ok": True, "total": 0, "index_version": "emptied", "items": []}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "total": 1,
+                "index_version": "inventory-v4",
+                "items": [_entry("ABP-485", "ABP-485", "唯一一条")],
+            },
+        )
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(
+        base_url=BASE, token="t", client=http_client, cache_path=path, index_ttl=0.0
+    )
+
+    assert (await client.index(refresh=True)).names["abp485"]["title"] == "唯一一条"
+    paying = False
+    kept = await client.index(refresh=True)
+    await http_client.aclose()
+
+    assert kept.names["abp485"]["title"] == "唯一一条"
+    assert not list(tmp_path.glob("*.tmp"))
+    # The mirror on disk is the one that still answers.
+    async def refuse(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the kept mirror should have answered from disk")
+
+    other_http = _client(refuse)
+    reopened = SharedMetadataClient(
+        base_url=BASE, token="t", client=other_http, cache_path=path
+    )
+    assert (await reopened.index()).names["abp485"]["title"] == "唯一一条"
+    await other_http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_releases_the_mirror_it_supersedes():
+    """Every walk publishes its own connection, so the replaced one is closed."""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "total": 1,
+                "index_version": "inventory-v5",
+                "items": [_entry("ABP-485", "ABP-485", "唯一一条")],
+            },
+        )
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(
+        base_url=BASE, token="t", client=http_client, index_ttl=0.0
+    )
+    first = await client.index()
+    # Push the mirror past the daily full refresh so the next call walks again.
+    client._walked_at = time.monotonic() - INDEX_FULL_REFRESH_SECONDS - 1.0
+    second = await client.index()
+    await http_client.aclose()
+
+    assert second is not first
+    with pytest.raises(sqlite3.ProgrammingError):
+        first.names["abp485"]
+    assert second.names["abp485"]["title"] == "唯一一条"

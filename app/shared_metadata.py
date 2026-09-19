@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import re
+import sqlite3
 import time
 import unicodedata
 import urllib.parse
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
+
+from app.metadata_index_db import (
+    CODE_TABLE,
+    NAME_TABLE,
+    PATH_TABLE,
+    CatalogueIndex,
+    CatalogueIndexBuilder,
+    FoldedKeyTable,
+    PreparedRow,
+)
 
 logger = logging.getLogger("short-video")
 
@@ -53,7 +62,10 @@ INDEX_RETRY_DELAYS = (20.0, 45.0, 90.0)
 # truncated the catalogue at 20k records and left every title past that point
 # without a cover no matter how often the library was rescanned.
 INDEX_MAX_PAGES = 80
-INDEX_CACHE_FILENAME = "shared-metadata-index.json"
+# The folded catalogue is mirrored to a SQLite file rather than to a Python
+# dict: same lookups, flat memory. Kept in one constant because the deployment
+# and the tests both need to recognise the file.
+INDEX_DB_FILENAME = "shared-metadata-index.db"
 # Only the fields the lookup tables actually read survive the trim. The full
 # record set is 27k+ entries and the container is capped at 256 MB, so carrying
 # the unused Emby fields would cost megabytes for nothing.
@@ -272,12 +284,61 @@ def candidate_keys(name: str, path: str = "") -> tuple[tuple[str, ...], tuple[st
 
 @dataclass(frozen=True)
 class SharedMetadataIndex:
-    """Folded-key lookup tables published by the shared service."""
+    """Folded-key lookup tables published by the shared service.
 
-    names: dict[str, dict[str, Any]]
-    codes: dict[str, dict[str, Any]]
-    paths: dict[str, dict[str, Any]] = field(default_factory=dict)
+    The tables answer exactly like the dictionaries they replaced -- ``[key]``,
+    ``in``, ``len()`` -- but they are read out of the mirror one key at a time,
+    so a catalogue twice this size costs the same memory.
+    """
+
+    names: Mapping[str, dict[str, Any]]
+    codes: Mapping[str, dict[str, Any]]
+    paths: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     version: str = ""
+
+    def close(self) -> None:
+        """Release the mirror behind these tables.
+
+        Every walk publishes its own read-only connection. A refresh replaces
+        the index it supersedes, so the superseded connection has to be closed
+        with it: otherwise a long-lived container keeps one file handle per
+        catalogue walk until it is redeployed.
+        """
+        for table in (self.names, self.codes, self.paths):
+            mirror = getattr(table, "_index", None)
+            if isinstance(mirror, CatalogueIndex):
+                mirror.close()
+                return
+
+
+def pack_rank(rank: tuple[int, ...]) -> int:
+    """Pack the tie-breaker tuple into one integer without losing its order.
+
+    Every flag is zero or one and a tuple compares left to right, so shifting
+    the flags in that same order compares exactly the way the tuple did.
+    """
+    packed = 0
+    for flag in rank:
+        packed = (packed << 1) | (1 if flag else 0)
+    return packed
+
+
+def prepare_index_row(payload: dict[str, Any]) -> PreparedRow:
+    """Derive every key one catalogue row can answer to.
+
+    A folder name that says nothing about which release a file is (``mp4``,
+    ``1080p``) is dropped here instead of being filed: those keys are never
+    allowed to decide a match, and a key that is never written cannot resolve.
+    """
+    name_key = fold_key(payload.get("folder_name"))
+    return PreparedRow(
+        payload=payload,
+        identity=_entry_identity(payload),
+        name_key="" if name_key in _GENERIC_NAME_KEYS else name_key,
+        code_keys=_entry_code_keys(payload),
+        path_keys=_entry_path_keys(payload),
+        rank=pack_rank(_entry_rank(payload)),
+    )
 
 
 class SharedMetadataClient:
@@ -341,6 +402,14 @@ class SharedMetadataClient:
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+        # The tables are served out of an open SQLite mirror, and a closed
+        # client can never answer from it again: release the file handle so the
+        # cache stays replaceable (Windows refuses to delete or rename it while
+        # a handle is held, which is what a probe or a test cleanup hits).
+        index = self._index
+        self._index = None
+        if index is not None:
+            index.close()
 
     @asynccontextmanager
     async def borrow(self):
@@ -381,7 +450,7 @@ class SharedMetadataClient:
         if self._is_fresh() and not forced:
             return self._index  # type: ignore[return-value]
         if self._index is None:
-            restored = await asyncio.to_thread(self._read_cache_file)
+            restored = await asyncio.to_thread(self._open_cached_index)
             if restored is not None:
                 self._index, self._index_at = restored
                 # The mirror was written when the walk happened, so the daily
@@ -398,7 +467,7 @@ class SharedMetadataClient:
             self._index_at = time.monotonic()
             return self._index
         try:
-            entries, version = await self._fetch_entries()
+            built = await self._walk_catalogue()
         except Exception:
             if forced:
                 # Back off before deciding what to do with the failure: a
@@ -412,24 +481,31 @@ class SharedMetadataClient:
             logger.warning("Shared metadata index refresh failed, reusing the cached copy")
             self._index_at = time.monotonic() - self._index_ttl + INDEX_RETRY_SECONDS
             return self._index
-        index = self._build_index(entries, version)
-        if index.names or index.codes:
-            self._index = index
-            self._index_at = time.monotonic()
-            self._walked_at = self._index_at
-            if forced:
-                self._refreshed_at = self._index_at
-                # The one line a support question needs: a user who uploaded
-                # covers can be told their refresh really did re-read the
-                # catalogue, rather than being sent to look at the cache.
-                logger.info(
-                    "Shared metadata catalogue re-read on request: %s name keys, "
-                    "%s path keys",
-                    len(index.names),
-                    len(index.paths),
-                )
-            await asyncio.to_thread(self._write_cache_file, entries, version)
-        return index
+        if built is None:
+            # The catalogue answered without one usable row: keep the copy that
+            # still works rather than replacing it with an empty mirror.
+            logger.warning("Shared metadata catalogue published no usable rows")
+            return self._index if self._index is not None else SharedMetadataIndex(
+                names={}, codes={}
+            )
+        superseded = self._index
+        self._index = built
+        if superseded is not None:
+            superseded.close()
+        self._index_at = time.monotonic()
+        self._walked_at = self._index_at
+        if forced:
+            self._refreshed_at = self._index_at
+            # The one line a support question needs: a user who uploaded covers
+            # can be told their refresh really did re-read the catalogue, rather
+            # than being sent to look at the cache.
+            logger.info(
+                "Shared metadata catalogue re-read on request: %s name keys, "
+                "%s path keys",
+                len(built.names),
+                len(built.paths),
+            )
+        return built
 
     def _is_fresh(self) -> bool:
         return self._index is not None and time.monotonic() - self._index_at < self._index_ttl
@@ -459,37 +535,61 @@ class SharedMetadataClient:
         published = payload.get("index_version") if isinstance(payload, dict) else None
         return bool(published) and published == local
 
-    async def _fetch_entries(self) -> tuple[list[dict[str, Any]], str]:
-        """Walk every page the service publishes, not just the first N thousand.
+    async def _walk_catalogue(self) -> SharedMetadataIndex | None:
+        """Walk every page the service publishes into a freshly built mirror.
+
+        Each page is folded as it arrives instead of being collected first: the
+        catalogue is the one structure here that grows without bound, and
+        holding all of it in Python is what used to put the container over its
+        memory cap. Only one page is ever resident, and the mirror it builds
+        answers every later lookup without the rows being in memory at all.
 
         The response carries a deterministic ``index_version``; it is stored
-        alongside the rows so a cache restored from disk can be checked against
-        the catalogue without refetching every page.
+        with the mirror so a later start can check the copy against the
+        catalogue without refetching every page.
         """
-        entries: list[dict[str, Any]] = []
+        builder = CatalogueIndexBuilder(self._cache_path)
         start = 0
         total: int | None = None
         version = ""
-        for _ in range(INDEX_MAX_PAGES):
-            payload = await self._fetch_page(start)
-            items = payload.get("items") if isinstance(payload, dict) else None
-            if not isinstance(items, list):
-                break
-            entries.extend(
-                self._trim_entry(item) for item in items if isinstance(item, dict)
+        rows = 0
+        try:
+            for _ in range(INDEX_MAX_PAGES):
+                payload = await self._fetch_page(start)
+                items = payload.get("items") if isinstance(payload, dict) else None
+                if not isinstance(items, list):
+                    break
+                rows += builder.add_many(
+                    prepare_index_row(self._trim_entry(item))
+                    for item in items
+                    if isinstance(item, dict)
+                )
+                start += len(items)
+                if not version and isinstance(payload.get("index_version"), str):
+                    version = payload["index_version"]
+                if isinstance(payload.get("total"), int):
+                    total = int(payload["total"])
+                if not items or (total is not None and start >= total):
+                    break
+            if total is not None and rows < total:
+                logger.warning(
+                    "Shared metadata index stopped at %s of %s records", rows, total
+                )
+            mirror = builder.publish(
+                version=version, fetched_at=time.time(), rows=rows
             )
-            start += len(items)
-            if not version and isinstance(payload.get("index_version"), str):
-                version = payload["index_version"]
-            if isinstance(payload.get("total"), int):
-                total = int(payload["total"])
-            if not items or (total is not None and start >= total):
-                break
-        if total is not None and len(entries) < total:
-            logger.warning(
-                "Shared metadata index stopped at %s of %s records", len(entries), total
-            )
-        return entries, version
+        except BaseException:
+            builder.discard()
+            raise
+        if mirror is None:
+            return None
+        self._drop_superseded_json_mirror()
+        return SharedMetadataIndex(
+            names=FoldedKeyTable(mirror, NAME_TABLE),
+            codes=FoldedKeyTable(mirror, CODE_TABLE),
+            paths=FoldedKeyTable(mirror, PATH_TABLE),
+            version=mirror.version,
+        )
 
     async def _fetch_page(self, start: int) -> dict[str, Any]:
         """One page of the walk, retried.
@@ -537,123 +637,50 @@ class SharedMetadataClient:
             if item.get(key) not in (None, "")
         }
 
-    def _read_cache_file(self) -> tuple[SharedMetadataIndex, float] | None:
-        if self._cache_path is None:
-            return None
-        try:
-            payload = json.loads(self._cache_path.read_text(encoding="utf-8"))
-            fetched_at = float(payload["fetchedAt"])
-            items = payload["items"]
-            version = str(payload.get("indexVersion") or "")
-        except (OSError, ValueError, KeyError, TypeError):
-            return None
-        if not isinstance(items, list):
-            return None
-        entries = [item for item in items if isinstance(item, dict) and item]
-        if not entries:
-            return None
-        age = max(0.0, time.time() - fetched_at)
-        return self._build_index(entries, version), time.monotonic() - age
+    def _open_cached_index(self) -> tuple[SharedMetadataIndex, float] | None:
+        """Reuse the mirror an earlier walk published, when there is one.
 
-    def _write_cache_file(self, entries: list[dict[str, Any]], version: str = "") -> None:
-        if self._cache_path is None:
-            return
-        temporary: Path | None = None
-        try:
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-            suffix = f".{os.getpid()}.{time.time_ns()}.tmp"
-            temporary = self._cache_path.with_name(self._cache_path.name + suffix)
-            temporary.write_text(
-                json.dumps(
-                    {
-                        "fetchedAt": time.time(),
-                        "indexVersion": version,
-                        "items": entries,
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-                encoding="utf-8",
-            )
-            os.replace(temporary, self._cache_path)
-        except (OSError, TypeError, ValueError) as exc:
-            logger.info("Shared metadata index cache write failed: %s", exc)
-        finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError:
-                    pass
-
-    @staticmethod
-    def _build_index(
-        entries: list[dict[str, Any]],
-        version: str = "",
-    ) -> SharedMetadataIndex:
-        """Fold the published catalogue into lookup tables that never lie.
-
-        The catalogue has no stable primary key: several unrelated releases can
-        share one ``folder_name`` (flat "关键词分类" folders full of different
-        codes). Keeping whichever entry arrived first - the old ``setdefault``
-        behaviour - handed every file in that folder the same cover. A key that
-        is claimed by more than one release is now dropped outright, and the
-        lookup falls through to the file's own code instead.
+        The age is taken from the walk that wrote it, so a container that
+        restarts still knows how old its copy of the catalogue is instead of
+        treating it as freshly fetched.
         """
-        names: dict[str, dict[str, Any]] = {}
-        codes: dict[str, dict[str, Any]] = {}
-        paths: dict[str, dict[str, Any]] = {}
-        rejected_names: set[str] = set()
-        rejected_codes: set[str] = set()
-        rejected_paths: set[str] = set()
-        for item in entries:
-            identity = _entry_identity(item)
-            name_key = fold_key(item.get("folder_name"))
-            if name_key and name_key not in rejected_names:
-                if name_key in _GENERIC_NAME_KEYS:
-                    rejected_names.add(name_key)
-                elif name_key not in names:
-                    names[name_key] = item
-                elif _entry_identity(names[name_key]) != identity:
-                    names.pop(name_key, None)
-                    rejected_names.add(name_key)
-                elif _entry_rank(item) > _entry_rank(names[name_key]):
-                    # One release can be published as several rows (multi-part
-                    # files, or a sidecar row plus a bare one). They are the
-                    # same identity, so the row that actually carries artwork
-                    # has to survive instead of whichever arrived first.
-                    names[name_key] = item
-            for key in _entry_code_keys(item):
-                if not key or key in rejected_codes:
-                    continue
-                if key not in codes:
-                    codes[key] = item
-                elif _entry_identity(codes[key]) != identity:
-                    codes.pop(key, None)
-                    rejected_codes.add(key)
-                elif _entry_rank(item) > _entry_rank(codes[key]):
-                    codes[key] = item
-            for key in _entry_path_keys(item):
-                if not key or key in rejected_paths:
-                    continue
-                current = paths.get(key)
-                if current is None:
-                    paths[key] = item
-                    continue
-                if _entry_identity(current) != identity:
-                    # A full path is the strongest identity in the catalogue.
-                    # Two different releases claiming it means the index is
-                    # inconsistent, so neither row may win silently.
-                    paths.pop(key, None)
-                    rejected_paths.add(key)
-                    continue
-                if _entry_rank(item) > _entry_rank(current):
-                    paths[key] = item
-        return SharedMetadataIndex(
-            names=names,
-            codes=codes,
-            paths=paths,
-            version=version,
+        if self._cache_path is None or not self._cache_path.exists():
+            return None
+        try:
+            mirror = CatalogueIndex.open(self._cache_path)
+            usable = sum(mirror.count(table) for table in (NAME_TABLE, CODE_TABLE, PATH_TABLE))
+            rows = mirror.row_count
+        except (OSError, sqlite3.DatabaseError, ValueError) as exc:
+            logger.info("Shared metadata mirror is unreadable: %s", exc)
+            return None
+        if not rows or not usable:
+            mirror.close()
+            return None
+        age = max(0.0, time.time() - mirror.fetched_at)
+        index = SharedMetadataIndex(
+            names=FoldedKeyTable(mirror, NAME_TABLE),
+            codes=FoldedKeyTable(mirror, CODE_TABLE),
+            paths=FoldedKeyTable(mirror, PATH_TABLE),
+            version=mirror.version,
         )
+        return index, time.monotonic() - age
+
+    def _drop_superseded_json_mirror(self) -> None:
+        """Delete the JSON mirror a build from before the switch left behind.
+
+        It is the same catalogue in a form nothing reads any more, and it is
+        megabytes of dead weight in the data folder, so it goes once the SQLite
+        mirror that replaced it is in place.
+        """
+        if self._cache_path is None or self._cache_path.suffix != ".db":
+            return
+        legacy = self._cache_path.with_suffix(".json")
+        try:
+            if legacy.exists():
+                legacy.unlink()
+                logger.info("Removed the superseded JSON catalogue mirror at %s", legacy)
+        except OSError as exc:
+            logger.info("Superseded catalogue mirror left in place: %s", exc)
 
     async def lookup(self, name: str, path: str = "") -> SharedMetadataMatch | None:
         """Match one cloud media file against the shared sidecar index."""

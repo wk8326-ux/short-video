@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.19] - 2026-09-20
+
+### Added
+
+- The shared catalogue is re-checked against the second version of the metadata API. A live walk of the whole inventory now
+  returns 28,629 rows with 28,369 carrying a poster address, byte-for-byte the same counts the contract documents
+  (`ready` 18,852 / `missing` 7,955 / `missing_poster` 1,305 / `missing_nfo` 107 / Emby-only 410), and exact
+  `media_path` queries answer with the same single row the app's own folded path keys produce. Matching therefore needs no
+  change; the numbers behind the movie wall are the numbers the service publishes.
+
+### Fixed
+
+- The folded catalogue is no longer kept in memory. Every row used to be collected into a Python list and then folded into
+  three dictionaries, which is what put the container over its memory cap and had the kernel kill it about every forty
+  seconds: the rows are now written into a SQLite mirror (`data/shared-metadata-index.db`) one page at a time, and only the
+  page being read is ever resident. The whole 28,629-row catalogue costs 0.1 MiB of Python memory to publish, against the
+  ~18 MiB the folding dictionaries alone needed on top of the rows themselves.
+- A restart no longer re-walks the catalogue. The mirror records the walk it came from, so a container that comes back up
+  serves covers in 0.02 s instead of paying the fifty-second fetch again; the old 11 MB JSON mirror is removed once the
+  database that replaced it is in place.
+- The mirror behind the folded tables is released when it is replaced or the client closes. Each walk publishes its own
+  read-only connection, so without this a long-running container kept one file handle per walk until it was redeployed, and
+  a closed client kept the cache file locked after it could no longer answer from it.
+- Cover coverage across the seven movie libraries is re-measured from the live service: 2,400 of 2,468 titles have artwork
+  (was 2,334 before path matching). Of the 68 that do not, 64 have no row in the shared catalogue at all -- split files such
+  as `DVD #1 / DVD #2` and `.wmv` shards that have no entry of their own -- and 4 are rows the service holds for a different
+  release in the same folder, which are left without a cover rather than given the wrong one.
+
 ## [1.6.0-beta.18] - 2026-09-20
 
 ### Added

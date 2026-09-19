@@ -38,7 +38,7 @@ from app.media_metadata import mp4_duration_seconds
 from app.media_sources import MediaSourceRegistry
 from app.scanner import ResumableScanner, initial_steps
 from app.movie_metadata import parse_movie_filename
-from app.shared_metadata import SharedMetadataClient
+from app.shared_metadata import INDEX_DB_FILENAME, SharedMetadataClient
 
 try:  # Pillow is a hard dependency of the image; the guard keeps imports working
     from PIL import Image  # in a bare interpreter used by tooling.
@@ -50,7 +50,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.18"
+APP_VERSION = "1.6.0-beta.19"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -129,8 +129,10 @@ movie_image_cache_locks: dict[str, asyncio.Lock] = {}
 movie_image_cache_guard = threading.RLock()
 # One client for the whole process: the folded catalogue is the expensive part
 # of a scrape, and building it per run made every rescan pay for the same walk.
+# The mirror is a SQLite file next to the library database, so the catalogue
+# costs the container a bounded page cache instead of one dict entry per key.
 shared_metadata_index_path = (
-    Path(settings.database_path).resolve().parent / "shared-metadata-index.json"
+    Path(settings.database_path).resolve().parent / INDEX_DB_FILENAME
 )
 shared_metadata_client: SharedMetadataClient | None = None
 

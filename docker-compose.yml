@@ -9,7 +9,13 @@ services:
     volumes:
       - ./data:/data
     cpus: 0.35
-    mem_limit: 256m
+    # The catalogue itself now lives in a SQLite mirror on disk, so a movie
+    # pass no longer grows with the library: the walk holds one page and the
+    # mirror is read a key at a time. What remains is the scanner, the artwork
+    # downscaler and the ASMR indexes, which is why the cap is a bound on those
+    # rather than on the catalogue. 256m is what the old in-memory folding
+    # needed for the catalogue alone.
+    mem_limit: 384m
     pids_limit: 100
     read_only: true
     tmpfs:
