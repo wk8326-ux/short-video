@@ -15,7 +15,10 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     monkeypatch.setenv("STATIC_DIR", str(tmp_path / "static"))
     monkeypatch.setenv("AUTH_PASSWORD_HASH", "scrypt:test")
     monkeypatch.setenv("SESSION_SECRET", "test-session-secret-with-at-least-32-characters")
-    monkeypatch.setenv("TMDB_API_KEY", "test-tmdb-key")
+    # Covers are shared-metadata only: without this the metadata endpoint
+    # correctly refuses to start a pass it cannot complete.
+    monkeypatch.setenv("SHARED_METADATA_BASE_URL", "http://shared.test/api/shared-metadata")
+    monkeypatch.setenv("SHARED_METADATA_TOKEN", "test-token")
 
     sys.modules.pop("app.main", None)
     main = importlib.import_module("app.main")

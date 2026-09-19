@@ -75,9 +75,6 @@ class Settings:
         default_factory=lambda: frozenset(DEFAULT_ASMR_AUTHOR_GROUP_PATHS)
     )
     asmr_search_result_limit: int = 100000
-    tmdb_api_read_token: str = ""
-    tmdb_api_key: str = ""
-    tmdb_language: str = "zh-CN"
     shared_metadata_base_url: str = ""
     shared_metadata_token: str = ""
 
@@ -133,9 +130,6 @@ class Settings:
             asmr_search_result_limit=_positive_int(
                 "ASMR_SEARCH_RESULT_LIMIT", 100000, 1
             ),
-            tmdb_api_read_token=os.getenv("TMDB_API_READ_TOKEN", "").strip(),
-            tmdb_api_key=os.getenv("TMDB_API_KEY", "").strip(),
-            tmdb_language=os.getenv("TMDB_LANGUAGE", "zh-CN").strip() or "zh-CN",
             shared_metadata_base_url=os.getenv("SHARED_METADATA_BASE_URL", "").strip().rstrip("/"),
             shared_metadata_token=os.getenv("SHARED_METADATA_TOKEN", "").strip(),
         )
@@ -153,8 +147,6 @@ class Settings:
             raise ValueError("ASMR_SEARCH_PATHS entries must start with /")
         if any(not path.startswith("/") for path in self.asmr_author_group_paths):
             raise ValueError("ASMR_AUTHOR_GROUP_PATHS entries must start with /")
-        if not self.tmdb_language:
-            raise ValueError("TMDB_LANGUAGE must not be empty")
         if self.shared_metadata_base_url and not self.shared_metadata_base_url.startswith(
             ("http://", "https://")
         ):

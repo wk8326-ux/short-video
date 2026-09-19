@@ -113,6 +113,6 @@ Key source settings:
 - `METADATA_PROBE_BATCH_SIZE`: maximum MP4 duration probes per scan, default `30`.
 - `ASMR_EXTENSIONS`: direct files indexed inside each author directory.
 - `SHARED_METADATA_BASE_URL` / `SHARED_METADATA_TOKEN`: read-only shared metadata service (cover, NFO and plot sharing). It is the first stop for every movie, and its index is cached in the server process for 10 minutes.
-- `TMDB_API_KEY` / `TMDB_API_READ_TOKEN`: only used for titles that carry no番号, since a coded title must never be matched against a generic movie database.
+- Covers come from the shared metadata service only: a finished scan runs the cover pass by itself, and a miss leaves the row untouched instead of falling back to another scraper.
 
 Movie metadata is never scraped twice for the same title: a completed scan runs the cover pass itself, and a miss leaves whatever the row already has in place.

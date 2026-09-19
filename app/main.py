@@ -36,9 +36,8 @@ from app.faststart import inspect_mp4_prefix
 from app.media_metadata import mp4_duration_seconds
 from app.media_sources import MediaSourceRegistry
 from app.scanner import ResumableScanner, initial_steps
-from app.movie_metadata import movie_search_candidates, parse_movie_filename
+from app.movie_metadata import parse_movie_filename
 from app.shared_metadata import SharedMetadataClient
-from app.tmdb import TmdbClient
 from app.settings import Settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -599,7 +598,7 @@ async def _mark_movie_unmatched(
     A forced pass re-reads the whole shared catalogue, so it is authoritative:
     a row that no longer matches has to lose the cover an earlier (buggy) run
     handed it, because the stored title and artwork would otherwise stay wrong
-    forever. Rows curated by TMDB or by hand are never touched.
+    forever. Rows curated outside the shared catalogue are never touched.
     """
     provider = str(movie.get("metadata_provider") or "")
     if not authoritative or (provider and provider != "shared"):
@@ -807,10 +806,9 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
             }
         )
         try:
-            has_tmdb = bool(settings.tmdb_api_read_token or settings.tmdb_api_key)
             has_shared_metadata = bool(settings.shared_metadata_base_url)
-            if not has_tmdb and not has_shared_metadata:
-                raise RuntimeError("共享元数据接口与 TMDB 均未配置")
+            if not has_shared_metadata:
+                raise RuntimeError("共享元数据接口未配置")
             source_ids = (source,)
             movies = await asyncio.to_thread(
                 database.movie_metadata_candidates,
@@ -818,71 +816,24 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                 force=force,
             )
             movie_metadata_state["total"] = len(movies)
-            client = TmdbClient(
-                read_token=settings.tmdb_api_read_token,
-                api_key=settings.tmdb_api_key,
-                language=settings.tmdb_language,
-            ) if has_tmdb else None
             shared_metadata = SharedMetadataClient(
                 base_url=settings.shared_metadata_base_url,
                 token=settings.shared_metadata_token,
-            ) if has_shared_metadata else None
+            )
             try:
                 for movie in movies:
                     parsed_name = parse_movie_filename(str(movie.get("name") or ""))
                     # The shared service already holds the sidecar covers and NFO
                     # metadata produced for the Emby stack, so it is both faster
                     # and more complete than re-scraping the same title here.
-                    shared_match = (
-                        await shared_metadata.lookup(
-                            str(movie.get("name") or ""),
-                            str(movie.get("media_path") or ""),
-                        )
-                        if shared_metadata is not None
-                        else None
+                    shared_match = await shared_metadata.lookup(
+                        str(movie.get("name") or ""),
+                        str(movie.get("media_path") or ""),
                     )
-                    if shared_match is not None:
-                        # The shared catalogue is the only cover source for the
-                        # rows it curates, so a match that arrives without
-                        # artwork has to clear whatever the row held: that value
-                        # may belong to the very release the matcher has just
-                        # ruled out, and keeping it is what re-surfaced one
-                        # poster across a whole flat folder. Artwork curated
-                        # elsewhere (TMDB, a manual edit) is left untouched.
-                        curated_elsewhere = str(
-                            movie.get("metadata_provider") or ""
-                        ) not in ("", "shared")
-                        poster_url = shared_match.poster_url or (
-                            movie.get("poster_url") if curated_elsewhere else None
-                        )
-                        backdrop_url = shared_match.backdrop_url or (
-                            movie.get("backdrop_url") if curated_elsewhere else None
-                        )
-                        await asyncio.to_thread(
-                            database.update_movie_metadata,
-                            int(movie["id"]),
-                            display_title=shared_match.title or movie["display_title"],
-                            original_title=shared_match.original_title or None,
-                            year=shared_match.year or movie.get("year"),
-                            overview=shared_match.overview or None,
-                            poster_url=poster_url,
-                            backdrop_url=backdrop_url,
-                            tmdb_id=None,
-                            metadata_provider="shared",
-                            release_date=str(shared_match.year) if shared_match.year else None,
-                            genres="[]",
-                            performers=json.dumps(shared_match.performers, ensure_ascii=False),
-                            studio=shared_match.studio or None,
-                            match_status="matched",
-                            match_confidence=shared_match.confidence,
-                        )
-                        movie_metadata_state["matched"] += 1
-                        movie_metadata_state["checked"] += 1
-                        continue
-                    if parsed_name.code:
-                        # A coded title belongs to the shared catalogue. A generic
-                        # movie database would happily match a coincidental title,
-                        # so an unmatched code is left exactly as it stands.
+                    if shared_match is None:
+                        # The shared catalogue is the only artwork source: a title
+                        # it does not know stays unmatched instead of being guessed
+                        # from a coincidental title match somewhere else.
                         await _mark_movie_unmatched(
                             movie,
                             fallback_title=parsed_name.display_title,
@@ -890,61 +841,33 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                         )
                         movie_metadata_state["checked"] += 1
                         continue
-                    match = None
-                    if parsed_name.tmdb_id and client:
-                        match = await client.movie_by_id(parsed_name.tmdb_id)
-                    if match is None and client:
-                        queries = movie_search_candidates(
-                            str(movie.get("normalized_title") or movie.get("display_title") or "")
-                        )
-                        attempts = []
-                        for query in queries:
-                            attempts.extend([(query, movie.get("year")), (query, None)])
-                        best = None
-                        for query, year in attempts:
-                            candidate = await client.search_movie(query, year=year)
-                            if candidate is None:
-                                continue
-                            if candidate.status == "matched":
-                                best = candidate
-                                break
-                            if best is None or candidate.confidence > best.confidence:
-                                best = candidate
-                        match = best
-                    if match is None:
-                        await _mark_movie_unmatched(
-                            movie,
-                            fallback_title=parsed_name.display_title,
-                            authoritative=force,
-                        )
-                    else:
-                        await asyncio.to_thread(
-                            database.update_movie_metadata,
-                            int(movie["id"]),
-                            original_title=match.original_title,
-                            display_title=match.title or movie["display_title"],
-                            year=match.year or movie.get("year"),
-                            overview=match.overview,
-                            poster_url=match.poster_url,
-                            backdrop_url=match.backdrop_url,
-                            rating=match.rating,
-                            runtime_minutes=match.runtime_minutes,
-                            tmdb_id=match.tmdb_id,
-                            metadata_provider="tmdb",
-                            release_date=str(match.year) if match.year else None,
-                            genres="[]",
-                            performers="[]",
-                            studio=None,
-                            match_status=match.status,
-                            match_confidence=match.confidence,
-                        )
-                        movie_metadata_state["matched"] += 1
+                    # The shared catalogue is the only cover source for the rows
+                    # it curates, so a match that arrives without artwork has to
+                    # clear whatever the row held: that value may belong to the
+                    # very release the matcher has just ruled out, and keeping it
+                    # is what re-surfaced one poster across a whole flat folder.
+                    await asyncio.to_thread(
+                        database.update_movie_metadata,
+                        int(movie["id"]),
+                        display_title=shared_match.title or movie["display_title"],
+                        original_title=shared_match.original_title or None,
+                        year=shared_match.year or movie.get("year"),
+                        overview=shared_match.overview or None,
+                        poster_url=shared_match.poster_url or None,
+                        backdrop_url=shared_match.backdrop_url or None,
+                        tmdb_id=None,
+                        metadata_provider="shared",
+                        release_date=str(shared_match.year) if shared_match.year else None,
+                        genres="[]",
+                        performers=json.dumps(shared_match.performers, ensure_ascii=False),
+                        studio=shared_match.studio or None,
+                        match_status="matched",
+                        match_confidence=shared_match.confidence,
+                    )
+                    movie_metadata_state["matched"] += 1
                     movie_metadata_state["checked"] += 1
             finally:
-                if client:
-                    await client.close()
-                if shared_metadata:
-                    await shared_metadata.close()
+                await shared_metadata.close()
             movie_metadata_state["lastSuccess"] = int(time.time())
         except Exception as exc:
             movie_metadata_state["lastError"] = str(exc)
@@ -1706,12 +1629,8 @@ async def scan_one_source(source_id: str) -> dict[str, Any]:
 async def start_movie_metadata(source_id: str, force: bool = False) -> dict[str, Any]:
     if source_id not in source_registry.ids("movie"):
         raise HTTPException(status_code=404, detail="电影媒体源不存在或已停用")
-    if (
-        not settings.tmdb_api_read_token
-        and not settings.tmdb_api_key
-        and not settings.shared_metadata_base_url
-    ):
-        raise HTTPException(status_code=503, detail="共享元数据接口与 TMDB 均未配置")
+    if not settings.shared_metadata_base_url:
+        raise HTTPException(status_code=503, detail="共享元数据接口未配置")
     if scan_locks.get(source_id) and scan_locks[source_id].locked():
         raise HTTPException(status_code=409, detail="媒体源正在扫描，请完成后再匹配封面")
     source_summary = await asyncio.to_thread(
@@ -2033,7 +1952,7 @@ def _movie_group_payload(
 async def movie_groups(
     q: str = Query(default="", max_length=100),
     perGroup: int = Query(default=6, ge=1, le=24),
-    sort: str = Query(default="cover", pattern="^(cover|title)$"),
+    sort: str = Query(default="cover", pattern="^(cover|title|time)$"),
 ) -> dict[str, Any]:
     """Group the wall by media source so the UI mirrors how libraries are added.
 
@@ -2091,7 +2010,7 @@ async def movie_group_items(
     q: str = Query(default="", max_length=100),
     limit: int = Query(default=6, ge=1, le=60),
     offset: int = Query(default=0, ge=0),
-    sort: str = Query(default="cover", pattern="^(cover|title)$"),
+    sort: str = Query(default="cover", pattern="^(cover|title|time)$"),
 ) -> dict[str, Any]:
     if source_id not in source_registry.ids("movie"):
         raise HTTPException(status_code=404, detail="Media source not found")
@@ -2115,7 +2034,7 @@ async def movies(
     q: str = Query(default="", max_length=100),
     limit: int = Query(default=24, ge=1, le=60),
     offset: int = Query(default=0, ge=0),
-    sort: str = Query(default="cover", pattern="^(cover|title)$"),
+    sort: str = Query(default="cover", pattern="^(cover|title|time)$"),
 ) -> dict[str, Any]:
     sources = source_registry.ids("movie")
     search = q.strip()

@@ -7,7 +7,6 @@ import pytest
 
 from app.movie_metadata import parse_movie_filename
 from app.shared_metadata import SharedMetadataMatch
-from app.tmdb import TmdbMatch
 
 SAMPLE = SharedMetadataMatch(
     code="CEMD-822",
@@ -44,34 +43,7 @@ class _FakeSharedClient:
         type(self).closed = True
 
 
-class _FakeTmdbClient:
-    """Records every TMDB call so a test can assert it was never reached."""
-
-    calls: list[str] = []
-    closed = False
-
-    def __init__(
-        self,
-        *,
-        read_token: str = "",
-        api_key: str = "",
-        language: str = "zh-CN",
-    ) -> None:
-        pass
-
-    async def movie_by_id(self, tmdb_id: int):
-        type(self).calls.append(f"id:{tmdb_id}")
-        return None
-
-    async def search_movie(self, title: str, *, year: int | None = None):
-        type(self).calls.append(title)
-        return None
-
-    async def close(self) -> None:
-        type(self).closed = True
-
-
-def _import_main(monkeypatch, tmp_path, *, tmdb: bool = False):
+def _import_main(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "library.db"))
     monkeypatch.setenv("STATIC_DIR", str(tmp_path / "static"))
     monkeypatch.setenv("ALIST_BASE_URL", "https://guangya.example")
@@ -82,10 +54,6 @@ def _import_main(monkeypatch, tmp_path, *, tmdb: bool = False):
     monkeypatch.setenv("SESSION_SECRET", "test-session-secret-with-at-least-32-characters")
     monkeypatch.setenv("SHARED_METADATA_BASE_URL", "http://shared.test/api/shared-metadata")
     monkeypatch.setenv("SHARED_METADATA_TOKEN", "test-token")
-    for key in ("TMDB_API_KEY", "TMDB_API_READ_TOKEN"):
-        monkeypatch.delenv(key, raising=False)
-    if tmdb:
-        monkeypatch.setenv("TMDB_API_KEY", "test-tmdb-key")
     sys.modules.pop("app.main", None)
     return importlib.import_module("app.main")
 
@@ -235,7 +203,7 @@ async def test_a_miss_never_discards_metadata_an_earlier_run_found(
 async def test_a_forced_pass_clears_a_cover_the_shared_index_no_longer_claims(
     monkeypatch, tmp_path
 ):
-    """Forced re-matching is authoritative; TMDB-curated rows stay untouched."""
+    """Forced re-matching is authoritative for rows the shared index curated."""
     main = _import_main(monkeypatch, tmp_path)
     monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
     movie = _seed_one_movie(
@@ -284,60 +252,6 @@ async def test_an_incremental_pass_keeps_existing_shared_metadata(monkeypatch, t
 
     stored = main.database.movies(sources=("movies",), limit=10)[0]
     assert stored["poster_url"] == "https://c0.jdbstatic.com/covers/ve/veyGnb.jpg"
-
-
-@pytest.mark.asyncio
-async def test_coded_titles_never_reach_tmdb(monkeypatch, tmp_path):
-    """A番号 is a shared-catalogue key, not something TMDB can answer."""
-    main = _import_main(monkeypatch, tmp_path, tmdb=True)
-    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
-    monkeypatch.setattr(main, "TmdbClient", _FakeTmdbClient)
-    _FakeTmdbClient.calls = []
-    _seed_one_movie(
-        main,
-        "/media/关键词分类/20260901/ABP-485/hhd800.com@ABP-485.mp4",
-        "hhd800.com@ABP-485.mp4",
-    )
-
-    await main.scrape_movie_metadata("movies")
-
-    assert _FakeTmdbClient.calls == []
-    stored = main.database.movies(sources=("movies",), limit=10)[0]
-    assert stored["match_status"] == "unmatched"
-    assert not stored["metadata_provider"]
-
-
-@pytest.mark.asyncio
-async def test_plain_titles_still_fall_back_to_tmdb(monkeypatch, tmp_path):
-    main = _import_main(monkeypatch, tmp_path, tmdb=True)
-    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
-
-    class _MatchingTmdbClient(_FakeTmdbClient):
-        async def search_movie(self, title: str, *, year: int | None = None):
-            type(self).calls.append(title)
-            return TmdbMatch(
-                tmdb_id=32249,
-                title="公元2000",
-                original_title="公元2000",
-                year=2000,
-                overview="简介",
-                poster_url="https://image.tmdb.org/t/p/w500/poster.jpg",
-                backdrop_url="https://image.tmdb.org/t/p/w780/backdrop.jpg",
-                rating=6.5,
-                status="matched",
-                confidence=0.9,
-            )
-
-    monkeypatch.setattr(main, "TmdbClient", _MatchingTmdbClient)
-    _MatchingTmdbClient.calls = []
-    _seed_one_movie(main, "/media/movies/公元2000.2000.mkv", "公元2000.2000.mkv")
-
-    await main.scrape_movie_metadata("movies")
-
-    stored = main.database.movies(sources=("movies",), limit=10)[0]
-    assert stored["metadata_provider"] == "tmdb"
-    assert stored["match_status"] == "matched"
-    assert stored["poster_url"] == "https://image.tmdb.org/t/p/w500/poster.jpg"
 
 
 class _ArtworklessSharedClient(_FakeSharedClient):
@@ -397,10 +311,15 @@ async def test_a_matched_row_drops_the_artwork_borrowed_from_another_release(
 
 
 @pytest.mark.asyncio
-async def test_a_shared_match_never_strips_artwork_curated_elsewhere(
+async def test_a_shared_match_overwrites_artwork_from_an_older_provider(
     monkeypatch, tmp_path
 ):
-    """A TMDB or hand-picked poster survives a coverless shared match."""
+    """The shared catalogue is the only artwork source, so it always wins.
+
+    Artwork left behind by the retired scraper has to be replaced even when the
+    shared match arrives without a cover: the row would otherwise keep showing a
+    picture the current provider never confirmed.
+    """
     main = _import_main(monkeypatch, tmp_path)
     monkeypatch.setattr(main, "SharedMetadataClient", _ArtworklessSharedClient)
     movie = _seed_one_movie(
@@ -409,8 +328,8 @@ async def test_a_shared_match_never_strips_artwork_curated_elsewhere(
     main.database.update_movie_metadata(
         int(movie["id"]),
         display_title="公元2000",
-        poster_url="https://image.tmdb.org/t/p/w500/poster.jpg",
-        backdrop_url="https://image.tmdb.org/t/p/w780/backdrop.jpg",
+        poster_url="https://images.example/legacy/poster.jpg",
+        backdrop_url="https://images.example/legacy/backdrop.jpg",
         metadata_provider="tmdb",
         match_status="matched",
     )
@@ -418,5 +337,6 @@ async def test_a_shared_match_never_strips_artwork_curated_elsewhere(
     await main.scrape_movie_metadata("movies", force=True)
 
     stored = main.database.movies(sources=("movies",), limit=10)[0]
-    assert stored["poster_url"] == "https://image.tmdb.org/t/p/w500/poster.jpg"
-    assert stored["backdrop_url"] == "https://image.tmdb.org/t/p/w780/backdrop.jpg"
+    assert stored["metadata_provider"] == "shared"
+    assert not stored["poster_url"]
+    assert not stored["backdrop_url"]

@@ -1243,6 +1243,10 @@ class LibraryDatabase:
         cover_rank = f"CASE WHEN {has_poster} THEN 0 WHEN {has_thumb} THEN 1 ELSE 2 END"
         if sort == "title":
             order = "m.display_title COLLATE NOCASE, m.year, m.id"
+        elif sort == "time":
+            # Newest first: a library page is browsed by what arrived last, and
+            # v.modified is the downloader's own timestamp for the file.
+            order = "v.modified DESC, m.id DESC"
         else:
             order = f"{cover_rank}, m.display_title COLLATE NOCASE, m.year, m.id"
         params.extend([max(1, limit), max(0, offset)])
