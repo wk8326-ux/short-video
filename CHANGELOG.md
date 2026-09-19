@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- A rescan re-reads rows the catalogue matched but left without artwork. Those rows used to be skipped for good, so a cover the
+  catalogue picked up later had nowhere to land and the wall kept a grey card no refresh could clear. On a single pass over the
+  seven movie libraries this recovered 137 covers in `M男` alone; the retry is idempotent when the catalogue still has no image.
+- A rescan also stops trusting the mirrored catalogue. The copy is kept for ten minutes on purpose, which meant covers uploaded to
+  the shared service since the last fetch were matched against the same empty poster that had already failed. One refresh now pays
+  the index walk and the next seven libraries reuse it, so the walk happens once per burst of user actions instead of never.
+
 ## [1.6.0-beta.17] - 2026-09-19
 
 ### Added

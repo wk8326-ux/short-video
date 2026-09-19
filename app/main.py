@@ -447,8 +447,10 @@ async def scan_source(source: str) -> bool:
                 # Assembling covers from the shared catalogue is an index lookup
                 # rather than a scrape, so a finished scan can always finish the
                 # job: a refresh here is what closes the "I changed the source"
-                # loop without a second manual button.
-                start_movie_metadata_job(source)
+                # loop without a second manual button. The refresh a user runs
+                # is also the moment to stop trusting the cached catalogue: the
+                # covers may have landed on the other side since the last fetch.
+                start_movie_metadata_job(source, refresh_index=True)
             if config["section"] == "drama":
                 # Each series needs exactly one 91crdj lookup and the pass skips
                 # anything already resolved, so this stays cheap on re-scans.
@@ -800,7 +802,12 @@ async def scrape_drama_metadata(source: str, *, force: bool = False) -> None:
             drama_metadata_state["running"] = False
 
 
-def start_movie_metadata_job(source: str, *, force: bool = False) -> bool:
+def start_movie_metadata_job(
+    source: str,
+    *,
+    force: bool = False,
+    refresh_index: bool = False,
+) -> bool:
     """Kick off a metadata pass and report whether this call started it."""
     if movie_metadata_lock.locked() or movie_metadata_state["running"]:
         return False
@@ -815,13 +822,18 @@ def start_movie_metadata_job(source: str, *, force: bool = False) -> bool:
         }
     )
     spawn_background(
-        scrape_movie_metadata(source, force=force),
+        scrape_movie_metadata(source, force=force, refresh_index=refresh_index),
         name=f"movie-metadata-{source}",
     )
     return True
 
 
-async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
+async def scrape_movie_metadata(
+    source: str,
+    *,
+    force: bool = False,
+    refresh_index: bool = False,
+) -> None:
     if movie_metadata_lock.locked():
         return
     async with movie_metadata_lock:
@@ -847,6 +859,12 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
             )
             movie_metadata_state["total"] = len(movies)
             async with shared_metadata_service().borrow() as shared_metadata:
+                # Titles the catalogue knows but has no cover for are queued
+                # again by ``movie_metadata_candidates``, so the covers have to
+                # come from the current catalogue rather than the 10-minute-old
+                # copy: warming first is what turns "I uploaded covers" into a
+                # visible change on the very next refresh.
+                await shared_metadata.warm_index(refresh=refresh_index)
                 for movie in movies:
                     parsed_name = parse_movie_filename(str(movie.get("name") or ""))
                     # The shared service already holds the sidecar covers and NFO
@@ -1818,7 +1836,11 @@ async def scan_one_source(source_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/admin/sources/{source_id}/metadata", status_code=202)
-async def start_movie_metadata(source_id: str, force: bool = False) -> dict[str, Any]:
+async def start_movie_metadata(
+    source_id: str,
+    force: bool = False,
+    refresh_index: bool = False,
+) -> dict[str, Any]:
     if source_id not in source_registry.ids("movie"):
         raise HTTPException(status_code=404, detail="电影媒体源不存在或已停用")
     if not settings.shared_metadata_base_url:
@@ -1831,7 +1853,9 @@ async def start_movie_metadata(source_id: str, force: bool = False) -> dict[str,
     )
     if not source_summary["total"]:
         raise HTTPException(status_code=409, detail="请先扫描电影媒体源")
-    started = start_movie_metadata_job(source_id, force=force)
+    started = start_movie_metadata_job(
+        source_id, force=force, refresh_index=refresh_index
+    )
     return {"started": started, "movieMetadata": movie_metadata_state}
 
 

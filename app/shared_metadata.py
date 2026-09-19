@@ -21,6 +21,10 @@ INDEX_TTL_SECONDS = 600.0
 # After a failed refresh the cached copy stays usable; wait this long before
 # trying the network again so one outage cannot turn a scan into a retry storm.
 INDEX_RETRY_SECONDS = 60.0
+# A caller can ask to go past the cache, but not more often than this. Refreshing
+# six movie libraries in a row is six user actions and still one catalogue walk,
+# because the copy that was just fetched already contains every cover they added.
+INDEX_FORCE_FLOOR_SECONDS = 60.0
 INDEX_PAGE_SIZE = 1000
 # The published catalogue is past 27k records and keeps growing. The page cap
 # only guards against a runaway pagination loop; the old value of 20 silently
@@ -194,6 +198,10 @@ class SharedMetadataClient:
         self._cache_path = cache_path
         self._index: SharedMetadataIndex | None = None
         self._index_at = 0.0
+        # When a caller's request actually reached the network past the cache.
+        # Unlike ``_index_at`` this only moves for those requests, which is what
+        # makes it safe to answer a second one from the copy the first fetched.
+        self._refreshed_at = 0.0
         self._client = client or httpx.AsyncClient(
             base_url=f"{self.base_url}/",
             headers=headers,
@@ -229,20 +237,50 @@ class SharedMetadataClient:
         """
         yield self
 
-    async def index(self) -> SharedMetadataIndex:
-        """Return the folded-key index, refreshed at most every ``index_ttl``."""
-        if self._is_fresh():
+    async def warm_index(self, *, refresh: bool = False) -> SharedMetadataIndex:
+        """Load the catalogue before the first lookup, optionally past the cache.
+
+        A pass that knows the catalogue moved on -- the rescan a user runs after
+        uploading covers -- asks for ``refresh`` so the fetch cannot be answered
+        from the copy that predates the upload.
+        """
+        try:
+            return await self.index(refresh=refresh)
+        except Exception:
+            # Lookups already tolerate a dead catalogue and mark their rows as
+            # unresolved, so a warm-up failure must not abort the whole pass.
+            logger.warning("Shared metadata index unavailable at the start of a pass")
+            return SharedMetadataIndex(names={}, codes={})
+
+    async def index(self, *, refresh: bool = False) -> SharedMetadataIndex:
+        """Return the folded-key index, refreshed at most every ``index_ttl``.
+
+        ``refresh`` ignores both the in-memory TTL and the on-disk mirror: the
+        service re-walks its sidecar tree on every ``/index`` call, so asking
+        again is the only way a cover added after the last fetch becomes visible.
+        Refreshing eight libraries in a row is eight user actions and still one
+        walk, because the copy the first one fetched already covers the rest.
+        """
+        forced = refresh and (
+            time.monotonic() - self._refreshed_at >= INDEX_FORCE_FLOOR_SECONDS
+        )
+        if self._is_fresh() and not forced:
             return self._index  # type: ignore[return-value]
         if self._index is None:
             restored = await asyncio.to_thread(self._read_cache_file)
             if restored is not None:
                 self._index, self._index_at = restored
-                if self._is_fresh():
+                if self._is_fresh() and not forced:
                     logger.info("Shared metadata index restored from %s", self._cache_path)
                     return self._index
         try:
             entries = await self._fetch_entries()
         except Exception:
+            if forced:
+                # Back off before deciding what to do with the failure: a
+                # refresh that just failed must not be retried once per media
+                # file for the rest of the pass that asked for it.
+                self._refreshed_at = time.monotonic()
             if self._index is None:
                 raise
             # A stale index still matches covers; back off instead of hammering
@@ -254,6 +292,15 @@ class SharedMetadataClient:
         if index.names or index.codes:
             self._index = index
             self._index_at = time.monotonic()
+            if forced:
+                self._refreshed_at = self._index_at
+                # The one line a support question needs: a user who uploaded
+                # covers can be told their refresh really did re-read the
+                # catalogue, rather than being sent to look at the cache.
+                logger.info(
+                    "Shared metadata catalogue re-read on request: %s name keys",
+                    len(index.names),
+                )
             await asyncio.to_thread(self._write_cache_file, entries)
         return index
 

@@ -540,7 +540,12 @@ MOVIE_ROOT = "/movies"
 async def test_a_finished_movie_scan_runs_the_cover_pass_on_its_own(
     monkeypatch, tmp_path
 ):
-    """Scanning is the only manual step; covers must land without a second tap."""
+    """Scanning is the only manual step; covers must land without a second tap.
+
+    The pass the scan releases also has to stop trusting the mirrored catalogue:
+    a user rescanning a library is usually doing it because covers landed on the
+    other side, and a ten-minute-old copy would answer with the same empty poster.
+    """
     main = await boot(monkeypatch, tmp_path)
     main.database.seed_media_sources(
         [
@@ -563,15 +568,18 @@ async def test_a_finished_movie_scan_runs_the_cover_pass_on_its_own(
     await main.source_registry.reload()
     fake = FakeAList(build_tree({MOVIE_ROOT: ["hhd800.com@ABP-485.mp4"]}))
     await serve(main, "movies", fake)
-    started: list[str] = []
+    started: list[tuple[str, bool]] = []
     monkeypatch.setattr(
         main,
         "start_movie_metadata_job",
-        lambda source, **kwargs: started.append(source) or True,
+        lambda source, **kwargs: started.append(
+            (source, bool(kwargs.get("refresh_index")))
+        )
+        or True,
     )
 
     assert await main.scan_source("movies") is True
 
-    assert started == ["movies"]
+    assert started == [("movies", True)]
     assert main.spawned_background == []
     await main.source_registry.close()

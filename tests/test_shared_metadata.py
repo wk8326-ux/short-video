@@ -185,6 +185,67 @@ async def test_index_is_fetched_once_and_cached_across_lookups():
 
 
 @pytest.mark.asyncio
+async def test_a_requested_refresh_reads_past_the_cached_catalogue():
+    """A cover uploaded after the last fetch is invisible to a cached read.
+
+    The mirror is a deliberate ten-minute trade, so the only way a user who just
+    uploaded artwork sees it is a read that ignores both that copy and the file.
+    """
+    covers = {"ABP-485": "/poster?path=old.jpg"}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/index"):
+            entry = _entry("ABP-485", "ABP-485")
+            entry["poster_url"] = covers["ABP-485"]
+            return httpx.Response(200, json={"ok": True, "total": 1, "items": [entry]})
+        return httpx.Response(200, json={"ok": True, "code": "ABP-485", "title": "ABP-485"})
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(base_url=BASE, token="t", client=http_client)
+
+    before = await client.index()
+    assert before.names["abp485"]["poster_url"].endswith("old.jpg")
+
+    # The same client, the same second: only the explicit request may re-read.
+    cached = await client.index()
+    assert cached.names["abp485"]["poster_url"].endswith("old.jpg")
+
+    covers["ABP-485"] = "/poster?path=new.jpg"
+    refreshed = await client.index(refresh=True)
+    assert refreshed.names["abp485"]["poster_url"].endswith("new.jpg")
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_refresh_reuses_the_cached_catalogue_without_retrying():
+    """One dead catalogue must not become one fetch attempt per media file."""
+    healthy = True
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if not healthy:
+            raise httpx.ConnectError("catalogue is down", request=request)
+        return httpx.Response(200, json={"ok": True, "total": 1, "items": [_entry("ABP-485", "ABP-485")]})
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(base_url=BASE, token="t", client=http_client)
+
+    await client.index()
+    assert calls == 1
+
+    healthy = False
+    assert (await client.index(refresh=True)).names["abp485"]["code"] == "ABP-485"
+    assert calls == 2
+
+    # The failed refresh backed off instead of leaving the flag raised.
+    assert (await client.index(refresh=True)).names["abp485"]["code"] == "ABP-485"
+    assert calls == 2
+    await http_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_index_pages_until_total_is_reached():
     starts: list[int] = []
     pages = {

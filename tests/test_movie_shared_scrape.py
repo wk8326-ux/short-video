@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from app.movie_metadata import parse_movie_filename
-from app.shared_metadata import SharedMetadataMatch
+from app.shared_metadata import SharedMetadataIndex, SharedMetadataMatch
 
 SAMPLE = SharedMetadataMatch(
     code="CEMD-822",
@@ -28,6 +28,7 @@ class _FakeSharedClient:
     """Stands in for ``SharedMetadataClient`` so the test never hits a network."""
 
     lookups: list[tuple[str, str]] = []
+    warmups: list[bool] = []
     closed = False
 
     def __init__(self, *, base_url: str, token: str = "", **_kwargs) -> None:
@@ -38,6 +39,10 @@ class _FakeSharedClient:
     async def borrow(self):
         """The real client is process-wide, so a scan borrows it untouched."""
         yield self
+
+    async def warm_index(self, *, refresh: bool = False):
+        type(self).warmups.append(refresh)
+        return SharedMetadataIndex(names={}, codes={})
 
     async def lookup(self, name: str, path: str = "") -> SharedMetadataMatch | None:
         type(self).lookups.append((name, path))
@@ -52,6 +57,7 @@ class _FakeSharedClient:
 def _use_fake_client(main, monkeypatch, client=_FakeSharedClient):
     """Point the process-wide catalogue client at a fake for one test."""
     _FakeSharedClient.lookups = []
+    _FakeSharedClient.warmups = []
     _FakeSharedClient.closed = False
     monkeypatch.setattr(main, "SharedMetadataClient", client)
     monkeypatch.setattr(main, "shared_metadata_client", None)
@@ -437,3 +443,92 @@ async def test_a_normal_pass_skips_rows_the_catalogue_already_resolved(
     stored = main.database.movies(sources=("movies",), limit=10)[0]
     assert stored["poster_url"] == "https://c0.jdbstatic.com/covers/ve/veyGnb.jpg"
     assert stored["match_status"] == "matched"
+
+
+@pytest.mark.asyncio
+async def test_a_normal_pass_re_reads_a_matched_row_the_catalogue_left_bare(
+    monkeypatch, tmp_path
+):
+    """A match without artwork is unfinished, so a rescan has to try it again.
+
+    The catalogue keeps gaining covers for releases it already knows. A row
+    stamped ``matched`` with an empty poster is not "resolved": skipping it
+    forever is what left a cover the index picked up later with nowhere to land,
+    and the library with a grey card no rescan could clear.
+    """
+    main = _import_main(monkeypatch, tmp_path)
+    _use_fake_client(main, monkeypatch)
+    movie = _seed_one_movie(
+        main,
+        "/media/CEMD-822/CEMD-822.mp4",
+        "CEMD-822.mp4",
+    )
+    # The catalogue knew the title on an earlier run but held no cover for it.
+    main.database.update_movie_metadata(
+        int(movie["id"]),
+        display_title="CEMD-822 共享标题",
+        metadata_provider="shared",
+        match_status="matched",
+    )
+
+    await main.scrape_movie_metadata("movies")
+
+    assert _FakeSharedClient.lookups, "the bare but matched row was never re-read"
+    stored = main.database.movies(sources=("movies",), limit=10)[0]
+    assert stored["poster_url"] == SAMPLE.poster_url
+    assert stored["match_status"] == "matched"
+
+
+@pytest.mark.asyncio
+async def test_rescanning_a_bare_match_holds_the_row_steady(monkeypatch, tmp_path):
+    """Waiting on artwork must not cost the row the metadata it already has.
+
+    Rows the catalogue matched without a cover stay in the queue by design, so a
+    pass has to be idempotent for them: repeated scans keep the title, the
+    provider and the match, and simply leave the poster empty until the index
+    supplies one.
+    """
+    main = _import_main(monkeypatch, tmp_path)
+    _use_fake_client(main, monkeypatch, _ArtworklessSharedClient)
+    movie = _seed_one_movie(
+        main,
+        "/media/关键词分类/绝顶FUCK/KCPN-054.mp4",
+        "KCPN-054.mp4",
+    )
+    main.database.update_movie_metadata(
+        int(movie["id"]),
+        display_title="KCPN-054 共享标题",
+        metadata_provider="shared",
+        match_status="matched",
+    )
+
+    await main.scrape_movie_metadata("movies")
+    first = main.database.movies(sources=("movies",), limit=10)[0]
+    await main.scrape_movie_metadata("movies")
+    second = main.database.movies(sources=("movies",), limit=10)[0]
+
+    assert second["display_title"] == "KCPN-054 共享标题"
+    assert second["metadata_provider"] == "shared"
+    assert second["match_status"] == "matched"
+    assert not second["poster_url"]
+    assert second["display_title"] == first["display_title"]
+
+
+@pytest.mark.asyncio
+async def test_a_normal_pass_warms_from_the_cached_catalogue_only(
+    monkeypatch, tmp_path
+):
+    """A pass that nobody asked for must not spend a catalogue walk.
+
+    The index is twenty-eight pages over the wire, so the default has to keep
+    reading the mirrored copy; only the refresh a user starts may go past it.
+    """
+    main = _import_main(monkeypatch, tmp_path)
+    _use_fake_client(main, monkeypatch)
+    _seed_one_movie(main, "/media/CEMD-822/CEMD-822.mp4", "CEMD-822.mp4")
+
+    await main.scrape_movie_metadata("movies")
+    assert _FakeSharedClient.warmups == [False]
+
+    await main.scrape_movie_metadata("movies", refresh_index=True)
+    assert _FakeSharedClient.warmups == [False, True]
