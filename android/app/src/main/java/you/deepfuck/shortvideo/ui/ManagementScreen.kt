@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -77,6 +78,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.unit.dp
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import you.deepfuck.shortvideo.AppUiState
 import you.deepfuck.shortvideo.data.AdminStatus
 import you.deepfuck.shortvideo.data.LibrarySection
@@ -336,13 +340,16 @@ private fun MediaSourceRow(
     onDelete: () -> Unit,
 ) {
     val busy = source.scan.running || starting
-    // Two lines only: identity on the first, actions on the second. The wall of
-    // metrics that used to live here pushed a dozen libraries past a screen.
+    // Two rows sharing two edges: the name and the media count both start on the
+    // card's content edge, the section tag and the action cluster both end on it.
+    // The wall of metrics that used to live here pushed a dozen libraries past a
+    // screen; a left-hugging button row under a right-aligned tag just looked
+    // broken, so every element now sits on one of those two lines.
     Column(
         Modifier
             .fillMaxWidth()
             .glassSurface(fill = Raised, line = Line)
-            .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 6.dp),
+            .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 2.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -350,21 +357,14 @@ private fun MediaSourceRow(
         ) {
             Text(
                 source.name,
-                modifier = Modifier.weight(1f, fill = false),
+                modifier = Modifier.weight(1f),
                 color = TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Spacer(Modifier.width(10.dp))
-            Text(
-                source.videos.toString(),
-                color = TextSecondary,
-                style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
-                maxLines = 1,
-            )
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(12.dp))
             Text(
                 source.section.label,
                 color = AccentSoft,
@@ -386,39 +386,90 @@ private fun MediaSourceRow(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Icon-only actions keep the row compact; the label doubles as the
-            // accessibility text via GlassIconButton.
-            GlassIconButton(
-                label = "编辑媒体源",
-                onClick = onEdit,
-                enabled = !busy && !deleting,
-                tint = TextSecondary,
+            // The count is the number the user came for; the scan age rides
+            // along in the space that used to be empty, so the card grows no
+            // taller than it was.
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Outlined.Edit, contentDescription = null)
-            }
-            Spacer(Modifier.size(4.dp))
-            GlassIconButton(
-                label = if (busy) "正在扫描" else "扫描媒体源",
-                onClick = { onScan(source.id) },
-                enabled = source.enabled && !busy,
-                tint = if (busy) TextSecondary else Color.White,
-            ) {
-                if (busy) {
-                    CircularProgressIndicator(Modifier.size(18.dp), color = TextSecondary, strokeWidth = 2.dp)
-                } else {
-                    Icon(Icons.Outlined.Refresh, contentDescription = null)
+                Text(
+                    source.videos.toString(),
+                    color = TextSecondary,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                )
+                val hint = sourceScanHint(source)
+                if (hint != null) {
+                    Text(
+                        "  ·  $hint",
+                        color = TextFaint,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
-            Spacer(Modifier.size(4.dp))
-            GlassIconButton(
-                label = "删除媒体源",
-                onClick = onDelete,
-                enabled = !busy && !deleting,
-                tint = androidx.compose.material3.MaterialTheme.colorScheme.error,
+            // Icon-only actions keep the row compact; the label doubles as the
+            // accessibility text via GlassIconButton.
+            Row(
+                // A 48dp icon button caps its glyph with 12dp of padding, so the
+                // cluster is nudged out by exactly that amount: the last glyph
+                // then lands on the same right edge as the section tag above,
+                // while the target itself stays inside the card.
+                modifier = Modifier.offset(x = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Icon(Icons.Outlined.DeleteOutline, contentDescription = null)
+                GlassIconButton(
+                    label = "编辑媒体源",
+                    onClick = onEdit,
+                    enabled = !busy && !deleting,
+                    tint = TextSecondary,
+                ) {
+                    Icon(Icons.Outlined.Edit, contentDescription = null)
+                }
+                GlassIconButton(
+                    label = if (busy) "正在扫描" else "扫描媒体源",
+                    onClick = { onScan(source.id) },
+                    enabled = source.enabled && !busy,
+                    tint = if (busy) TextSecondary else Color.White,
+                ) {
+                    if (busy) {
+                        CircularProgressIndicator(Modifier.size(18.dp), color = TextSecondary, strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Outlined.Refresh, contentDescription = null)
+                    }
+                }
+                GlassIconButton(
+                    label = "删除媒体源",
+                    onClick = onDelete,
+                    enabled = !busy && !deleting,
+                    tint = androidx.compose.material3.MaterialTheme.colorScheme.error,
+                ) {
+                    Icon(Icons.Outlined.DeleteOutline, contentDescription = null)
+                }
             }
         }
+    }
+}
+
+// The question this list has to answer at a glance is "which library is stale",
+// so the scan age is shown relative instead of as an absolute timestamp.
+private fun sourceScanHint(source: MediaLibrarySource): String? {
+    if (!source.enabled) return "已停用"
+    val lastSuccess = source.scan.lastSuccess
+    if (lastSuccess == null || lastSuccess <= 0L) {
+        return if (source.videos > 0) null else "未扫描"
+    }
+    val stamp = lastSuccess * 1000L
+    val elapsed = System.currentTimeMillis() - stamp
+    return when {
+        elapsed < 60_000L -> "刚刚"
+        elapsed < 3_600_000L -> "${elapsed / 60_000L} 分钟前"
+        elapsed < 86_400_000L -> "${elapsed / 3_600_000L} 小时前"
+        elapsed < 30L * 86_400_000L -> "${elapsed / 86_400_000L} 天前"
+        else -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(stamp))
     }
 }
 
