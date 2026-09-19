@@ -6,8 +6,10 @@ import logging
 import os
 import re
 import time
+import unicodedata
+import urllib.parse
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -25,7 +27,27 @@ INDEX_RETRY_SECONDS = 60.0
 # six movie libraries in a row is six user actions and still one catalogue walk,
 # because the copy that was just fetched already contains every cover they added.
 INDEX_FORCE_FLOOR_SECONDS = 60.0
-INDEX_PAGE_SIZE = 1000
+# ``index_version`` only moves when the local sidecar inventory moves, so a
+# catalogue that answers with the same version is provably identical and does
+# not need re-walking. Emby-only rows and Emby-side artwork are invisible to
+# that version, which is why one unconditional walk per day stays mandatory.
+INDEX_FULL_REFRESH_SECONDS = 86400.0
+# The service clamps ``limit`` to 2000 and echoes the value it used, so the walk
+# advances by the rows that actually arrived rather than by the size it asked
+# for: asking for more than the clamp would otherwise skip records silently.
+INDEX_PAGE_SIZE = 2000
+# The service rebuilds its whole sidecar/Emby inventory on a cold ``/index``
+# (30-180 s there), and the gateway in front of it drops the request at about
+# thirty seconds. Waiting a little past that cut turns a cold catalogue into the
+# gateway's own answer -- which the retries below recover from once the service
+# has cached the inventory -- instead of a bare client timeout.
+INDEX_TIMEOUT_SECONDS = 45.0
+INDEX_ATTEMPTS = 4
+# The published worst case for a cold inventory is 180 s, and the gateway in
+# front of the service answers 502 for every one of those seconds. A ladder
+# that stops at twenty seconds never sees the catalogue at all, so the delays
+# are sized to outlast the build: 30 + 20 + 30 + 45 + 30 + 90 + 30 s.
+INDEX_RETRY_DELAYS = (20.0, 45.0, 90.0)
 # The published catalogue is past 27k records and keeps growing. The page cap
 # only guards against a runaway pagination loop; the old value of 20 silently
 # truncated the catalogue at 20k records and left every title past that point
@@ -39,12 +61,28 @@ INDEX_ENTRY_KEYS = (
     "code",
     "folder_name",
     "title",
+    "original_title",
     "year",
     "poster_url",
     "nfo_url",
+    "cover_url",
     "source",
     "poster_source",
+    "media_path",
+    "cloud_path",
+    "path_key",
+    "metadata_status",
+    "overview",
+    "studio",
+    "actors",
+    "genres",
+    "website",
 )
+
+# The catalogue's canonical paths are relative to the ``光鸭`` mount, but the
+# scanner records the AList path with that mount included. Both spellings are
+# registered and both are accepted on lookup, so neither side has to guess.
+MOUNT_PREFIX = "\u5149\u9e2d"
 
 _CODE = re.compile(r"([A-Za-z]{2,12})[-_ ]?(\d{2,6})(?!\d)")
 _BRACKETED = re.compile(r"[\[\(（【][^\]\)）】]*[\]\)）】]")
@@ -139,6 +177,77 @@ def _entry_agrees_with(entry: dict[str, Any], code_keys: tuple[str, ...]) -> boo
     return not entry_code or entry_code in code_keys
 
 
+def _path_segments(value: Any) -> list[str]:
+    """Split one cloud path the way the shared service folds it.
+
+    URL-encoded octets, backslashes, duplicate slashes and decomposed Unicode
+    all reach the API in real requests; normalising them here is what makes a
+    path fetched from the scanner equal a path published by the catalogue.
+    """
+    text = urllib.parse.unquote(str(value or "")).strip().replace("\\", "/")
+    while "//" in text:
+        text = text.replace("//", "/")
+    text = unicodedata.normalize("NFC", text).strip("/")
+    parts = [part for part in text.split("/") if part and part != "."]
+    if not parts or any(part == ".." for part in parts):
+        return []
+    return parts
+
+
+def normalize_media_path(value: Any) -> str:
+    """Fold a full media path into the catalogue's lookup key."""
+    parts = _path_segments(value)
+    return "/".join(parts).casefold() if parts else ""
+
+
+def _path_key_variants(value: Any) -> tuple[str, ...]:
+    """Exact path keys for one value, with the ``光鸭`` mount optional."""
+    parts = _path_segments(value)
+    if not parts:
+        return ()
+    keys = ["/".join(parts).casefold()]
+    if parts[0] == MOUNT_PREFIX:
+        keys.append("/".join(parts[1:]).casefold())
+    return tuple(dict.fromkeys(key for key in keys if key))
+
+
+def _entry_rank(item: dict[str, Any]) -> tuple[int, int, int, int]:
+    """How well one row covers a media file, used to break path ties."""
+    return (
+        1 if item.get("poster_url") else 0,
+        1 if item.get("source") == "local" else 0,
+        1 if item.get("nfo_url") else 0,
+        1 if item.get("metadata_status") == "ready" else 0,
+    )
+
+
+def _entry_path_keys(item: dict[str, Any]) -> tuple[str, ...]:
+    """Every exact key an index row answers to."""
+    keys: list[str] = []
+    for value in (item.get("cloud_path"), item.get("media_path"), item.get("path_key")):
+        keys.extend(_path_key_variants(value))
+    return tuple(dict.fromkeys(keys))
+
+
+def media_lookup_keys(name: str, path: str = "") -> tuple[str, ...]:
+    """Exact full-path keys for one media file, filename included.
+
+    The caller may pass either the complete AList path or only the folder that
+    holds the file, so the filename is appended when it is not already there.
+    Parent-folder-only keys are deliberately never produced: a flat folder of
+    unrelated releases must not resolve to whichever row shares its directory.
+    """
+    file_name = str(name or "").strip().replace("\\", "/").split("/")[-1]
+    raw = str(path or "").strip()
+    if raw and file_name:
+        tail = raw.replace("\\", "/").rstrip("/").split("/")[-1]
+        if tail.casefold() != file_name.casefold():
+            raw = raw.rstrip("/") + "/" + file_name
+    elif not raw:
+        raw = file_name
+    return _path_key_variants(raw)
+
+
 def candidate_keys(name: str, path: str = "") -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Split lookup keys into strong name keys and derived code keys.
 
@@ -167,6 +276,8 @@ class SharedMetadataIndex:
 
     names: dict[str, dict[str, Any]]
     codes: dict[str, dict[str, Any]]
+    paths: dict[str, dict[str, Any]] = field(default_factory=dict)
+    version: str = ""
 
 
 class SharedMetadataClient:
@@ -202,10 +313,13 @@ class SharedMetadataClient:
         # Unlike ``_index_at`` this only moves for those requests, which is what
         # makes it safe to answer a second one from the copy the first fetched.
         self._refreshed_at = 0.0
+        # When the full page walk last happened, as opposed to the copy merely
+        # being confirmed current by a version probe.
+        self._walked_at = 0.0
         self._client = client or httpx.AsyncClient(
             base_url=f"{self.base_url}/",
             headers=headers,
-            timeout=httpx.Timeout(20.0, connect=8.0),
+            timeout=httpx.Timeout(INDEX_TIMEOUT_SECONDS, connect=8.0),
         )
         self._owns_client = client is None
 
@@ -270,11 +384,21 @@ class SharedMetadataClient:
             restored = await asyncio.to_thread(self._read_cache_file)
             if restored is not None:
                 self._index, self._index_at = restored
+                # The mirror was written when the walk happened, so the daily
+                # full-refresh clock runs from the fetch it recorded.
+                self._walked_at = self._index_at
                 if self._is_fresh() and not forced:
                     logger.info("Shared metadata index restored from %s", self._cache_path)
                     return self._index
+        # A catalogue whose ``index_version`` has not moved is provably the same
+        # inventory, and proving it costs one row instead of the ~28 pages a
+        # walk costs on the wire. A user-requested refresh still walks: that is
+        # the action whose whole point is to re-read the catalogue.
+        if self._index is not None and not forced and await self._version_is_current():
+            self._index_at = time.monotonic()
+            return self._index
         try:
-            entries = await self._fetch_entries()
+            entries, version = await self._fetch_entries()
         except Exception:
             if forced:
                 # Back off before deciding what to do with the failure: a
@@ -288,43 +412,75 @@ class SharedMetadataClient:
             logger.warning("Shared metadata index refresh failed, reusing the cached copy")
             self._index_at = time.monotonic() - self._index_ttl + INDEX_RETRY_SECONDS
             return self._index
-        index = self._build_index(entries)
+        index = self._build_index(entries, version)
         if index.names or index.codes:
             self._index = index
             self._index_at = time.monotonic()
+            self._walked_at = self._index_at
             if forced:
                 self._refreshed_at = self._index_at
                 # The one line a support question needs: a user who uploaded
                 # covers can be told their refresh really did re-read the
                 # catalogue, rather than being sent to look at the cache.
                 logger.info(
-                    "Shared metadata catalogue re-read on request: %s name keys",
+                    "Shared metadata catalogue re-read on request: %s name keys, "
+                    "%s path keys",
                     len(index.names),
+                    len(index.paths),
                 )
-            await asyncio.to_thread(self._write_cache_file, entries)
+            await asyncio.to_thread(self._write_cache_file, entries, version)
         return index
 
     def _is_fresh(self) -> bool:
         return self._index is not None and time.monotonic() - self._index_at < self._index_ttl
 
-    async def _fetch_entries(self) -> list[dict[str, Any]]:
-        """Walk every page the service publishes, not just the first N thousand."""
+    async def _version_is_current(self) -> bool:
+        """Whether the published ``index_version`` still matches our copy.
+
+        The catalogue recomputes its inventory on every ``/index`` call, so the
+        version tells us whether the copy we already hold can still be trusted
+        without paying for the walk. Anything unexpected -- a probe failure, an
+        empty version, a mirror older than a day -- answers ``False`` and leaves
+        the caller on the full walk, which is the behaviour that was there
+        before the probe existed.
+        """
+        local = str(getattr(self._index, "version", "") or "")
+        if not local:
+            return False
+        if time.monotonic() - self._walked_at >= INDEX_FULL_REFRESH_SECONDS:
+            return False
+        try:
+            response = await self._client.get("/index", params={"start": 0, "limit": 1})
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logger.info("Shared metadata version probe failed: %s", exc)
+            return False
+        published = payload.get("index_version") if isinstance(payload, dict) else None
+        return bool(published) and published == local
+
+    async def _fetch_entries(self) -> tuple[list[dict[str, Any]], str]:
+        """Walk every page the service publishes, not just the first N thousand.
+
+        The response carries a deterministic ``index_version``; it is stored
+        alongside the rows so a cache restored from disk can be checked against
+        the catalogue without refetching every page.
+        """
         entries: list[dict[str, Any]] = []
         start = 0
         total: int | None = None
+        version = ""
         for _ in range(INDEX_MAX_PAGES):
-            response = await self._client.get(
-                "/index", params={"start": start, "limit": INDEX_PAGE_SIZE}
-            )
-            response.raise_for_status()
-            payload = response.json()
+            payload = await self._fetch_page(start)
             items = payload.get("items") if isinstance(payload, dict) else None
             if not isinstance(items, list):
                 break
             entries.extend(
                 self._trim_entry(item) for item in items if isinstance(item, dict)
             )
-            start += INDEX_PAGE_SIZE
+            start += len(items)
+            if not version and isinstance(payload.get("index_version"), str):
+                version = payload["index_version"]
             if isinstance(payload.get("total"), int):
                 total = int(payload["total"])
             if not items or (total is not None and start >= total):
@@ -333,7 +489,45 @@ class SharedMetadataClient:
             logger.warning(
                 "Shared metadata index stopped at %s of %s records", len(entries), total
             )
-        return entries
+        return entries, version
+
+    async def _fetch_page(self, start: int) -> dict[str, Any]:
+        """One page of the walk, retried.
+
+        The first request after the service restarts pays for the whole
+        inventory build, so it can outlive the gateway's timeout while the
+        service finishes the work anyway and serves the next request from
+        memory. Retrying is therefore what makes a cold catalogue invisible to
+        the pass instead of silently demoting it to the stale disk mirror. A
+        failed page also used to throw away every page fetched before it.
+        """
+        last: Exception | None = None
+        for attempt in range(INDEX_ATTEMPTS):
+            if attempt:
+                # The ladder is shorter than the attempt count on purpose: the
+                # last delay stands in for every retry past it, so a test that
+                # pins two delays still exercises a four-attempt walk.
+                delay = INDEX_RETRY_DELAYS[min(attempt, len(INDEX_RETRY_DELAYS)) - 1]
+                await asyncio.sleep(delay)
+            try:
+                response = await self._client.get(
+                    "/index", params={"start": start, "limit": INDEX_PAGE_SIZE}
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except Exception as exc:
+                last = exc
+                logger.info(
+                    "Shared metadata index page at %s failed (attempt %s/%s): %s",
+                    start,
+                    attempt + 1,
+                    INDEX_ATTEMPTS,
+                    exc,
+                )
+                continue
+            return payload
+        assert last is not None
+        raise last
 
     @staticmethod
     def _trim_entry(item: dict[str, Any]) -> dict[str, Any]:
@@ -350,6 +544,7 @@ class SharedMetadataClient:
             payload = json.loads(self._cache_path.read_text(encoding="utf-8"))
             fetched_at = float(payload["fetchedAt"])
             items = payload["items"]
+            version = str(payload.get("indexVersion") or "")
         except (OSError, ValueError, KeyError, TypeError):
             return None
         if not isinstance(items, list):
@@ -358,9 +553,9 @@ class SharedMetadataClient:
         if not entries:
             return None
         age = max(0.0, time.time() - fetched_at)
-        return self._build_index(entries), time.monotonic() - age
+        return self._build_index(entries, version), time.monotonic() - age
 
-    def _write_cache_file(self, entries: list[dict[str, Any]]) -> None:
+    def _write_cache_file(self, entries: list[dict[str, Any]], version: str = "") -> None:
         if self._cache_path is None:
             return
         temporary: Path | None = None
@@ -370,7 +565,11 @@ class SharedMetadataClient:
             temporary = self._cache_path.with_name(self._cache_path.name + suffix)
             temporary.write_text(
                 json.dumps(
-                    {"fetchedAt": time.time(), "items": entries},
+                    {
+                        "fetchedAt": time.time(),
+                        "indexVersion": version,
+                        "items": entries,
+                    },
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ),
@@ -387,7 +586,10 @@ class SharedMetadataClient:
                     pass
 
     @staticmethod
-    def _build_index(entries: list[dict[str, Any]]) -> SharedMetadataIndex:
+    def _build_index(
+        entries: list[dict[str, Any]],
+        version: str = "",
+    ) -> SharedMetadataIndex:
         """Fold the published catalogue into lookup tables that never lie.
 
         The catalogue has no stable primary key: several unrelated releases can
@@ -399,8 +601,10 @@ class SharedMetadataClient:
         """
         names: dict[str, dict[str, Any]] = {}
         codes: dict[str, dict[str, Any]] = {}
+        paths: dict[str, dict[str, Any]] = {}
         rejected_names: set[str] = set()
         rejected_codes: set[str] = set()
+        rejected_paths: set[str] = set()
         for item in entries:
             identity = _entry_identity(item)
             name_key = fold_key(item.get("folder_name"))
@@ -412,6 +616,12 @@ class SharedMetadataClient:
                 elif _entry_identity(names[name_key]) != identity:
                     names.pop(name_key, None)
                     rejected_names.add(name_key)
+                elif _entry_rank(item) > _entry_rank(names[name_key]):
+                    # One release can be published as several rows (multi-part
+                    # files, or a sidecar row plus a bare one). They are the
+                    # same identity, so the row that actually carries artwork
+                    # has to survive instead of whichever arrived first.
+                    names[name_key] = item
             for key in _entry_code_keys(item):
                 if not key or key in rejected_codes:
                     continue
@@ -420,18 +630,54 @@ class SharedMetadataClient:
                 elif _entry_identity(codes[key]) != identity:
                     codes.pop(key, None)
                     rejected_codes.add(key)
-        return SharedMetadataIndex(names=names, codes=codes)
+                elif _entry_rank(item) > _entry_rank(codes[key]):
+                    codes[key] = item
+            for key in _entry_path_keys(item):
+                if not key or key in rejected_paths:
+                    continue
+                current = paths.get(key)
+                if current is None:
+                    paths[key] = item
+                    continue
+                if _entry_identity(current) != identity:
+                    # A full path is the strongest identity in the catalogue.
+                    # Two different releases claiming it means the index is
+                    # inconsistent, so neither row may win silently.
+                    paths.pop(key, None)
+                    rejected_paths.add(key)
+                    continue
+                if _entry_rank(item) > _entry_rank(current):
+                    paths[key] = item
+        return SharedMetadataIndex(
+            names=names,
+            codes=codes,
+            paths=paths,
+            version=version,
+        )
 
     async def lookup(self, name: str, path: str = "") -> SharedMetadataMatch | None:
         """Match one cloud media file against the shared sidecar index."""
         name_keys, code_keys = candidate_keys(name, path)
-        if not name_keys and not code_keys:
+        path_keys = media_lookup_keys(name, path)
+        if not path_keys and not name_keys and not code_keys:
             return None
         try:
             index = await self.index()
         except Exception as exc:  # network hiccups must not abort a scrape run
             logger.warning("Shared metadata index unavailable: %s", exc)
             return None
+
+        # A media file's complete AList path, including its filename, is the
+        # primary identity. This is exact and safe even for flat folders where
+        # dozens of unrelated releases share one parent directory.
+        for key in path_keys:
+            entry = index.paths.get(key)
+            if entry is not None:
+                return await self._match_from_entry(entry)
+
+        # Older catalogue rows and records outside the sidecar roots may not
+        # publish a path. Keep the former name/code matching as a conservative
+        # fallback, but never use a parent-only key as exact identity.
         for key in name_keys:
             entry = index.names.get(key)
             # A folder-name hit still has to describe the same release as the
@@ -446,20 +692,13 @@ class SharedMetadataClient:
         return None
 
     async def _match_from_entry(self, entry: dict[str, Any]) -> SharedMetadataMatch:
-        detail: dict[str, Any] = {}
-        code = str(entry.get("code") or "").strip()
-        if code:
-            try:
-                response = await self._client.get("/metadata", params={"code": code})
-                response.raise_for_status()
-                payload = response.json()
-                if isinstance(payload, dict) and payload.get("ok"):
-                    detail = payload
-            except Exception as exc:
-                # The index entry alone still carries a usable cover.
-                logger.info("Shared metadata detail miss for %s: %s", code, exc)
-        merged = {**entry, **{key: value for key, value in detail.items() if value}}
-        return self._match(merged)
+        """Build a match entirely from the already-fetched inventory.
+
+        The index carries the sidecar metadata, poster URL and status needed by
+        the player. A per-title ``/metadata`` request would add thousands of
+        round trips to each scan and is therefore not part of normal matching.
+        """
+        return self._match(entry)
 
     def _match(self, payload: dict[str, Any]) -> SharedMetadataMatch:
         actors = payload.get("actors")
@@ -474,7 +713,7 @@ class SharedMetadataClient:
             title=str(payload.get("title") or "").strip(),
             original_title=str(payload.get("original_title") or "").strip(),
             year=int(year) if year.isdigit() else None,
-            overview=str(payload.get("plot") or "").strip(),
+            overview=str(payload.get("overview") or payload.get("plot") or "").strip(),
             studio=str(payload.get("studio") or "").strip(),
             performers=performers,
             # The wall and the detail artwork both read ``poster_url`` and crop

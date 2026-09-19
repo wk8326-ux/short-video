@@ -2,10 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [1.6.0-beta.18] - 2026-09-20
+
+### Added
+
+- The movie catalogue is matched by whole media path first. The shared service's second version publishes one row per media
+  file keyed by its complete path, and that key is now the primary identity, so a folder holding dozens of unrelated releases
+  can no longer hand one file another release's cover. Across the seven movie libraries this lifted 62 rows onto a cover
+  (2,334 → 2,396 of 2,468); all 2,396 come from a path hit, and the four rows still matched by code carry no image at source.
 
 ### Fixed
 
+- A scan no longer asks the catalogue for one title at a time. An index row already carries the overview, studio, actors,
+  genres and both cover URLs, so a pass over 27k titles now costs one walk instead of thousands of `/metadata` round trips.
+- The catalogue walk covers the whole catalogue even when the service clamps the page size it was asked for: the walk
+  advances by the rows that actually arrived, so records past a clamp are no longer skipped.
+- A cold catalogue is now retried long enough to be read. The service rebuilds its inventory on a cold `/index` and the
+  gateway in front of it answers `502` for the first thirty seconds of that build, so the old twenty-second ladder never
+  saw the catalogue at all; the ladder now spans about five minutes.
+- A rescan checks the catalogue's `index_version` before walking it: an unchanged inventory is proved with one row instead of
+  the ~28-page walk, and the full walk is forced once a day because Emby-side artwork is invisible to that version.
 - A rescan re-reads rows the catalogue matched but left without artwork. Those rows used to be skipped for good, so a cover the
   catalogue picked up later had nowhere to land and the wall kept a grey card no refresh could clear. On a single pass over the
   seven movie libraries this recovered 137 covers in `M男` alone; the retry is idempotent when the catalogue still has no image.
