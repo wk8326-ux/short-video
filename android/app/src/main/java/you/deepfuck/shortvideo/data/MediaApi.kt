@@ -413,6 +413,10 @@ class MediaApi(private val preferences: PlaybackPreferences) {
                 .maxSizeBytes(256L * 1024 * 1024)
                 .build()
         }
+        // The wall, the library page and the detail hero all build their URL
+        // from the same catalogue record, so the pixel width is appended here
+        // once instead of at every call site.
+        .components { add(ArtworkWidthInterceptor()) }
         .crossfade(180)
         .build()
 

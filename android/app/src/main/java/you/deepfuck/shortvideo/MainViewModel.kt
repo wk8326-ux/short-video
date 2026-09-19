@@ -591,12 +591,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (state.surface != MediaSurface.MOVIE) return
         val group = state.movieGroups.firstOrNull { it.sourceId == sourceId } ?: return
         cancelMovieGroupPageLoad()
+        // The wall already fetched the first slice of this library, so the
+        // page opens on those covers instead of a skeleton and swaps in the
+        // full first page when it lands.
+        val prefetched = group.items.map { it.withResumePosition() }
         mutableState.value = state.copy(
             openMovieGroupId = sourceId,
             openMovieGroupName = group.name,
-            openMovieGroupItems = emptyList(),
+            openMovieGroupItems = prefetched,
             openMovieGroupTotal = group.total,
-            openMovieGroupNextOffset = 0,
+            openMovieGroupNextOffset = if (prefetched.isEmpty()) 0 else group.nextOffset,
             openMovieGroupLoading = true,
             openMovieGroupError = null,
             openMovieGroupSort = DEFAULT_MOVIE_SORT,
@@ -679,6 +683,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!handleUnauthorized(error)) {
                         mutableState.value = current.copy(
                             openMovieGroupLoading = false,
+                            // A page opened from the wall keeps its covers; the
+                            // cursor goes away so the footer cannot promise more.
+                            openMovieGroupNextOffset =
+                                current.openMovieGroupNextOffset.takeIf {
+                                    current.openMovieGroupItems.isEmpty()
+                                },
                             openMovieGroupError = "这个媒体库暂时载入不了，稍后再试",
                         )
                     }

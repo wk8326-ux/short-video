@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.17] - 2026-09-19
+
+### Added
+
+- Artwork is served at the size it is drawn. The client appends the pixel width it is about to render, the proxy snaps that onto a
+  six-step ladder (`240/360/480/720/1080/1440`), downscales with LANCZOS and answers with WebP. A 1080px cover that used to cross the
+  Pacific at 196 KB arrives at 54 KB, and every density on the market shares one cache entry instead of minting its own.
+- The shared catalogue index keeps a disk mirror at `data/shared-metadata-index.json`, so a container restart is ready in seconds
+  instead of paying the full ~28-page walk again, and a failed refresh reuses the stale copy rather than emptying the catalogue.
+
+### Changed
+
+- Every width is cut from the one copy already on disk. The wall caches the full-size cover as a side effect of its scaled request,
+  and the detail page derives from it: opening a film no longer opens a second stream to an artwork host that drops a share of
+  connections. `X-Movie-Image-Cache` reports `derived` for that path.
+- A library page opened from the wall paints the six covers the wall already has before its own first page lands, and its footer no
+  longer claims there is more to load when the page failed.
+- The catalogue index walks up to 80 pages (27,667 titles) instead of 20, and is fetched through one process-wide client, so a scan
+  no longer rebuilds the same tables for every library.
+- A row whose artwork came from the retired TMDB scraper is dropped on the next authoritative pass instead of surviving as a stale
+  cover forever.
+
 ## [1.6.0-beta.15] - 2026-09-19
 
 ### Added

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import logging
 import os
@@ -38,6 +39,11 @@ from app.media_sources import MediaSourceRegistry
 from app.scanner import ResumableScanner, initial_steps
 from app.movie_metadata import parse_movie_filename
 from app.shared_metadata import SharedMetadataClient
+
+try:  # Pillow is a hard dependency of the image; the guard keeps imports working
+    from PIL import Image  # in a bare interpreter used by tooling.
+except ImportError:  # pragma: no cover - the runtime image always installs it
+    Image = None  # type: ignore[assignment]
 from app.settings import Settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -107,9 +113,26 @@ MOVIE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
 MOVIE_IMAGE_CACHE_SECONDS = 7 * 24 * 60 * 60
 MOVIE_IMAGE_USER_AGENT = "deepfuck-movie-library/1"
 MOVIE_IMAGE_CACHE_MAX_BYTES = 256 * 1024 * 1024
+# Posters are proxied so phones never touch JavBus/DMM directly. The wall only
+# ever draws them a few hundred pixels wide, so the proxy can hand out a
+# downscaled WebP instead of the multi-megabyte original: same picture, a
+# fraction of the bytes on a trans-Pacific mobile link.
+MOVIE_IMAGE_WIDTHS = (240, 360, 480, 720, 1080, 1440)
+# The width every wall card (movie, drama, library page) ends up asking for on a
+# 3x phone: prewarming a different size filled cache entries nothing ever read.
+MOVIE_WALL_IMAGE_WIDTH = 480
+# The shared catalogue is the only metadata writer this app still runs, so a row
+# stamped with anything else came from a scraper that has since been deleted.
+ACTIVE_METADATA_PROVIDER = "shared"
 movie_image_cache_dir = Path(settings.database_path).resolve().parent / "movie-images"
 movie_image_cache_locks: dict[str, asyncio.Lock] = {}
 movie_image_cache_guard = threading.RLock()
+# One client for the whole process: the folded catalogue is the expensive part
+# of a scrape, and building it per run made every rescan pay for the same walk.
+shared_metadata_index_path = (
+    Path(settings.database_path).resolve().parent / "shared-metadata-index.json"
+)
+shared_metadata_client: SharedMetadataClient | None = None
 
 # 91crdj publishes one detail page per series; its artwork lives on a picture
 # CDN as AES-CBC blobs that the site decrypts in a browser worker. The series
@@ -599,9 +622,16 @@ async def _mark_movie_unmatched(
     a row that no longer matches has to lose the cover an earlier (buggy) run
     handed it, because the stored title and artwork would otherwise stay wrong
     forever. Rows curated outside the shared catalogue are never touched.
+
+    The shared catalogue is the only metadata writer this app still runs, so a
+    row stamped with any other provider was filled in by a scraper that no
+    longer exists (``tmdb``). Its artwork is not somebody else's curation, and a
+    pass that cannot re-match it has to drop what the retired scraper stored:
+    keeping it is exactly how a stale provider's cover survives a re-index.
     """
-    provider = str(movie.get("metadata_provider") or "")
-    if not authoritative or (provider and provider != "shared"):
+    provider = str(movie.get("metadata_provider") or "").strip()
+    retired = bool(provider) and provider != ACTIVE_METADATA_PROVIDER
+    if not authoritative and not retired:
         if provider or str(movie.get("poster_url") or "").strip():
             return
         await asyncio.to_thread(
@@ -816,11 +846,7 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                 force=force,
             )
             movie_metadata_state["total"] = len(movies)
-            shared_metadata = SharedMetadataClient(
-                base_url=settings.shared_metadata_base_url,
-                token=settings.shared_metadata_token,
-            )
-            try:
+            async with shared_metadata_service().borrow() as shared_metadata:
                 for movie in movies:
                     parsed_name = parse_movie_filename(str(movie.get("name") or ""))
                     # The shared service already holds the sidecar covers and NFO
@@ -856,7 +882,7 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                         poster_url=shared_match.poster_url or None,
                         backdrop_url=shared_match.backdrop_url or None,
                         tmdb_id=None,
-                        metadata_provider="shared",
+                        metadata_provider=ACTIVE_METADATA_PROVIDER,
                         release_date=str(shared_match.year) if shared_match.year else None,
                         genres="[]",
                         performers=json.dumps(shared_match.performers, ensure_ascii=False),
@@ -866,8 +892,6 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
                     )
                     movie_metadata_state["matched"] += 1
                     movie_metadata_state["checked"] += 1
-            finally:
-                await shared_metadata.close()
             movie_metadata_state["lastSuccess"] = int(time.time())
         except Exception as exc:
             movie_metadata_state["lastError"] = str(exc)
@@ -878,7 +902,7 @@ async def scrape_movie_metadata(source: str, *, force: bool = False) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global movie_image_client
+    global movie_image_client, shared_metadata_client
     await asyncio.to_thread(database.initialize)
     await source_registry.initialize()
     orphaned = await asyncio.to_thread(database.reconcile_orphaned_scan_jobs)
@@ -894,6 +918,14 @@ async def lifespan(_: FastAPI):
         limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
         headers={"User-Agent": MOVIE_IMAGE_USER_AGENT},
     )
+    if settings.shared_metadata_base_url:
+        # The catalogue takes tens of seconds to walk, and the disk mirror only
+        # covers a restart inside the TTL. Warming it here means the first scan
+        # a user triggers never waits for the download.
+        spawn_background(
+            _warm_shared_metadata_index(shared_metadata_service()),
+            name="shared-metadata-index-warmup",
+        )
     try:
         yield
     finally:
@@ -904,7 +936,44 @@ async def lifespan(_: FastAPI):
         movie_image_client = None
         if image_client is not None:
             await image_client.aclose()
+        metadata_client = shared_metadata_client
+        shared_metadata_client = None
+        if metadata_client is not None:
+            await metadata_client.close()
         await source_registry.close()
+
+
+async def _warm_shared_metadata_index(client: SharedMetadataClient) -> None:
+    started = time.monotonic()
+    try:
+        index = await client.index()
+    except Exception as exc:
+        logger.warning("Shared metadata index warm-up failed: %s", exc)
+        return
+    logger.info(
+        "Shared metadata index ready: %s name keys and %s code keys in %.1fs",
+        len(index.names),
+        len(index.codes),
+        time.monotonic() - started,
+    )
+
+
+def shared_metadata_service() -> SharedMetadataClient:
+    """The process-wide read-only catalogue client.
+
+    Every movie scan used to build its own client, and with it a fresh copy of
+    the folded catalogue: ~28 pages over the wire and ~30 s before the first
+    title could be matched. One client keeps the tables warm across scans and
+    across media libraries.
+    """
+    global shared_metadata_client
+    if shared_metadata_client is None:
+        shared_metadata_client = SharedMetadataClient(
+            base_url=settings.shared_metadata_base_url,
+            token=settings.shared_metadata_token,
+            cache_path=shared_metadata_index_path,
+        )
+    return shared_metadata_client
 
 
 app = FastAPI(
@@ -1018,19 +1087,35 @@ def public_source(
     return payload
 
 
+def _artwork_token(source_url: Any) -> str:
+    """Short digest of the upstream artwork URL.
+
+    The public image endpoints are addressed by movie id, so a re-index that
+    swaps a cover leaves the client-facing URL untouched and every device keeps
+    serving the old bytes for the whole image TTL. Folding the upstream URL into
+    the query turns a new cover into a new URL, while rows whose artwork did not
+    change keep the cached response they already have.
+    """
+    return hashlib.sha1(str(source_url or "").encode("utf-8")).hexdigest()[:8]
+
+
 def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
     movie_id = int(row["id"])
     has_metadata_poster = bool(str(row.get("poster_url") or "").strip())
     has_thumb = bool(str(row.get("thumb") or "").strip())
     has_backdrop = bool(str(row.get("backdrop_url") or "").strip())
     poster_url = (
-        f"/api/movies/{movie_id}/poster"
+        f"/api/movies/{movie_id}/poster?v={_artwork_token(row.get('poster_url'))}"
         if has_metadata_poster
         else f"/api/videos/{row['video_id']}/poster"
         if has_thumb
         else None
     )
-    backdrop_url = f"/api/movies/{movie_id}/backdrop" if has_backdrop else None
+    backdrop_url = (
+        f"/api/movies/{movie_id}/backdrop?v={_artwork_token(row.get('backdrop_url'))}"
+        if has_backdrop
+        else None
+    )
     # JavBus cover_url is the primary landscape wall image. The tiny
     # thumb_url remains separately available as backdrop_url and is used
     # only as the blurred detail-page background.
@@ -1151,6 +1236,51 @@ def _image_media_type(content_type: str, content: bytes) -> str | None:
     return None
 
 
+def _requested_image_width(value: Any) -> int | None:
+    """Snap a client-requested pixel width onto one of the cached sizes.
+
+    The wall, the detail page and the phone's own density all ask for slightly
+    different numbers. Snapping them onto a small ladder keeps the persistent
+    cache dense - a thousand arbitrary widths would thrash it.
+    """
+    try:
+        width = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if width <= 0:
+        return None
+    for candidate in MOVIE_IMAGE_WIDTHS:
+        if width <= candidate:
+            return candidate
+    return MOVIE_IMAGE_WIDTHS[-1]
+
+
+def _resize_image_bytes(content: bytes, width: int) -> bytes | None:
+    """Downscale a cover to ``width`` and re-encode it as WebP.
+
+    Returns ``None`` when the source is already small enough or cannot be
+    decoded, in which case the caller serves the original bytes untouched.
+    """
+    if Image is None:
+        return None
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            image.load()
+            if image.width <= width * 1.1:
+                return None
+            height = max(1, round(image.height * width / image.width))
+            resized = image.resize((width, height), Image.Resampling.LANCZOS)
+            if resized.mode not in ("RGB", "RGBA"):
+                resized = resized.convert("RGB")
+            buffer = io.BytesIO()
+            resized.save(buffer, format="WEBP", quality=82, method=4)
+            encoded = buffer.getvalue()
+            return encoded or None
+    except Exception as exc:
+        logger.info("Movie image resize failed: %s", exc)
+        return None
+
+
 def _movie_image_cache_key(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
@@ -1237,7 +1367,12 @@ def _movie_image_response(
     if_none_match: str | None = None,
 ) -> Response:
     headers = {
-        "Cache-Control": f"private, max-age={MOVIE_IMAGE_CACHE_SECONDS}",
+        # Public on purpose: every image URL carries the ``?v=`` fingerprint of
+        # the upstream artwork, so a shared cache (the Cloudflare edge in front
+        # of this host) can hold the bytes without ever risking a stale cover.
+        # Without it the edge refuses to store anything and every phone on the
+        # planet re-downloads the same poster from the origin.
+        "Cache-Control": f"public, max-age={MOVIE_IMAGE_CACHE_SECONDS}, immutable",
         "ETag": f'"{etag}"',
         "X-Content-Type-Options": "nosniff",
         "X-Movie-Image-Cache": cache_status,
@@ -1253,7 +1388,11 @@ def _movie_image_response(
     )
 
 
-async def _proxy_movie_image(source_url: Any, if_none_match: str | None = None) -> Response:
+async def _proxy_movie_image(
+    source_url: Any,
+    if_none_match: str | None = None,
+    width: int | None = None,
+) -> Response:
     url = str(source_url or "").strip()
     try:
         parsed = urlsplit(url)
@@ -1262,10 +1401,14 @@ async def _proxy_movie_image(source_url: Any, if_none_match: str | None = None) 
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=404, detail="Movie image not found")
 
+    # A scaled copy is a different object, so it gets its own cache entry: the
+    # wall asking for a 480px strip must not evict the full-size cover that the
+    # detail page wants.
+    cache_key = f"{url}#w{width}" if width else url
     with movie_image_cache_guard:
-        lock = movie_image_cache_locks.setdefault(url, asyncio.Lock())
+        lock = movie_image_cache_locks.setdefault(cache_key, asyncio.Lock())
     async with lock:
-        cached = await asyncio.to_thread(_read_movie_image_cache, url)
+        cached = await asyncio.to_thread(_read_movie_image_cache, cache_key)
         if cached:
             content, media_type, etag = cached
             return _movie_image_response(
@@ -1276,8 +1419,39 @@ async def _proxy_movie_image(source_url: Any, if_none_match: str | None = None) 
                 if_none_match=if_none_match,
             )
 
+        if width:
+            # Every width is cut from the full-size copy, which the first
+            # request already paid for. Without this the detail page opened a
+            # second stream to an artwork host that drops a fair share of them,
+            # and the cover that the wall showed a moment earlier would not
+            # load at all.
+            original = await asyncio.to_thread(_read_movie_image_cache, url)
+            if original:
+                derived = await asyncio.to_thread(
+                    _resize_image_bytes, original[0], width
+                )
+                if derived is not None:
+                    derived_etag = hashlib.sha256(derived).hexdigest()
+                    await asyncio.to_thread(
+                        _write_movie_image_cache,
+                        cache_key,
+                        derived,
+                        "image/webp",
+                        derived_etag,
+                    )
+                    return _movie_image_response(
+                        derived,
+                        "image/webp",
+                        derived_etag,
+                        cache_status="derived",
+                        if_none_match=if_none_match,
+                    )
+
         client = movie_image_client
         owns_client = client is None
+        # Kept so a scaled request can leave the untouched original behind for
+        # every other width, instead of fetching the same picture twice.
+        original_copy: tuple[bytes, str] | None = None
         if client is None:
             client = httpx.AsyncClient(
                 follow_redirects=True,
@@ -1334,6 +1508,14 @@ async def _proxy_movie_image(source_url: Any, if_none_match: str | None = None) 
                     )
                     if not media_type:
                         raise HTTPException(status_code=502, detail="Movie image upstream returned non-image data")
+                    if width:
+                        resized = await asyncio.to_thread(
+                            _resize_image_bytes, content, width
+                        )
+                        if resized is not None:
+                            original_copy = (content, media_type)
+                            content = resized
+                            media_type = "image/webp"
             except HTTPException:
                 raise
             except httpx.HTTPError as exc:
@@ -1344,7 +1526,17 @@ async def _proxy_movie_image(source_url: Any, if_none_match: str | None = None) 
                 await client.aclose()
 
         etag = hashlib.sha256(content).hexdigest()
-        await asyncio.to_thread(_write_movie_image_cache, url, content, media_type, etag)
+        await asyncio.to_thread(
+            _write_movie_image_cache, cache_key, content, media_type, etag
+        )
+        if original_copy is not None:
+            await asyncio.to_thread(
+                _write_movie_image_cache,
+                url,
+                original_copy[0],
+                original_copy[1],
+                hashlib.sha256(original_copy[0]).hexdigest(),
+            )
         return _movie_image_response(
             content,
             media_type,
@@ -1703,11 +1895,16 @@ async def prewarm_play_urls(videos: list[dict[str, Any]], *, limit: int = 6) -> 
     await asyncio.gather(*(warm(video) for video in videos[:limit]))
 
 
-async def prewarm_movie_image(source_url: str | None) -> None:
+async def prewarm_movie_image_at_width(source_url: str | None, width: int) -> None:
+    """Resolve one artwork URL into the persistent cache at ``width``.
+
+    The client appends ``?w=`` to every cover it renders, so a warm-up at the
+    full size would fill a cache entry nobody ever reads.
+    """
     if not source_url:
         return
     try:
-        await _proxy_movie_image(source_url)
+        await _proxy_movie_image(source_url, width=width)
     except Exception as exc:
         logger.warning("Movie image prewarm failed for %s: %s", source_url, exc)
 
@@ -1718,10 +1915,12 @@ async def prewarm_movie_wall_images(rows: list[dict[str, Any]], *, limit: int = 
 
     async def warm(row: dict[str, Any]) -> None:
         async with semaphore:
-            await prewarm_movie_image(
-                # The wall renders the landscape cover, so warming the
-                # backdrop first only wasted a download slot.
-                row.get("poster_url") or row.get("thumb") or row.get("backdrop_url")
+            # The wall renders the landscape cover, so warming the backdrop
+            # first only wasted a download slot. The width has to match what the
+            # client asks for, otherwise the warm-up fills an entry it never reads.
+            await prewarm_movie_image_at_width(
+                row.get("poster_url") or row.get("thumb") or row.get("backdrop_url"),
+                MOVIE_WALL_IMAGE_WIDTH,
             )
 
     await asyncio.gather(*(warm(row) for row in rows[:limit]))
@@ -1733,7 +1932,7 @@ async def prewarm_drama_posters(rows: list[dict[str, Any]], *, limit: int = 6) -
 
     async def warm(row: dict[str, Any]) -> None:
         async with semaphore:
-            await prewarm_movie_image(row.get("poster_url"))
+            await prewarm_movie_image_at_width(row.get("poster_url"), MOVIE_WALL_IMAGE_WIDTH)
 
     await asyncio.gather(*(warm(row) for row in rows[:limit]))
 
@@ -2078,7 +2277,12 @@ async def movie_detail(movie_id: int) -> dict[str, Any]:
     return public_movie(row, detail=True)
 
 
-async def _movie_image(movie_id: int, field: str, request: Request) -> Response:
+async def _movie_image(
+    movie_id: int,
+    field: str,
+    request: Request,
+    width: int | None = None,
+) -> Response:
     row = await asyncio.to_thread(
         database.get_movie,
         movie_id,
@@ -2091,17 +2295,27 @@ async def _movie_image(movie_id: int, field: str, request: Request) -> Response:
         source_url = row.get("thumb")
     if not source_url:
         raise HTTPException(status_code=404, detail="Movie image not found")
-    return await _proxy_movie_image(source_url, request.headers.get("if-none-match"))
+    return await _proxy_movie_image(
+        source_url, request.headers.get("if-none-match"), width
+    )
 
 
 @app.get("/api/movies/{movie_id}/poster")
-async def movie_poster(movie_id: int, request: Request) -> Response:
-    return await _movie_image(movie_id, "poster_url", request)
+async def movie_poster(
+    movie_id: int,
+    request: Request,
+    w: str | None = Query(default=None, max_length=8),
+) -> Response:
+    return await _movie_image(movie_id, "poster_url", request, _requested_image_width(w))
 
 
 @app.get("/api/movies/{movie_id}/backdrop")
-async def movie_backdrop(movie_id: int, request: Request) -> Response:
-    return await _movie_image(movie_id, "backdrop_url", request)
+async def movie_backdrop(
+    movie_id: int,
+    request: Request,
+    w: str | None = Query(default=None, max_length=8),
+) -> Response:
+    return await _movie_image(movie_id, "backdrop_url", request, _requested_image_width(w))
 
 
 @app.get("/api/dramas")
@@ -2170,7 +2384,11 @@ async def drama_detail(drama_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/dramas/{drama_id}/poster")
-async def drama_poster(drama_id: str, request: Request) -> Response:
+async def drama_poster(
+    drama_id: str,
+    request: Request,
+    w: str | None = Query(default=None, max_length=8),
+) -> Response:
     row = await asyncio.to_thread(
         database.get_drama,
         drama_id,
@@ -2179,7 +2397,9 @@ async def drama_poster(drama_id: str, request: Request) -> Response:
     if not row or not str(row.get("poster_url") or "").strip():
         raise HTTPException(status_code=404, detail="Drama poster not found")
     return await _proxy_movie_image(
-        row["poster_url"], request.headers.get("if-none-match")
+        row["poster_url"],
+        request.headers.get("if-none-match"),
+        _requested_image_width(w),
     )
 
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import os
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httpx
@@ -14,8 +18,29 @@ logger = logging.getLogger("short-video")
 # One index fetch covers a whole scrape run. The remote side walks its sidecar
 # tree on every /index call, so keep the page size large and the TTL generous.
 INDEX_TTL_SECONDS = 600.0
+# After a failed refresh the cached copy stays usable; wait this long before
+# trying the network again so one outage cannot turn a scan into a retry storm.
+INDEX_RETRY_SECONDS = 60.0
 INDEX_PAGE_SIZE = 1000
-INDEX_MAX_PAGES = 20
+# The published catalogue is past 27k records and keeps growing. The page cap
+# only guards against a runaway pagination loop; the old value of 20 silently
+# truncated the catalogue at 20k records and left every title past that point
+# without a cover no matter how often the library was rescanned.
+INDEX_MAX_PAGES = 80
+INDEX_CACHE_FILENAME = "shared-metadata-index.json"
+# Only the fields the lookup tables actually read survive the trim. The full
+# record set is 27k+ entries and the container is capped at 256 MB, so carrying
+# the unused Emby fields would cost megabytes for nothing.
+INDEX_ENTRY_KEYS = (
+    "code",
+    "folder_name",
+    "title",
+    "year",
+    "poster_url",
+    "nfo_url",
+    "source",
+    "poster_source",
+)
 
 _CODE = re.compile(r"([A-Za-z]{2,12})[-_ ]?(\d{2,6})(?!\d)")
 _BRACKETED = re.compile(r"[\[\(（【][^\]\)）】]*[\]\)）】]")
@@ -155,6 +180,7 @@ class SharedMetadataClient:
         token: str = "",
         client: httpx.AsyncClient | None = None,
         index_ttl: float = INDEX_TTL_SECONDS,
+        cache_path: Path | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         headers = {"Accept": "application/json", "User-Agent": "deepfuck-movie-library/1"}
@@ -162,6 +188,10 @@ class SharedMetadataClient:
             headers["X-Media-Shared-Token"] = token
         self._headers = headers
         self._index_ttl = index_ttl
+        # The catalogue takes ~30 s to walk over the wire, so the folded copy is
+        # mirrored to disk: a container restart, a redeploy or a second scan
+        # process then starts from the file instead of refetching 28 pages.
+        self._cache_path = cache_path
         self._index: SharedMetadataIndex | None = None
         self._index_at = 0.0
         self._client = client or httpx.AsyncClient(
@@ -190,12 +220,51 @@ class SharedMetadataClient:
         if self._owns_client:
             await self._client.aclose()
 
+    @asynccontextmanager
+    async def borrow(self):
+        """Lend this client out without closing it when the caller is done.
+
+        The folded catalogue is process-wide: closing the client at the end of
+        a scrape threw away a 27k-entry index that the next run had to rebuild.
+        """
+        yield self
+
     async def index(self) -> SharedMetadataIndex:
         """Return the folded-key index, refreshed at most every ``index_ttl``."""
-        if self._index is not None and time.monotonic() - self._index_at < self._index_ttl:
+        if self._is_fresh():
+            return self._index  # type: ignore[return-value]
+        if self._index is None:
+            restored = await asyncio.to_thread(self._read_cache_file)
+            if restored is not None:
+                self._index, self._index_at = restored
+                if self._is_fresh():
+                    logger.info("Shared metadata index restored from %s", self._cache_path)
+                    return self._index
+        try:
+            entries = await self._fetch_entries()
+        except Exception:
+            if self._index is None:
+                raise
+            # A stale index still matches covers; back off instead of hammering
+            # the service once per media file for the rest of the scan.
+            logger.warning("Shared metadata index refresh failed, reusing the cached copy")
+            self._index_at = time.monotonic() - self._index_ttl + INDEX_RETRY_SECONDS
             return self._index
+        index = self._build_index(entries)
+        if index.names or index.codes:
+            self._index = index
+            self._index_at = time.monotonic()
+            await asyncio.to_thread(self._write_cache_file, entries)
+        return index
+
+    def _is_fresh(self) -> bool:
+        return self._index is not None and time.monotonic() - self._index_at < self._index_ttl
+
+    async def _fetch_entries(self) -> list[dict[str, Any]]:
+        """Walk every page the service publishes, not just the first N thousand."""
         entries: list[dict[str, Any]] = []
         start = 0
+        total: int | None = None
         for _ in range(INDEX_MAX_PAGES):
             response = await self._client.get(
                 "/index", params={"start": start, "limit": INDEX_PAGE_SIZE}
@@ -205,16 +274,70 @@ class SharedMetadataClient:
             items = payload.get("items") if isinstance(payload, dict) else None
             if not isinstance(items, list):
                 break
-            entries.extend(item for item in items if isinstance(item, dict))
-            total = payload.get("total")
+            entries.extend(
+                self._trim_entry(item) for item in items if isinstance(item, dict)
+            )
             start += INDEX_PAGE_SIZE
-            if not items or not isinstance(total, int) or start >= total:
+            if isinstance(payload.get("total"), int):
+                total = int(payload["total"])
+            if not items or (total is not None and start >= total):
                 break
-        index = self._build_index(entries)
-        if index.names or index.codes:
-            self._index = index
-            self._index_at = time.monotonic()
-        return index
+        if total is not None and len(entries) < total:
+            logger.warning(
+                "Shared metadata index stopped at %s of %s records", len(entries), total
+            )
+        return entries
+
+    @staticmethod
+    def _trim_entry(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: item[key]
+            for key in INDEX_ENTRY_KEYS
+            if item.get(key) not in (None, "")
+        }
+
+    def _read_cache_file(self) -> tuple[SharedMetadataIndex, float] | None:
+        if self._cache_path is None:
+            return None
+        try:
+            payload = json.loads(self._cache_path.read_text(encoding="utf-8"))
+            fetched_at = float(payload["fetchedAt"])
+            items = payload["items"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if not isinstance(items, list):
+            return None
+        entries = [item for item in items if isinstance(item, dict) and item]
+        if not entries:
+            return None
+        age = max(0.0, time.time() - fetched_at)
+        return self._build_index(entries), time.monotonic() - age
+
+    def _write_cache_file(self, entries: list[dict[str, Any]]) -> None:
+        if self._cache_path is None:
+            return
+        temporary: Path | None = None
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            suffix = f".{os.getpid()}.{time.time_ns()}.tmp"
+            temporary = self._cache_path.with_name(self._cache_path.name + suffix)
+            temporary.write_text(
+                json.dumps(
+                    {"fetchedAt": time.time(), "items": entries},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            os.replace(temporary, self._cache_path)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.info("Shared metadata index cache write failed: %s", exc)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     @staticmethod
     def _build_index(entries: list[dict[str, Any]]) -> SharedMetadataIndex:

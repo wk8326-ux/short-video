@@ -2,6 +2,7 @@
 
 import importlib
 import sys
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -33,6 +34,11 @@ class _FakeSharedClient:
         self.base_url = base_url
         self.token = token
 
+    @asynccontextmanager
+    async def borrow(self):
+        """The real client is process-wide, so a scan borrows it untouched."""
+        yield self
+
     async def lookup(self, name: str, path: str = "") -> SharedMetadataMatch | None:
         type(self).lookups.append((name, path))
         if "CEMD-822" in name:
@@ -41,6 +47,14 @@ class _FakeSharedClient:
 
     async def close(self) -> None:
         type(self).closed = True
+
+
+def _use_fake_client(main, monkeypatch, client=_FakeSharedClient):
+    """Point the process-wide catalogue client at a fake for one test."""
+    _FakeSharedClient.lookups = []
+    _FakeSharedClient.closed = False
+    monkeypatch.setattr(main, "SharedMetadataClient", client)
+    monkeypatch.setattr(main, "shared_metadata_client", None)
 
 
 def _import_main(monkeypatch, tmp_path):
@@ -61,9 +75,7 @@ def _import_main(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_shared_metadata_is_used_without_any_local_scraper(monkeypatch, tmp_path):
     main = _import_main(monkeypatch, tmp_path)
-    _FakeSharedClient.lookups = []
-    _FakeSharedClient.closed = False
-    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
+    _use_fake_client(main, monkeypatch)
 
     main.database.initialize()
     main.database.replace_scan(
@@ -82,7 +94,9 @@ async def test_shared_metadata_is_used_without_any_local_scraper(monkeypatch, tm
 
     assert main.movie_metadata_state["lastError"] is None
     assert main.movie_metadata_state["matched"] == 1
-    assert _FakeSharedClient.closed is True
+    # The catalogue client outlives a single scan on purpose: rebuilding it per
+    # scan is what made every library re-download the whole 27k-entry index.
+    assert _FakeSharedClient.closed is False
     # The containing folder is what the shared index is keyed by.
     assert _FakeSharedClient.lookups == [
         (
@@ -104,7 +118,7 @@ async def test_shared_metadata_is_used_without_any_local_scraper(monkeypatch, tm
 
     payload = main.public_movie(movie, detail=True)
     assert payload["metadataProvider"] == "shared"
-    assert payload["posterUrl"] == f"/api/movies/{movie['id']}/poster"
+    assert payload["posterUrl"].startswith(f"/api/movies/{movie['id']}/poster?v=")
 
 
 @pytest.mark.asyncio
@@ -112,8 +126,7 @@ async def test_unmatched_titles_stay_pending_when_the_shared_index_misses(
     monkeypatch, tmp_path
 ):
     main = _import_main(monkeypatch, tmp_path)
-    _FakeSharedClient.lookups = []
-    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
+    _use_fake_client(main, monkeypatch)
 
     main.database.initialize()
     main.database.replace_scan(
@@ -172,12 +185,17 @@ def _seed_one_movie(main, path: str, name: str) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_a_miss_never_discards_metadata_an_earlier_run_found(
+async def test_a_forced_pass_retires_artwork_from_a_scraper_this_app_deleted(
     monkeypatch, tmp_path
 ):
-    """Re-running the pass must not blank covers that are already on the wall."""
+    """Only the shared catalogue can claim a row now, so its misses are final.
+
+    Cover art stamped by a scraper this app no longer runs is not curation: the
+    picture may belong to a release the catalogue has just ruled out, and a
+    forced pass exists precisely to settle that.
+    """
     main = _import_main(monkeypatch, tmp_path)
-    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
+    _use_fake_client(main, monkeypatch)
     movie = _seed_one_movie(
         main,
         "/media/关键词分类/20260901/ABP-485/hhd800.com@ABP-485.mp4",
@@ -194,9 +212,9 @@ async def test_a_miss_never_discards_metadata_an_earlier_run_found(
     await main.scrape_movie_metadata("movies", force=True)
 
     stored = main.database.movies(sources=("movies",), limit=10)[0]
-    assert stored["poster_url"] == "https://c0.jdbstatic.com/covers/ab/abp485.jpg"
-    assert stored["display_title"] == "ABP-485 既有标题"
-    assert stored["match_status"] == "matched"
+    assert not stored["poster_url"]
+    assert stored["metadata_provider"] is None
+    assert stored["match_status"] == "unmatched"
 
 
 @pytest.mark.asyncio
@@ -205,7 +223,7 @@ async def test_a_forced_pass_clears_a_cover_the_shared_index_no_longer_claims(
 ):
     """Forced re-matching is authoritative for rows the shared index curated."""
     main = _import_main(monkeypatch, tmp_path)
-    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
+    _use_fake_client(main, monkeypatch)
     movie = _seed_one_movie(
         main,
         "/media/关键词分类/绝顶FUCK/KCPN-054.mp4",
@@ -235,7 +253,7 @@ async def test_a_forced_pass_clears_a_cover_the_shared_index_no_longer_claims(
 async def test_an_incremental_pass_keeps_existing_shared_metadata(monkeypatch, tmp_path):
     """Only a forced pass may drop metadata; a routine pass still never wipes."""
     main = _import_main(monkeypatch, tmp_path)
-    monkeypatch.setattr(main, "SharedMetadataClient", _FakeSharedClient)
+    _use_fake_client(main, monkeypatch)
     movie = _seed_one_movie(
         main,
         "/media/关键词分类/绝顶FUCK/KCPN-054.mp4",
@@ -285,7 +303,7 @@ async def test_a_matched_row_drops_the_artwork_borrowed_from_another_release(
     the stored value was reused. A neighbour's artwork has to go.
     """
     main = _import_main(monkeypatch, tmp_path)
-    monkeypatch.setattr(main, "SharedMetadataClient", _ArtworklessSharedClient)
+    _use_fake_client(main, monkeypatch, _ArtworklessSharedClient)
     movie = _seed_one_movie(
         main,
         "/media/关键词分类/绝顶FUCK/KCPN-054.mp4",
@@ -321,7 +339,7 @@ async def test_a_shared_match_overwrites_artwork_from_an_older_provider(
     picture the current provider never confirmed.
     """
     main = _import_main(monkeypatch, tmp_path)
-    monkeypatch.setattr(main, "SharedMetadataClient", _ArtworklessSharedClient)
+    _use_fake_client(main, monkeypatch, _ArtworklessSharedClient)
     movie = _seed_one_movie(
         main, "/media/movies/公元2000.2000.mkv", "公元2000.2000.mkv"
     )
@@ -340,3 +358,82 @@ async def test_a_shared_match_overwrites_artwork_from_an_older_provider(
     assert stored["metadata_provider"] == "shared"
     assert not stored["poster_url"]
     assert not stored["backdrop_url"]
+
+
+@pytest.mark.asyncio
+async def test_a_normal_pass_re_checks_what_a_retired_provider_stored(
+    monkeypatch, tmp_path
+):
+    """Scanning again is what the user does after the index changes.
+
+    A row stamped with a provider this app no longer runs carries artwork the
+    catalogue may now describe better, so a normal pass has to look at it again
+    and, when the catalogue has nothing, drop a cover that has already been
+    ruled out instead of leaving it in the library forever.
+    """
+    main = _import_main(monkeypatch, tmp_path)
+    _use_fake_client(main, monkeypatch)
+
+    main.database.initialize()
+    main.database.replace_scan(
+        [
+            {
+                "path": "/media/JULIA BEST SELECTION 4 Hours/DVD #1.wmv",
+                "name": "DVD #1.wmv",
+                "size": 1024,
+            },
+        ],
+        source="movies",
+    )
+    main.database.sync_movie_index("movies", parse_movie_filename)
+    movie = main.database.movies(sources=("movies",), limit=10)[0]
+    main.database.update_movie_metadata(
+        int(movie["id"]),
+        display_title="DVD",
+        poster_url="https://image.tmdb.org/t/p/w780/fh9VqUOIsgdbWnZ1vW4s5MkpnTa.jpg",
+        metadata_provider="tmdb",
+        match_status="matched",
+    )
+
+    await main.scrape_movie_metadata("movies")
+
+    assert _FakeSharedClient.lookups, "the retired provider's row was never re-checked"
+    stored = main.database.movies(sources=("movies",), limit=10)[0]
+    assert not stored["poster_url"]
+    assert stored["metadata_provider"] is None
+    assert stored["match_status"] == "unmatched"
+
+
+@pytest.mark.asyncio
+async def test_a_normal_pass_skips_rows_the_catalogue_already_resolved(
+    monkeypatch, tmp_path
+):
+    """The index does not change often, so a rescan must stay cheap.
+
+    Only unresolved rows and rows left by a retired provider are re-read; a row
+    the catalogue already answered keeps both its cover and its place in the wall.
+    """
+    main = _import_main(monkeypatch, tmp_path)
+    _use_fake_client(main, monkeypatch)
+
+    main.database.initialize()
+    main.database.replace_scan(
+        [{"path": "/media/CEMD-822/CEMD-822.mp4", "name": "CEMD-822.mp4", "size": 1024}],
+        source="movies",
+    )
+    main.database.sync_movie_index("movies", parse_movie_filename)
+    movie = main.database.movies(sources=("movies",), limit=10)[0]
+    main.database.update_movie_metadata(
+        int(movie["id"]),
+        display_title="CEMD-822 共享标题",
+        poster_url="https://c0.jdbstatic.com/covers/ve/veyGnb.jpg",
+        metadata_provider="shared",
+        match_status="matched",
+    )
+
+    await main.scrape_movie_metadata("movies")
+
+    assert _FakeSharedClient.lookups == []
+    stored = main.database.movies(sources=("movies",), limit=10)[0]
+    assert stored["poster_url"] == "https://c0.jdbstatic.com/covers/ve/veyGnb.jpg"
+    assert stored["match_status"] == "matched"

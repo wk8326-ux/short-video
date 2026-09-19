@@ -1347,7 +1347,18 @@ class LibraryDatabase:
     ) -> list[dict[str, Any]]:
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "m.source IN")
-        status_clause = "" if force else "AND m.match_status IN ('pending', 'ambiguous', 'unmatched')"
+        # A normal pass re-reads everything the catalogue has not resolved yet,
+        # plus every row a retired scraper filled in. Those rows carry artwork
+        # the catalogue may now describe better, and leaving them out of the
+        # pass is what let a stale provider's cover sit in a library forever.
+        status_clause = (
+            ""
+            if force
+            else (
+                "AND (m.match_status IN ('pending', 'ambiguous', 'unmatched')"
+                " OR (m.metadata_provider IS NOT NULL AND m.metadata_provider <> 'shared'))"
+            )
+        )
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 f"""
