@@ -50,7 +50,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.20"
+APP_VERSION = "1.6.0-beta.21"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -2414,14 +2414,91 @@ async def movie_backdrop(
     return await _movie_image(movie_id, "backdrop_url", request, _requested_image_width(w))
 
 
+def _drama_group_payload(
+    category: str,
+    rows: list[dict[str, Any]],
+    *,
+    total: int,
+    offset: int,
+) -> dict[str, Any]:
+    loaded = offset + len(rows)
+    return {
+        "groupId": category,
+        "name": category,
+        "items": [public_drama(row) for row in rows],
+        "total": total,
+        "nextOffset": loaded if loaded < total else None,
+    }
+
+
+@app.get("/api/dramas/groups")
+async def drama_groups(
+    q: str = Query(default="", max_length=100),
+    perGroup: int = Query(default=6, ge=1, le=24),
+) -> dict[str, Any]:
+    """Group the drama wall by the downloader's first-level folders.
+
+    The short-drama source is one library of four categories ("短剧", "漫剧",
+    …), so the wall mirrors those folders the way the movie wall mirrors the
+    media sources. Counting first keeps a category without an indexed series
+    out of the wall instead of rendering an empty section.
+    """
+    sources = source_registry.ids("drama")
+    search = q.strip()
+    counts = await asyncio.to_thread(
+        database.drama_category_counts,
+        search=search,
+        sources=sources,
+    )
+    ordered = [category for category, total in counts.items() if total > 0]
+    pages = await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                database.dramas,
+                search=search,
+                limit=perGroup,
+                offset=0,
+                sources=sources,
+                category=category,
+            )
+            for category in ordered
+        )
+    )
+    groups = [
+        _drama_group_payload(category, rows, total=counts[category], offset=0)
+        for category, rows in zip(ordered, pages)
+    ]
+    if groups:
+        # Only the first two sections can be on screen before the user scrolls.
+        spawn_background(
+            prewarm_drama_posters(
+                [row for group_rows in pages[:2] for row in group_rows],
+                limit=perGroup * 2,
+            ),
+            name="prewarm-drama-wall-groups",
+        )
+    return {
+        "groups": groups,
+        "total": sum(counts.get(category, 0) for category in ordered),
+        "scan": {
+            "running": any(
+                scan_state["sources"].get(source, {}).get("running")
+                for source in sources
+            )
+        },
+    }
+
+
 @app.get("/api/dramas")
 async def dramas(
     q: str = Query(default="", max_length=100),
     limit: int = Query(default=24, ge=1, le=60),
     offset: int = Query(default=0, ge=0),
+    category: str = Query(default="", max_length=100),
 ) -> dict[str, Any]:
     sources = source_registry.ids("drama")
     search = q.strip()
+    scope = category.strip()
     rows, total = await asyncio.gather(
         asyncio.to_thread(
             database.dramas,
@@ -2429,8 +2506,14 @@ async def dramas(
             limit=limit,
             offset=offset,
             sources=sources,
+            category=scope,
         ),
-        asyncio.to_thread(database.drama_count, search=search, sources=sources),
+        asyncio.to_thread(
+            database.drama_count,
+            search=search,
+            sources=sources,
+            category=scope,
+        ),
     )
     if offset == 0 and rows:
         spawn_background(
@@ -2448,6 +2531,23 @@ async def dramas(
             )
         },
     }
+
+
+def next_drama_episode_id(drama_id: str, video_id: int) -> int | None:
+    """The episode after ``video_id`` in playback order, or None at the finale.
+
+    Ordering has to happen here rather than in SQL because episode numbers live
+    in the file names ("第9集" sorts before "第10集" as text); the read paths
+    already agree on :func:`episode_order_key`, so the strip uses it too.
+    """
+    episodes = database.drama_episodes(drama_id)
+    episodes.sort(key=lambda item: episode_order_key(str(item.get("name") or "")))
+    for index, episode in enumerate(episodes):
+        if int(episode["video_id"]) != video_id:
+            continue
+        following = episodes[index + 1] if index + 1 < len(episodes) else None
+        return int(following["video_id"]) if following else None
+    return None
 
 
 @app.get("/api/dramas/recent")
@@ -2469,8 +2569,21 @@ async def recent_dramas(
     for row in rows:
         item = public_drama(row)
         resume_video_id = row.get("resume_video_id")
-        item["episodeId"] = int(resume_video_id) if resume_video_id else None
-        item["resumePositionMs"] = int(row.get("resume_position_ms") or 0)
+        episode_id = int(resume_video_id) if resume_video_id else None
+        position = int(row.get("resume_position_ms") or 0)
+        if episode_id is not None and row.get("resume_completed"):
+            # The episode was watched through, so the interesting place to
+            # carry on from is the next one; the finale has nowhere to go and
+            # replays from the top instead of resuming on the end credits.
+            following = await asyncio.to_thread(
+                next_drama_episode_id,
+                str(row.get("id") or ""),
+                episode_id,
+            )
+            episode_id = following if following is not None else episode_id
+            position = 0
+        item["episodeId"] = episode_id
+        item["resumePositionMs"] = position
         item["watchedAt"] = row.get("watched_at")
         items.append(item)
     if rows:

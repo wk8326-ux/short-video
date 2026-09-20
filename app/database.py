@@ -17,6 +17,13 @@ from typing import Any
 # is skipped for good so one bad directory can never stall an entire library.
 SCAN_STEP_MAX_ATTEMPTS = 3
 
+# A series' category is the first folder under the scan root ("短剧", "漫剧",
+# "真人剧", …). Rows indexed before the column existed, or folders the
+# downloader dropped straight under the root, have no category: they read as
+# the short-drama label so the wall never shows an unnamed section. The client
+# groups by name, so the label has to be the same wherever a listing is built.
+DRAMA_CATEGORY_EXPR = "COALESCE(NULLIF(TRIM(d.category), ''), '短剧')"
+
 
 def normalize_root_paths(value: Any, *, fallback: str = "/") -> list[str]:
     """Coerce every shape a root list arrives in into clean, unique paths.
@@ -1208,20 +1215,13 @@ class LibraryDatabase:
         limit: int = 24,
         offset: int = 0,
         sources: Sequence[str] = (),
+        category: str = "",
     ) -> list[dict[str, Any]]:
-        source_clause, source_params = self._sources_clause(sources)
-        source_clause = source_clause.replace("source IN", "d.source IN")
-        # A folder with no active episode is not a browsable series; it shows up
-        # as an empty poster and only makes the wall look broken.
-        conditions = ["d.episode_count > 0", source_clause]
-        params: list[Any] = list(source_params)
-        if search:
-            escaped = self._escape_like(search)
-            conditions.append(
-                "(d.title LIKE ? ESCAPE '\\' OR d.folder_title LIKE ? ESCAPE '\\'"
-                " OR d.code LIKE ? ESCAPE '\\')"
-            )
-            params.extend([f"%{escaped}%"] * 3)
+        conditions, params = self._drama_conditions(
+            search=search,
+            sources=sources,
+            category=category,
+        )
         cover_rank = "CASE WHEN LOWER(COALESCE(d.poster_url, '')) <> '' THEN 0 ELSE 1 END"
         params.extend([max(1, limit), max(0, offset)])
         with self._lock, self._connect() as connection:
@@ -1237,18 +1237,18 @@ class LibraryDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def drama_count(self, *, search: str = "", sources: Sequence[str] = ()) -> int:
-        source_clause, source_params = self._sources_clause(sources)
-        source_clause = source_clause.replace("source IN", "d.source IN")
-        conditions = ["d.episode_count > 0", source_clause]
-        params: list[Any] = list(source_params)
-        if search:
-            escaped = self._escape_like(search)
-            conditions.append(
-                "(d.title LIKE ? ESCAPE '\\' OR d.folder_title LIKE ? ESCAPE '\\'"
-                " OR d.code LIKE ? ESCAPE '\\')"
-            )
-            params.extend([f"%{escaped}%"] * 3)
+    def drama_count(
+        self,
+        *,
+        search: str = "",
+        sources: Sequence[str] = (),
+        category: str = "",
+    ) -> int:
+        conditions, params = self._drama_conditions(
+            search=search,
+            sources=sources,
+            category=category,
+        )
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 f"""
@@ -1258,6 +1258,61 @@ class LibraryDatabase:
                 params,
             ).fetchone()
         return int(row[0] or 0)
+
+    def drama_category_counts(
+        self,
+        *,
+        search: str = "",
+        sources: Sequence[str] = (),
+    ) -> dict[str, int]:
+        """Count the indexed series of every category in one query.
+
+        The wall is grouped by the downloader's first-level folder, so it needs
+        a per-category total before it can decide which sections to render.
+        Ordering here (biggest library first, then by name) is what the wall
+        shows, so the client never has to sort sections itself.
+        """
+        conditions, params = self._drama_conditions(search=search, sources=sources)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {DRAMA_CATEGORY_EXPR} AS category, COUNT(*) AS total
+                FROM dramas d
+                WHERE {' AND '.join(conditions)}
+                GROUP BY category
+                ORDER BY total DESC, category COLLATE NOCASE
+                """,
+                params,
+            ).fetchall()
+        return {str(row[0]): int(row[1] or 0) for row in rows}
+
+    def _drama_conditions(
+        self,
+        *,
+        search: str,
+        sources: Sequence[str],
+        category: str = "",
+    ) -> tuple[list[str], list[Any]]:
+        """Shared WHERE for every drama listing, so paging cannot drift.
+
+        A folder with no active episode is not a browsable series: it would show
+        up as an empty poster and only make the wall look broken.
+        """
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "d.source IN")
+        conditions = ["d.episode_count > 0", source_clause]
+        params: list[Any] = list(source_params)
+        if category:
+            conditions.append(f"{DRAMA_CATEGORY_EXPR} = ?")
+            params.append(category)
+        if search:
+            escaped = self._escape_like(search)
+            conditions.append(
+                "(d.title LIKE ? ESCAPE '\\' OR d.folder_title LIKE ? ESCAPE '\\'"
+                " OR d.code LIKE ? ESCAPE '\\')"
+            )
+            params.extend([f"%{escaped}%"] * 3)
+        return conditions, params
 
     def get_drama(self, drama_id: str, *, sources: Sequence[str] = ()) -> dict[str, Any] | None:
         source_clause, source_params = self._sources_clause(sources)
@@ -1566,12 +1621,17 @@ class LibraryDatabase:
         sources: Sequence[str] = (),
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """The series the user is part-way through, one row per series.
+        """The series the user watched most recently, one row per series.
 
         Every episode shares its series id, so only the most recent position of
         each series is interesting: it names both the series to show and the
-        episode to resume. A series whose latest episode was watched through
-        drops out, exactly like a finished film.
+        episode to resume. A finished episode does *not* drop the series the way
+        a finished film leaves ``recent_movies``: an episode of a short drama is
+        minutes long, so watching one through is how a viewer normally leaves a
+        show, and the strip is the row they come back to in order to carry on.
+        The caller advances a finished episode to the next one; all this query
+        has to report is which episode came last and whether it was seen
+        through.
         """
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "v.source IN")
@@ -1596,11 +1656,11 @@ class LibraryDatabase:
                 )
                 SELECT d.*, ranked.video_id AS resume_video_id,
                        ranked.resume_position_ms, ranked.watched_duration_ms,
+                       ranked.completed AS resume_completed,
                        ranked.watched_at
                 FROM ranked
                 JOIN dramas d ON d.id = ranked.series_id
-                WHERE ranked.recency = 1 AND ranked.completed = 0
-                  AND d.episode_count > 0
+                WHERE ranked.recency = 1 AND d.episode_count > 0
                 ORDER BY ranked.watched_at DESC, ranked.video_id DESC
                 LIMIT ?
                 """,

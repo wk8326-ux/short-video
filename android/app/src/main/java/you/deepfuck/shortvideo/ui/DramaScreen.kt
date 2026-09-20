@@ -5,6 +5,7 @@
 package you.deepfuck.shortvideo.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -23,8 +24,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -34,6 +37,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowForward
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.LiveTv
 import androidx.compose.material.icons.outlined.Refresh
@@ -74,6 +78,7 @@ import you.deepfuck.shortvideo.AppUiState
 import you.deepfuck.shortvideo.ListPosition
 import you.deepfuck.shortvideo.data.DramaDetail
 import you.deepfuck.shortvideo.data.DramaEpisode
+import you.deepfuck.shortvideo.data.DramaGroup
 import you.deepfuck.shortvideo.data.DramaItem
 import you.deepfuck.shortvideo.media.PlayerSnapshot
 import you.deepfuck.shortvideo.shouldLoadMore
@@ -89,6 +94,7 @@ internal fun DramaScreen(
     exoPlayer: ExoPlayer,
     imageLoader: ImageLoader,
     fullscreen: Boolean,
+    pipMode: Boolean,
     listPosition: ListPosition,
     onSelect: (DramaItem) -> Unit,
     onResume: (DramaItem) -> Unit,
@@ -96,13 +102,16 @@ internal fun DramaScreen(
     onResumeEpisode: (DramaItem, List<DramaEpisode>) -> DramaEpisode?,
     onPlayEpisode: (DramaItem, DramaEpisode) -> Unit,
     onStopPlayback: () -> Unit,
-    onLoadMore: () -> Unit,
+    onOpenGroup: (String) -> Unit,
+    onCloseGroup: () -> Unit,
+    onLoadMoreGroup: () -> Unit,
     onRetry: () -> Unit,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
+    onPip: () -> Unit,
     onListPosition: (ListPosition) -> Unit,
 ) {
     val detail = state.selectedDrama
@@ -122,6 +131,8 @@ internal fun DramaScreen(
             onSeek = onSeek,
             onSeekBy = onSeekBy,
             onFullscreen = onFullscreen,
+            pipMode = pipMode,
+            onPip = onPip,
             onBack = onStopPlayback,
             modifier = Modifier.fillMaxSize(),
         )
@@ -144,67 +155,73 @@ internal fun DramaScreen(
         return
     }
 
-    val safePosition = listPosition.clamp(state.dramaItems.size)
+    // The wall is a list of library sections, so position memory tracks section
+    // indexes rather than individual posters.
+    val safePosition = listPosition.clamp(state.dramaGroups.size)
     val initialListPosition = remember { listPosition }
-    val gridState = rememberLazyGridState(
+    val wallState = rememberLazyListState(
         initialFirstVisibleItemIndex = safePosition.index,
         initialFirstVisibleItemScrollOffset = safePosition.offset,
     )
     var listPositionRestored by remember { mutableStateOf(false) }
-    LaunchedEffect(state.dramaItems.size) {
-        if (!listPositionRestored && state.dramaItems.isNotEmpty()) {
-            val restored = initialListPosition.clamp(state.dramaItems.size)
-            gridState.scrollToItem(restored.index, restored.offset)
+    LaunchedEffect(state.dramaGroups.size) {
+        if (!listPositionRestored && state.dramaGroups.isNotEmpty()) {
+            val restored = initialListPosition.clamp(state.dramaGroups.size)
+            wallState.scrollToItem(restored.index, restored.offset)
             listPositionRestored = true
         }
     }
 
-    TrackDramaGrid(
-        gridState = gridState,
-        itemCount = state.dramaItems.size,
-        loading = state.dramaLoading,
-        hasMore = state.dramaNextOffset != null,
+    TrackDramaWall(
+        listState = wallState,
+        itemCount = state.dramaGroups.size,
         enabled = listPositionRestored,
-        onLoadMore = onLoadMore,
         onListPosition = onListPosition,
     )
+
+    if (state.openDramaGroupId != null) {
+        DramaLibraryPage(
+            name = state.openDramaGroupName,
+            items = state.openDramaGroupItems,
+            total = state.openDramaGroupTotal,
+            loading = state.openDramaGroupLoading,
+            error = state.openDramaGroupError,
+            imageLoader = imageLoader,
+            onBack = onCloseGroup,
+            onSelect = onSelect,
+            onLoadMore = onLoadMoreGroup,
+        )
+        return
+    }
+
     DramaWall(
         state = state,
         imageLoader = imageLoader,
-        gridState = gridState,
+        wallState = wallState,
         onSelect = onSelect,
         onResume = onResume,
+        onOpenGroup = onOpenGroup,
         onRetry = onRetry,
     )
 }
 
+/** Remembers which library section the user scrolled away from. */
 @Composable
-private fun TrackDramaGrid(
-    gridState: LazyGridState,
+private fun TrackDramaWall(
+    listState: LazyListState,
     itemCount: Int,
-    loading: Boolean,
-    hasMore: Boolean,
     enabled: Boolean,
-    onLoadMore: () -> Unit,
     onListPosition: (ListPosition) -> Unit,
 ) {
-    LaunchedEffect(gridState, itemCount, enabled) {
+    LaunchedEffect(listState, itemCount, enabled) {
         if (!enabled || itemCount <= 0) return@LaunchedEffect
         snapshotFlow {
-            ListPosition(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset)
+            ListPosition(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
         }
             .distinctUntilChanged()
             .collectLatest { position ->
                 delay(180)
                 onListPosition(position)
-            }
-    }
-    LaunchedEffect(gridState, itemCount, loading, hasMore, enabled) {
-        if (!enabled) return@LaunchedEffect
-        snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
-            .distinctUntilChanged()
-            .collect { lastVisible ->
-                if (shouldLoadMore(lastVisible, itemCount, loading, hasMore, threshold = 8)) onLoadMore()
             }
     }
 }
@@ -213,9 +230,10 @@ private fun TrackDramaGrid(
 private fun DramaWall(
     state: AppUiState,
     imageLoader: ImageLoader,
-    gridState: LazyGridState,
+    wallState: LazyListState,
     onSelect: (DramaItem) -> Unit,
     onResume: (DramaItem) -> Unit,
+    onOpenGroup: (String) -> Unit,
     onRetry: () -> Unit,
 ) {
     Column(
@@ -226,46 +244,273 @@ private fun DramaWall(
             .padding(top = 62.dp),
     ) {
         when {
-            state.dramaItems.isEmpty() && state.dramaLoading -> DramaSkeletonGrid()
-            state.dramaItems.isEmpty() && state.dramaError != null -> DramaWallState(
+            state.dramaGroups.isEmpty() && state.dramaError != null -> DramaWallState(
                 title = state.dramaError,
                 action = "重试",
                 onAction = onRetry,
             )
-            state.dramaItems.isEmpty() -> DramaWallState(
+            state.dramaGroups.isEmpty() && state.dramaGroupsLoading -> DramaSkeletonGrid()
+            state.dramaGroups.isEmpty() -> DramaWallState(
                 title = "还没有短剧索引",
                 action = null,
                 onAction = {},
             )
-            else -> Column(Modifier.fillMaxSize()) {
+            // "最近播放" is one section of the wall rather than a pinned strip:
+            // it scrolls away with the categories the way the film wall does.
+            else -> LazyColumn(
+                state = wallState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 34.dp),
+            ) {
                 if (state.recentDramas.isNotEmpty()) {
-                    DramaRecentStrip(
-                        items = state.recentDramas,
-                        imageLoader = imageLoader,
-                        onResume = onResume,
-                    )
-                }
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(112.dp),
-                    state = gridState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 34.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    items(state.dramaItems, key = DramaItem::id) { drama ->
-                        DramaCard(drama, imageLoader, onClick = { onSelect(drama) })
+                    item(key = "recent") {
+                        DramaRecentStrip(
+                            items = state.recentDramas,
+                            imageLoader = imageLoader,
+                            onResume = onResume,
+                        )
                     }
-                    if (state.dramaLoading) {
-                        item(span = { GridItemSpan(maxLineSpan) }) {
-                            Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
-                            }
+                }
+                state.dramaGroups.forEach { group ->
+                    item(key = group.groupId) {
+                        DramaGroupSection(
+                            group = group,
+                            imageLoader = imageLoader,
+                            onSelect = onSelect,
+                            onOpenGroup = { onOpenGroup(group.groupId) },
+                        )
+                    }
+                }
+                if (state.dramaGroupsLoading) {
+                    item(key = "groups-loading") {
+                        Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/**
+ * One category folder of the short-drama source: three covers abreast plus the
+ * door into the full category.
+ *
+ * The categories are the folders the downloader wrote (短剧 / 漫剧 / …), so the
+ * wall reads like a library page: a header naming the folder, a preview of what
+ * is inside it, and "加载更多" opening the complete list.
+ */
+@Composable
+private fun DramaGroupSection(
+    group: DramaGroup,
+    imageLoader: ImageLoader,
+    onSelect: (DramaItem) -> Unit,
+    onOpenGroup: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 12.dp)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(ControlShape)
+                .clickable(onClick = onOpenGroup)
+                .padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .width(3.dp)
+                    .height(15.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Accent),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                group.name,
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "${group.items.size}/${group.total}",
+                color = TextFaint,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+            )
+        }
+        // Rows are laid out by hand: a nested lazy grid inside this lazy column
+        // would fight the parent for scroll ownership.
+        group.items.chunked(3).forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
+            ) {
+                row.forEach { drama ->
+                    Box(Modifier.weight(1f)) {
+                        DramaCard(drama, imageLoader, onClick = { onSelect(drama) })
+                    }
+                }
+                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+            Spacer(Modifier.height(14.dp))
+        }
+        if (group.hasMore) {
+            val remaining = (group.total - group.items.size).coerceAtLeast(0)
+            Surface(
+                onClick = onOpenGroup,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .heightIn(min = 48.dp),
+                color = GlassFillSoft,
+                contentColor = TextSecondary,
+                shape = ControlShape,
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    Text(
+                        if (remaining > 0) "加载更多 · 还有 $remaining 部" else "加载更多",
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        Icons.AutoMirrored.Outlined.ArrowForward,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One category, opened full screen.
+ *
+ * Same tile language as the wall, but with the category's whole catalogue and
+ * its own cursor, so a folder holding hundreds of series never has to be
+ * appended to the shared page.
+ */
+@Composable
+private fun DramaLibraryPage(
+    name: String,
+    items: List<DramaItem>,
+    total: Int,
+    loading: Boolean,
+    error: String?,
+    imageLoader: ImageLoader,
+    onBack: () -> Unit,
+    onSelect: (DramaItem) -> Unit,
+    onLoadMore: () -> Unit,
+) {
+    val gridState = rememberLazyGridState()
+    val hasMore = items.size < total
+    TrackDramaGrid(
+        gridState = gridState,
+        itemCount = items.size,
+        loading = loading,
+        hasMore = hasMore,
+        onLoadMore = onLoadMore,
+    )
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Canvas)
+            .statusBarsPadding()
+            .padding(top = 62.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            GlassIconButton(label = "返回短剧库", onClick = onBack) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    name,
+                    color = TextPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    if (total > 0) "共 $total 部" else "正在统计…",
+                    color = TextFaint,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                )
+            }
+        }
+
+        when {
+            items.isEmpty() && loading -> DramaSkeletonGrid()
+            items.isEmpty() && error != null -> DramaWallState(
+                title = error,
+                action = "重试",
+                onAction = onLoadMore,
+            )
+            items.isEmpty() -> DramaWallState(
+                title = "这个分类还没有短剧",
+                action = null,
+                onAction = {},
+            )
+            else -> LazyVerticalGrid(
+                columns = GridCells.Adaptive(112.dp),
+                state = gridState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 34.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                items(items, key = DramaItem::id) { drama ->
+                    DramaCard(drama, imageLoader, onClick = { onSelect(drama) })
+                }
+                if (loading) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
+                        }
+                    }
+                } else if (hasMore) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
+                            Text("正在载入更多…", color = TextFaint, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Pulls the next slice of a category once the grid nears its end. */
+@Composable
+private fun TrackDramaGrid(
+    gridState: LazyGridState,
+    itemCount: Int,
+    loading: Boolean,
+    hasMore: Boolean,
+    onLoadMore: () -> Unit,
+) {
+    LaunchedEffect(gridState, itemCount) {
+        snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+            .distinctUntilChanged()
+            .collect { lastVisible ->
+                if (shouldLoadMore(lastVisible, itemCount, loading, hasMore, threshold = 8)) onLoadMore()
+            }
     }
 }
 

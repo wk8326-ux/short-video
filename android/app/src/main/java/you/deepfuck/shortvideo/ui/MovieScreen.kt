@@ -54,6 +54,7 @@ import androidx.compose.material.icons.outlined.Forward10
 import androidx.compose.material.icons.outlined.Fullscreen
 import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.PictureInPictureAlt
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay10
 import androidx.compose.material3.Button
@@ -114,6 +115,7 @@ internal fun MovieScreen(
     exoPlayer: ExoPlayer,
     imageLoader: ImageLoader,
     fullscreen: Boolean,
+    pipMode: Boolean,
     listPosition: ListPosition,
     onSelect: (MovieItem) -> Unit,
     onBack: () -> Unit,
@@ -129,6 +131,7 @@ internal fun MovieScreen(
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
+    onPip: () -> Unit,
     onListPosition: (ListPosition) -> Unit,
 ) {
     // The wall is a list of library sections, so position memory tracks section
@@ -166,6 +169,7 @@ internal fun MovieScreen(
             imageLoader = imageLoader,
             muted = state.muted,
             fullscreen = fullscreen,
+            pipMode = pipMode,
             playbackStarted = state.nowPlaying?.id == movie.videoId || player.mediaId == movie.videoId,
             onBack = onBack,
             onPlay = { onPlay(movie) },
@@ -174,6 +178,7 @@ internal fun MovieScreen(
             onSeek = onSeek,
             onSeekBy = onSeekBy,
             onFullscreen = onFullscreen,
+            onPip = onPip,
         )
         return
     }
@@ -591,10 +596,13 @@ private fun RecentMovieCard(
 }
 
 /**
- * One library as a single tile: its first six covers stitched into one poster.
+ * One library as a single tile: its first four covers stitched into one poster.
  *
  * This is the view for someone who has added twenty sources - the whole wall
- * then fits on a screen without a single horizontal scroll.
+ * then fits on a screen without a single horizontal scroll. Four covers is the
+ * most a half-width tile can hold while each one still reads as artwork: a
+ * 3x2 grid halves the cells and turns covers into slivers, so the grid is kept
+ * square and the tile is taller instead.
  */
 @Composable
 private fun MovieLibraryTile(
@@ -665,8 +673,8 @@ private fun MovieLibraryTile(
     }
 }
 
-private const val MOSAIC_COLUMNS = 3
-private const val MOSAIC_TILES = MOSAIC_COLUMNS * 2
+private const val MOSAIC_COLUMNS = 2
+private const val MOSAIC_TILES = MOSAIC_COLUMNS * MOSAIC_COLUMNS
 
 /**
  * One library as a sideways row with a trailing "more" tile, the way a media
@@ -1091,6 +1099,7 @@ private fun MovieDetail(
     imageLoader: ImageLoader,
     muted: Boolean,
     fullscreen: Boolean,
+    pipMode: Boolean,
     playbackStarted: Boolean,
     onBack: () -> Unit,
     onPlay: () -> Unit,
@@ -1099,6 +1108,7 @@ private fun MovieDetail(
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
+    onPip: () -> Unit,
 ) {
     if (fullscreen && playbackStarted) {
         MoviePlayer(
@@ -1111,6 +1121,8 @@ private fun MovieDetail(
             onSeek = onSeek,
             onSeekBy = onSeekBy,
             onFullscreen = onFullscreen,
+            pipMode = pipMode,
+            onPip = onPip,
             modifier = Modifier.fillMaxSize(),
         )
         return
@@ -1165,6 +1177,8 @@ private fun MovieDetail(
                         onSeek = onSeek,
                         onSeekBy = onSeekBy,
                         onFullscreen = onFullscreen,
+                        pipMode = pipMode,
+                        onPip = onPip,
                         modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
                     )
                 } else {
@@ -1321,6 +1335,8 @@ internal fun MoviePlayer(
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
+    pipMode: Boolean = false,
+    onPip: (() -> Unit)? = null,
     onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -1390,7 +1406,7 @@ internal fun MoviePlayer(
         PlayerHost(exoPlayer, Modifier.fillMaxSize())
         BufferSpinner(player.isBuffering)
 
-        val controlsVisible = !fullscreen || chromeVisible
+        val controlsVisible = !pipMode && (!fullscreen || chromeVisible)
         if (controlsVisible) {
             onBack?.let { back ->
                 GlassIconButton(
@@ -1401,7 +1417,7 @@ internal fun MoviePlayer(
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
                 }
             }
-            if (!player.playWhenReady || fullscreen) {
+            if (!pipMode && (!player.playWhenReady || fullscreen)) {
                 Row(
                     modifier = Modifier.align(Alignment.Center),
                     horizontalArrangement = Arrangement.spacedBy(if (fullscreen) 34.dp else 18.dp),
@@ -1480,6 +1496,18 @@ internal fun MoviePlayer(
                             if (fullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
                             contentDescription = if (fullscreen) "退出横屏" else "横屏",
                         )
+                    }
+                    onPip?.let { requestPip ->
+                        IconButton(
+                            onClick = requestPip,
+                            modifier = Modifier.size(48.dp),
+                            colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
+                        ) {
+                            Icon(
+                                Icons.Outlined.PictureInPictureAlt,
+                                contentDescription = "浮窗播放",
+                            )
+                        }
                     }
                 }
             }

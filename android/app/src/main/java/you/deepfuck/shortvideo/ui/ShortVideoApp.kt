@@ -79,7 +79,9 @@ import you.deepfuck.shortvideo.data.MediaSurface
 @Composable
 fun ShortVideoApp(
     viewModel: MainViewModel,
+    pipMode: Boolean,
     onFullscreenChanged: (Boolean) -> Unit,
+    onPipRequested: () -> Unit,
     onBackgroundPlaybackRequested: () -> Unit,
     onDownloadAppUpdate: () -> Unit,
     onInstallAppUpdate: (String) -> Unit,
@@ -157,6 +159,13 @@ fun ShortVideoApp(
     ) {
         viewModel.closeDramaDetail()
     }
+    BackHandler(
+        enabled = !fullscreen && !state.showManagement &&
+            state.surface == MediaSurface.DRAMA && state.selectedDrama == null &&
+            state.openDramaGroupId != null,
+    ) {
+        viewModel.closeDramaGroup()
+    }
 
     when (state.authentication) {
         AuthenticationState.CHECKING -> LoadingScreen()
@@ -190,6 +199,7 @@ fun ShortVideoApp(
                             exoPlayer = viewModel.playback.player,
                             muted = state.muted,
                             fullscreen = fullscreen,
+                            pipMode = pipMode,
                             authorListPosition = viewModel.asmrAuthorListPosition(),
                             mediaListPosition = state.selectedAuthor
                                 ?.let(viewModel::asmrMediaListPosition)
@@ -218,6 +228,7 @@ fun ShortVideoApp(
                                 fullscreen = it
                                 onFullscreenChanged(it)
                             },
+                            onPip = onPipRequested,
                             onAuthorListPosition = viewModel::saveAsmrAuthorListPosition,
                             onMediaListPosition = viewModel::saveAsmrMediaListPosition,
                         )
@@ -229,6 +240,7 @@ fun ShortVideoApp(
                                 exoPlayer = viewModel.playback.player,
                                 imageLoader = viewModel.movieImageLoader,
                                 fullscreen = fullscreen,
+                                pipMode = pipMode,
                                 listPosition = viewModel.movieListPosition(),
                                 onSelect = viewModel::selectMovie,
                                 onBack = viewModel::closeMovieDetail,
@@ -247,6 +259,7 @@ fun ShortVideoApp(
                                     fullscreen = it
                                     onFullscreenChanged(it)
                                 },
+                                onPip = onPipRequested,
                                 onListPosition = viewModel::saveMovieListPosition,
                             )
                         }
@@ -257,6 +270,7 @@ fun ShortVideoApp(
                                 exoPlayer = viewModel.playback.player,
                                 imageLoader = viewModel.movieImageLoader,
                                 fullscreen = fullscreen,
+                                pipMode = pipMode,
                                 listPosition = viewModel.dramaListPosition(),
                                 onSelect = viewModel::selectDrama,
                                 onResume = viewModel::resumeDrama,
@@ -264,7 +278,9 @@ fun ShortVideoApp(
                                 onResumeEpisode = viewModel::dramaResumeEpisode,
                                 onPlayEpisode = viewModel::playDramaEpisode,
                                 onStopPlayback = viewModel::stopDramaPlayback,
-                                onLoadMore = viewModel::loadMoreDramas,
+                                onOpenGroup = viewModel::openDramaGroup,
+                                onCloseGroup = viewModel::closeDramaGroup,
+                                onLoadMoreGroup = viewModel::loadMoreDramaGroup,
                                 onRetry = viewModel::retryDramas,
                                 onTogglePlayback = viewModel::togglePlayback,
                                 onMuted = viewModel::setMuted,
@@ -274,6 +290,7 @@ fun ShortVideoApp(
                                     fullscreen = it
                                     onFullscreenChanged(it)
                                 },
+                                onPip = onPipRequested,
                                 onListPosition = viewModel::saveDramaListPosition,
                             )
                         }
@@ -283,6 +300,7 @@ fun ShortVideoApp(
                             player = player,
                             exoPlayer = viewModel.playback.player,
                             fullscreen = fullscreen,
+                            pipMode = pipMode,
                             onSurface = viewModel::changeSurface,
                             onMode = viewModel::changeMode,
                             onActive = viewModel::activateFeedItem,
@@ -296,6 +314,7 @@ fun ShortVideoApp(
                                 fullscreen = it
                                 onFullscreenChanged(it)
                             },
+                            onPip = onPipRequested,
                             onManage = viewModel::showManagement,
                             onCheckUpdate = viewModel::checkForAppUpdate,
                             onLogout = viewModel::logout,
@@ -304,6 +323,7 @@ fun ShortVideoApp(
                     }
                 }
                 if (
+                    !pipMode &&
                     !fullscreen &&
                     state.expandedMedia == null &&
                     state.selectedMovie == null &&

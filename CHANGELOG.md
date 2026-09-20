@@ -2,6 +2,41 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.21] - 2026-09-20
+
+### Added
+
+- Videos can be shrunk into a floating window from any of the four surfaces -- short clips, long clips, films and short
+  dramas, plus ASMR video. The window keeps the running picture and its own aspect ratio, and the app keeps playing while
+  the window stays on screen, so a film can be watched over another app the way a system video player allows. Leaving the
+  app entirely still pauses everything that is not flagged for background playback: the floating window only survives while
+  it is visible.
+- The short-drama wall is grouped by library the way the film wall is. The downloader's first-level folders ("短剧", "漫剧",
+  …) become sections with six tiles each and a "加载更多" that opens that category on its own page, so a wall of two hundred
+  and forty series no longer arrives as one undifferentiated list. The recent strip now scrolls with those sections instead
+  of being pinned over them.
+
+### Changed
+
+- The library tile on the movie wall stitches four covers instead of six. Two
+  tiles share a row, so a 3x2 grid left each cover about 60dp wide -- narrower
+  than the shelf tiles below it -- and the artwork read as slivers. The grid is
+  square now, which doubles every cover and makes the tile taller, so a wall of
+  libraries is legible without opening one.
+
+### Fixed
+
+- A finished drama episode no longer erases its series from the "最近播放" strip. Short-drama episodes run two or three
+  minutes, so finishing one is the normal outcome rather than an edge case, and a strip that dropped completed series left
+  only the one title that had been abandoned mid-episode -- which read as "the list only ever shows one entry". A series now
+  stays on the strip and points at the next episode in playback order; the finale replays from the top instead. Episode
+  order comes from the same filename key the reader uses, because "第9集" sorts after "第10集" as text.
+- The strip is refetched after the detail page reports progress, so a title appears the moment it is left rather than one
+  visit later. Switching between the four surfaces refreshes it too, and the short-drama request now cancels the one it
+  replaces -- a late response from a previous query could otherwise overwrite the newer list forever.
+- If the remembered episode of a drama is already finished, the strip and the detail page resume from the next one instead
+  of reopening the closing seconds of the episode just watched.
+
 ## [1.6.0-beta.20] - 2026-09-20
 
 ### Added

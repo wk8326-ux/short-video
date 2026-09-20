@@ -249,11 +249,13 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         query: String = "",
         limit: Int = DRAMA_PAGE_SIZE,
         offset: Int = 0,
+        category: String = "",
     ): DramaPage {
         val target = url("/api/dramas").newBuilder()
             .addQueryParameter("limit", limit.toString())
             .addQueryParameter("offset", offset.toString())
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
+            .apply { if (category.isNotBlank()) addQueryParameter("category", category) }
             .build()
         val payload = getJson(target.toString())
         val items = payload.optJSONArray("items")
@@ -267,6 +269,26 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             items = parsed,
             total = payload.optInt("total", parsed.size),
             nextOffset = payload.optIntOrNull("nextOffset"),
+            scanRunning = payload.optJSONObject("scan")?.optBoolean("running") == true,
+        )
+    }
+
+    /**
+     * The grouped drama wall: one section per category folder of the source,
+     * each previewing [perGroup] series plus its own cursor.
+     */
+    fun dramaGroups(
+        query: String = "",
+        perGroup: Int = DRAMA_GROUP_SIZE,
+    ): DramaGroupPage {
+        val target = url("/api/dramas/groups").newBuilder()
+            .addQueryParameter("perGroup", perGroup.toString())
+            .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
+            .build()
+        val payload = getJson(target.toString())
+        return DramaGroupPage(
+            groups = payload.optObjectList("groups", DramaGroup::fromJson),
+            total = payload.optInt("total"),
             scanRunning = payload.optJSONObject("scan")?.optBoolean("running") == true,
         )
     }
@@ -487,6 +509,10 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         // smooth without a request per swipe.
         const val MOVIE_LIBRARY_PAGE_SIZE = 60
         const val DRAMA_PAGE_SIZE = 24
+        // Two rows of three posters, the width the drama wall already uses.
+        const val DRAMA_GROUP_SIZE = 6
+        // A drama category opened on its own page ("加载更多").
+        const val DRAMA_LIBRARY_PAGE_SIZE = 60
         // How many titles the "continue watching" strips hold.
         const val RECENT_LIMIT = 10
         const val BASE_URL = "https://short.deepfuck.you/"

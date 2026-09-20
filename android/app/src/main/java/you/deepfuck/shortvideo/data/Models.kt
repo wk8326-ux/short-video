@@ -314,11 +314,44 @@ data class DramaItem(
             matchStatus = value.optString("matchStatus", "pending"),
             source = value.optNullableString("source"),
             path = value.optNullableString("path"),
-            resumePositionMs = value.optLong("resumePositionMs"),
-            resumeEpisodeId = value.optNullableLong("episodeId"),
+           resumePositionMs = value.optLong("resumePositionMs"),
+           resumeEpisodeId = value.optNullableLong("episodeId"),
+       )
+    }
+}
+
+/**
+ * One section of the drama wall: exactly one category folder of the source
+ * ("短剧", "漫剧", …), the way [MovieGroup] is one media source.
+ *
+ * [nextOffset] is the cursor of this section alone, so "load more" can never
+ * pull series from another category into it.
+ */
+data class DramaGroup(
+    val groupId: String,
+    val name: String,
+    val total: Int,
+    val items: List<DramaItem>,
+    val nextOffset: Int?,
+) {
+    val hasMore: Boolean get() = nextOffset != null
+
+    companion object {
+        fun fromJson(value: JSONObject): DramaGroup = DramaGroup(
+            groupId = value.optString("groupId"),
+            name = value.optString("name"),
+            total = value.optInt("total"),
+            items = value.optObjectList("items", DramaItem::fromJson),
+            nextOffset = value.optNullableInt("nextOffset"),
         )
     }
 }
+
+data class DramaGroupPage(
+    val groups: List<DramaGroup>,
+    val total: Int,
+    val scanRunning: Boolean,
+)
 
 data class DramaEpisode(
     val videoId: Long,

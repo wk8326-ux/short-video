@@ -43,6 +43,7 @@ import androidx.compose.material.icons.outlined.FullscreenExit
 import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.LibraryMusic
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.PictureInPictureAlt
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay10
 import androidx.compose.material.icons.outlined.Search
@@ -105,6 +106,7 @@ internal fun AsmrScreen(
     exoPlayer: ExoPlayer,
     muted: Boolean,
     fullscreen: Boolean,
+    pipMode: Boolean,
     authorListPosition: ListPosition,
     mediaListPosition: ListPosition,
     onAuthor: (String) -> Unit,
@@ -122,6 +124,7 @@ internal fun AsmrScreen(
     onSeekBy: (Long) -> Unit,
     onVideoBackgroundPlayback: (Boolean) -> Unit,
     onFullscreen: (Boolean) -> Unit,
+    onPip: () -> Unit,
     onAuthorListPosition: (ListPosition) -> Unit,
     onMediaListPosition: (String, ListPosition) -> Unit,
 ) {
@@ -187,6 +190,7 @@ internal fun AsmrScreen(
                 exoPlayer = exoPlayer,
                 muted = muted,
                 fullscreen = fullscreen,
+                pipMode = pipMode,
                 backgroundPlayback = state.asmrVideoBackgroundPlayback,
                 onCollapse = onCollapse,
                 onClose = onClose,
@@ -196,6 +200,7 @@ internal fun AsmrScreen(
                 onSeekBy = onSeekBy,
                 onBackgroundPlayback = onVideoBackgroundPlayback,
                 onFullscreen = onFullscreen,
+                onPip = onPip,
             )
         }
     }
@@ -655,6 +660,7 @@ private fun ExpandedAsmrPlayer(
     exoPlayer: ExoPlayer,
     muted: Boolean,
     fullscreen: Boolean,
+    pipMode: Boolean,
     backgroundPlayback: Boolean,
     onCollapse: () -> Unit,
     onClose: () -> Unit,
@@ -664,13 +670,14 @@ private fun ExpandedAsmrPlayer(
     onSeekBy: (Long) -> Unit,
     onBackgroundPlayback: (Boolean) -> Unit,
     onFullscreen: (Boolean) -> Unit,
+    onPip: () -> Unit,
 ) {
     var seekTarget by remember { mutableStateOf<Long?>(null) }
     var drag by remember { mutableFloatStateOf(0f) }
     var seekBaseMs by remember { mutableStateOf(0L) }
     val latestPositionMs = rememberUpdatedState(player.positionMs)
     var chromeVisible by remember(fullscreen, entry.id) { mutableStateOf(true) }
-    val controlsVisible = !fullscreen || chromeVisible
+    val controlsVisible = !pipMode && (!fullscreen || chromeVisible)
 
     LaunchedEffect(fullscreen, chromeVisible, player.isPlaying, entry.id) {
         if (fullscreen && chromeVisible && player.isPlaying) {
@@ -806,6 +813,12 @@ private fun ExpandedAsmrPlayer(
                     onClick = { onMuted(!muted) },
                 ) {
                     Icon(if (muted) Icons.AutoMirrored.Outlined.VolumeOff else Icons.AutoMirrored.Outlined.VolumeUp, contentDescription = null)
+                }
+                OverlayIconControl(
+                    label = "浮窗播放",
+                    onClick = onPip,
+                ) {
+                    Icon(Icons.Outlined.PictureInPictureAlt, contentDescription = null)
                 }
                 if (!fullscreen) {
                     OverlayIconControl(

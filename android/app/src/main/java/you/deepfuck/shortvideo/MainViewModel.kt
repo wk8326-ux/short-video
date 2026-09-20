@@ -28,6 +28,7 @@ import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.AsmrFilter
 import you.deepfuck.shortvideo.data.DramaDetail
 import you.deepfuck.shortvideo.data.DramaEpisode
+import you.deepfuck.shortvideo.data.DramaGroup
 import you.deepfuck.shortvideo.data.DramaItem
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.LibraryScanStatus
@@ -103,6 +104,17 @@ data class AppUiState(
     val dramaLoading: Boolean = false,
     val dramaError: String? = null,
     val dramaQuery: String = "",
+    val dramaGroups: List<DramaGroup> = emptyList(),
+    val dramaGroupsLoading: Boolean = false,
+    // One drama category opened full-screen ("加载更多"): its own cursor, so the
+    // wall behind it keeps whatever it had loaded.
+    val openDramaGroupId: String? = null,
+    val openDramaGroupName: String = "",
+    val openDramaGroupItems: List<DramaItem> = emptyList(),
+    val openDramaGroupTotal: Int = 0,
+    val openDramaGroupNextOffset: Int? = 0,
+    val openDramaGroupLoading: Boolean = false,
+    val openDramaGroupError: String? = null,
     val dramaDetailLoading: Boolean = false,
     val selectedDrama: DramaDetail? = null,
     val expandedMedia: MediaEntry? = null,
@@ -184,6 +196,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var movieRequestGeneration = 0L
     private var movieCatalogDirty = false
     private var recentJob: Job? = null
+    private var recentDramaJob: Job? = null
     private var progressReportJob: Job? = null
     private var reportedVideoId: Long? = null
     private var reportedPositionMs: Long = 0L
@@ -191,6 +204,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var dramaJob: Job? = null
     private var dramaSearchJob: Job? = null
     private var dramaDetailJob: Job? = null
+    private var dramaGroupPageJob: Job? = null
+    private var dramaGroupPageGeneration = 0L
     private var pendingDramaResume: String? = null
     private var dramaRequestGeneration = 0L
     private var dramaCatalogDirty = false
@@ -264,7 +279,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val previousSurface = mutableState.value.surface
         if (surface == previousSurface) return
         logs.info("surface_change", "from=$previousSurface to=$surface media=${playback.snapshot.value.mediaId}")
-        saveCurrentPosition(forceReport = true)
+        val report = saveCurrentPosition(forceReport = true)
         when {
             previousSurface == MediaSurface.ASMR -> persistAsmrPlaybackState()
             previousSurface.isFeed -> persistCurrentFeedSession()
@@ -295,6 +310,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             dramaJob?.cancel()
             dramaSearchJob?.cancel()
             dramaDetailJob?.cancel()
+            cancelDramaGroupPageLoad()
+            dramaGroupPageGeneration += 1L
             dramaRequestGeneration += 1L
         }
         preferences.surface = surface
@@ -321,6 +338,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openMovieGroupLoading = false,
             openMovieGroupError = null,
             selectedDrama = null,
+            openDramaGroupId = null,
+            openDramaGroupName = "",
+            openDramaGroupItems = emptyList(),
+            openDramaGroupTotal = 0,
+            openDramaGroupNextOffset = 0,
+            openDramaGroupLoading = false,
+            openDramaGroupError = null,
             dramaDetailLoading = false,
             showManagement = false,
             feedError = null,
@@ -336,6 +360,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             surface == MediaSurface.ASMR -> restoreAsmrSurface()
             surface == MediaSurface.MOVIE -> restoreMovieSurface()
             surface == MediaSurface.DRAMA -> restoreDramaSurface()
+        }
+        // Switching tabs is a common way to leave a film or a series, and the
+        // report fired above is still in flight. Read the strip the surface
+        // just restored once that report has landed, or the row describes the
+        // watch from before the one the user came here to see listed.
+        if (surface == MediaSurface.MOVIE || surface == MediaSurface.DRAMA) {
+            refreshRecentAfter(report, dramas = surface == MediaSurface.DRAMA)
         }
     }
 
@@ -760,7 +791,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeMovieDetail() {
         if (mutableState.value.surface != MediaSurface.MOVIE) return
-        saveCurrentPosition(forceReport = true)
+        val report = saveCurrentPosition(forceReport = true)
         movieDetailJob?.cancel()
         playback.stop()
         playback.prefetch(MediaSurface.MOVIE, emptyList())
@@ -769,6 +800,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieDetailLoading = false,
             nowPlaying = null,
         )
+        // The playhead was just pushed, so the wall behind this page is holding
+        // a stale "继续观看" strip: refetch it once that write has landed.
+        refreshRecentAfter(report, dramas = false)
     }
 
     fun playMovie(movie: MovieItem) {
@@ -805,6 +839,114 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun retryDramas() = loadDramas(reset = true)
 
+    /**
+     * Opens one drama category on its own page.
+     *
+     * The wall previews a few series per folder; "加载更多" used to be the only
+     * way to see the rest of a big category, and appending pages in place
+     * buried every category below it. The category now gets a page with its own
+     * cursor, and the wall keeps whatever it had loaded.
+     */
+    fun openDramaGroup(groupId: String) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.DRAMA) return
+        val group = state.dramaGroups.firstOrNull { it.groupId == groupId } ?: return
+        cancelDramaGroupPageLoad()
+        // The wall already fetched the first slice of this category, so the
+        // page opens on those posters instead of a skeleton.
+        val prefetched = group.items
+        mutableState.value = state.copy(
+            openDramaGroupId = groupId,
+            openDramaGroupName = group.name,
+            openDramaGroupItems = prefetched,
+            openDramaGroupTotal = group.total,
+            openDramaGroupNextOffset = if (prefetched.isEmpty()) 0 else group.nextOffset,
+            openDramaGroupLoading = true,
+            openDramaGroupError = null,
+        )
+        loadDramaGroupPage(reset = true)
+    }
+
+    fun closeDramaGroup() {
+        if (mutableState.value.surface != MediaSurface.DRAMA) return
+        cancelDramaGroupPageLoad()
+        dramaGroupPageGeneration += 1L
+        mutableState.value = mutableState.value.copy(
+            openDramaGroupId = null,
+            openDramaGroupName = "",
+            openDramaGroupItems = emptyList(),
+            openDramaGroupTotal = 0,
+            openDramaGroupNextOffset = 0,
+            openDramaGroupLoading = false,
+            openDramaGroupError = null,
+        )
+    }
+
+    fun loadMoreDramaGroup() {
+        val state = mutableState.value
+        if (state.openDramaGroupId == null || state.openDramaGroupLoading) return
+        if (state.openDramaGroupNextOffset == null) return
+        loadDramaGroupPage(reset = false)
+    }
+
+    private fun loadDramaGroupPage(reset: Boolean) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.DRAMA) return
+        val groupId = state.openDramaGroupId ?: return
+        val offset = if (reset) 0 else state.openDramaGroupNextOffset ?: return
+        cancelDramaGroupPageLoad()
+        val generation = ++dramaGroupPageGeneration
+        mutableState.value = state.copy(openDramaGroupLoading = true, openDramaGroupError = null)
+        dramaGroupPageJob = viewModelScope.launch {
+            runApi {
+                api.dramas(
+                    category = groupId,
+                    offset = offset,
+                    limit = MediaApi.DRAMA_LIBRARY_PAGE_SIZE,
+                )
+            }
+                .onSuccess { page ->
+                    val current = mutableState.value
+                    if (generation != dramaGroupPageGeneration || current.openDramaGroupId != groupId) {
+                        return@onSuccess
+                    }
+                    val incoming = page.items.map { it.withAbsolutePoster() }
+                    val ids = if (reset) mutableSetOf() else current.openDramaGroupItems.mapTo(mutableSetOf()) { it.id }
+                    val merged = if (reset) incoming else current.openDramaGroupItems + incoming.filter { ids.add(it.id) }
+                    mutableState.value = current.copy(
+                        openDramaGroupItems = merged,
+                        openDramaGroupTotal = maxOf(page.total, merged.size),
+                        openDramaGroupNextOffset = page.nextOffset,
+                        openDramaGroupLoading = false,
+                        openDramaGroupError = null,
+                    )
+                }
+                .onFailure { error ->
+                    val current = mutableState.value
+                    if (generation != dramaGroupPageGeneration || current.openDramaGroupId != groupId) {
+                        return@onFailure
+                    }
+                    if (!handleUnauthorized(error)) {
+                        mutableState.value = current.copy(
+                            openDramaGroupLoading = false,
+                            // A page opened from the wall keeps its posters; the
+                            // cursor goes away so the footer cannot promise more.
+                            openDramaGroupNextOffset =
+                                current.openDramaGroupNextOffset.takeIf {
+                                    current.openDramaGroupItems.isEmpty()
+                                },
+                            openDramaGroupError = "这个分类暂时载入不了，稍后再试",
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun cancelDramaGroupPageLoad() {
+        dramaGroupPageJob?.cancel()
+        dramaGroupPageJob = null
+    }
+
     fun loadMoreDramas() {
         val state = mutableState.value
         if (
@@ -840,18 +982,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         pendingDramaResume = null
                         // The strip may hold the only known position (a reinstall
                         // or a second device), so seed the local store before the
-                        // player reads it.
-                        val target = detail.episodes.firstOrNull { it.videoId == preferences.dramaEpisodeId(drama.id) }
+                        // player reads it. The episode to open follows the same
+                        // rule the server used to build the strip: this device
+                        // remembers the episode it played last, and when that one
+                        // was seen through, the strip already points at the next.
+                        val remembered = detail.episodes
+                            .firstOrNull { it.videoId == preferences.dramaEpisodeId(drama.id) }
+                        val target = remembered?.takeIf { !isEpisodeFinished(it) }
                             ?: detail.episodes.firstOrNull { it.videoId == drama.resumeEpisodeId }
+                            ?: remembered
                             ?: detail.episodes.firstOrNull()
                         if (target != null) {
-                            if (drama.resumePositionMs > preferences.position(target.videoId)) {
-                                preferences.savePosition(
-                                    target.videoId,
-                                    drama.resumePositionMs,
-                                    (target.durationSeconds ?: 0.0).times(1_000).toLong(),
-                                )
+                            val durationMs = (target.durationSeconds ?: 0.0).times(1_000).toLong()
+                            var position = preferences.position(target.videoId)
+                            if (target.videoId == drama.resumeEpisodeId) {
+                                position = maxOf(position, drama.resumePositionMs)
                             }
+                            // Opening an episode on its end credits is never what
+                            // the tap meant, so a finished one starts over.
+                            if (durationMs > 0L && position >= (durationMs * FINISHED_EPISODE_RATIO).toLong()) {
+                                position = 0L
+                            }
+                            preferences.savePosition(target.videoId, position, durationMs)
                             playDramaEpisode(detail.item, target)
                             return@onSuccess
                         }
@@ -894,14 +1046,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return episodes.firstOrNull { it.videoId == savedId }
     }
 
+    /**
+     * Whether the local playhead reached the end of this episode.
+     *
+     * It mirrors the server's own "watched through" rule ([FINISHED_EPISODE_RATIO])
+     * so the episode this phone reopens stays in step with the episode the
+     * server already advanced the strip to.
+     */
+    private fun isEpisodeFinished(episode: DramaEpisode): Boolean {
+        val durationMs = (episode.durationSeconds ?: 0.0).times(1_000).toLong()
+        if (durationMs <= 0L) return false
+        return preferences.position(episode.videoId) >= (durationMs * FINISHED_EPISODE_RATIO).toLong()
+    }
+
     /** Leave playback but stay on the series page. */
     fun stopDramaPlayback() {
         if (mutableState.value.surface != MediaSurface.DRAMA) return
-        saveCurrentPosition(forceReport = true)
+        val report = saveCurrentPosition(forceReport = true)
         playback.stop()
         playback.prefetch(MediaSurface.DRAMA, emptyList())
         stopPlaybackService()
         mutableState.value = mutableState.value.copy(nowPlaying = null)
+        refreshRecentAfter(report, dramas = true)
     }
 
     fun playDramaEpisode(drama: DramaItem, episode: DramaEpisode) {
@@ -928,7 +1094,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeDramaDetail() {
         if (mutableState.value.surface != MediaSurface.DRAMA) return
-        saveCurrentPosition(forceReport = true)
+        val report = saveCurrentPosition(forceReport = true)
         dramaDetailJob?.cancel()
         playback.stop()
         playback.prefetch(MediaSurface.DRAMA, emptyList())
@@ -938,6 +1104,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             dramaDetailLoading = false,
             nowPlaying = null,
         )
+        // Same reason as the film wall: the section the user lands back on has
+        // to show the series they just watched at the front of "最近播放".
+        refreshRecentAfter(report, dramas = true)
     }
 
     fun showManagement() {
@@ -1343,13 +1512,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun saveCurrentPosition(forceReport: Boolean = false) {
+    /**
+     * Writes the playhead locally and mirrors it to the server.
+     *
+     * Returns the in-flight server report, so a caller that immediately reloads
+     * a "继续观看" strip can wait for the write it just triggered instead of
+     * racing it and re-reading the position it was trying to replace.
+     */
+    fun saveCurrentPosition(forceReport: Boolean = false): Job? {
         val snapshot = playback.snapshot.value
+        var report: Job? = null
         snapshot.mediaId?.let {
             preferences.savePosition(it, snapshot.positionMs, snapshot.durationMs)
-            reportWatchProgress(it, snapshot.positionMs, snapshot.durationMs, force = forceReport)
+            report = reportWatchProgress(it, snapshot.positionMs, snapshot.durationMs, force = forceReport)
         }
         if (mutableState.value.surface == MediaSurface.MOVIE) updateMovieResumePosition()
+        return report
     }
 
     /**
@@ -1366,23 +1544,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         positionMs: Long,
         durationMs: Long,
         force: Boolean,
-    ) {
-        if (mediaId <= 0L || !api.hasSession()) return
+    ): Job? {
+        if (mediaId <= 0L || !api.hasSession()) return null
         val now = System.currentTimeMillis()
         val sameMedia = reportedVideoId == mediaId
         val unchanged = sameMedia &&
             now - reportedAtMs < PROGRESS_REPORT_INTERVAL_MS &&
             kotlin.math.abs(positionMs - reportedPositionMs) < PROGRESS_REPORT_SEEK_MS
-        if (!force && unchanged) return
+        if (!force && unchanged) return null
         reportedVideoId = mediaId
         reportedPositionMs = positionMs
         reportedAtMs = now
         progressReportJob?.cancel()
-        progressReportJob = viewModelScope.launch {
+        val job = viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) { api.recordProgress(mediaId, positionMs, durationMs) }
             }
         }
+        progressReportJob = job
+        return job
     }
 
     internal fun asmrAuthorListPosition(): ListPosition = preferences.asmrAuthorListPosition()
@@ -1526,8 +1706,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             dramaDetailLoading = false,
             nowPlaying = null,
             dramaError = null,
+            openDramaGroupId = null,
+            openDramaGroupName = "",
+            openDramaGroupItems = emptyList(),
+            openDramaGroupTotal = 0,
+            openDramaGroupNextOffset = 0,
+            openDramaGroupLoading = false,
+            openDramaGroupError = null,
         )
-        if (dramaCatalogDirty || mutableState.value.dramaItems.isEmpty()) {
+        val catalogEmpty = mutableState.value.dramaGroups.isEmpty() &&
+            mutableState.value.dramaItems.isEmpty()
+        if (dramaCatalogDirty || catalogEmpty) {
             loadDramas(reset = true)
         }
         loadRecentDramas()
@@ -1536,6 +1725,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadDramas(reset: Boolean) {
         val state = mutableState.value
         if (state.surface != MediaSurface.DRAMA) return
+        // An empty query is the browsable wall, grouped by the folders the
+        // downloader created; a query is a flat lookup across every category.
+        if (state.dramaQuery.isBlank()) {
+            loadDramaGroups(reset)
+            return
+        }
         val offset = if (reset) 0 else state.dramaNextOffset ?: return
         if (reset) dramaJob?.cancel() else if (state.dramaLoading) return
         val requestedQuery = state.dramaQuery.trim()
@@ -1575,6 +1770,60 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!handleUnauthorized(error)) {
                         mutableState.value = current.copy(
                             dramaLoading = false,
+                            dramaError = "短剧目录暂时无法载入",
+                        )
+                    }
+                }
+        }
+    }
+
+    /**
+     * The grouped drama wall, refetched as a whole.
+     *
+     * Every section is a folder of the source, so a rescan that moved series
+     * between folders lands here without any bookkeeping on the client: the
+     * server derives the sections from the indexed rows on every request.
+     */
+    private fun loadDramaGroups(reset: Boolean) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.DRAMA) return
+        if (!reset && state.dramaGroupsLoading) return
+        val requestedQuery = state.dramaQuery.trim()
+        val requestGeneration = ++dramaRequestGeneration
+        dramaJob?.cancel()
+        mutableState.value = state.copy(dramaGroupsLoading = true, dramaError = null)
+        dramaJob = viewModelScope.launch {
+            runApi { api.dramaGroups(query = requestedQuery) }
+                .onSuccess { page ->
+                    val current = mutableState.value
+                    if (
+                        current.surface != MediaSurface.DRAMA ||
+                        requestGeneration != dramaRequestGeneration ||
+                        requestedQuery != current.dramaQuery.trim()
+                    ) return@onSuccess
+                    dramaCatalogDirty = false
+                    mutableState.value = current.copy(
+                        dramaGroups = page.groups.map { group ->
+                            group.copy(items = group.items.map { it.withAbsolutePoster() })
+                        },
+                        dramaTotal = page.total,
+                        dramaGroupsLoading = false,
+                        dramaError = null,
+                    )
+                    if (reset && page.groups.isEmpty() && page.scanRunning) {
+                        delay(1_500)
+                        loadDramas(reset = true)
+                    }
+                }
+                .onFailure { error ->
+                    val current = mutableState.value
+                    if (
+                        current.surface != MediaSurface.DRAMA ||
+                        requestGeneration != dramaRequestGeneration
+                    ) return@onFailure
+                    if (!handleUnauthorized(error)) {
+                        mutableState.value = current.copy(
+                            dramaGroupsLoading = false,
                             dramaError = "短剧目录暂时无法载入",
                         )
                     }
@@ -1765,9 +2014,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Reloads a strip once the playhead report that preceded it is on the
+     * server. Without the join the two requests race and the strip comes back
+     * describing the position from before the media was opened.
+     */
+    private fun refreshRecentAfter(report: Job?, dramas: Boolean) {
+        viewModelScope.launch {
+            report?.join()
+            if (dramas) loadRecentDramas() else loadRecentMovies()
+        }
+    }
+
     private fun loadRecentDramas() {
         if (!api.hasSession()) return
-        viewModelScope.launch {
+        // The strip is reloaded right after a playhead report and again when the
+        // surface is restored, so an older response can still be in flight. It
+        // describes the watch list from before the report, and letting it land
+        // last is how a strip ended up one entry short of what was just watched.
+        recentDramaJob?.cancel()
+        recentDramaJob = viewModelScope.launch {
             runApi { api.recentDramas() }
                 .onSuccess { items ->
                     mutableState.value = mutableState.value.copy(
@@ -2186,7 +2452,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshDramaLibrary() {
         dramaCatalogDirty = true
         if (mutableState.value.surface == MediaSurface.DRAMA) {
-            // A rescan can drop or add episodes, so any open detail page is stale.
+            // A rescan can drop or add episodes, so any open detail page is
+            // stale, and it can move a series between category folders, so an
+            // open category page is stale too.
+            closeDramaGroup()
             mutableState.value = mutableState.value.copy(selectedDrama = null, nowPlaying = null)
             dramaDetailJob?.cancel()
             loadDramas(reset = true)
@@ -2512,3 +2781,10 @@ private const val DEFAULT_MOVIE_SORT = "cover"
 // move for a seek to be reported straight away.
 private const val PROGRESS_REPORT_INTERVAL_MS = 15_000L
 private const val PROGRESS_REPORT_SEEK_MS = 30_000L
+
+/**
+ * How much of an episode has to be behind the playhead before it counts as
+ * watched. It matches the server's ``WATCH_COMPLETE_RATIO``, which is the ratio
+ * that decides whether the strip advances to the next episode.
+ */
+private const val FINISHED_EPISODE_RATIO = 0.95

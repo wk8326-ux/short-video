@@ -1,14 +1,17 @@
 package you.deepfuck.shortvideo
 
 import android.Manifest
+import android.app.PictureInPictureParams
 import android.content.ClipData
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,6 +27,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.core.content.FileProvider
@@ -39,6 +43,16 @@ import you.deepfuck.shortvideo.logging.AppLogStore
 
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
+    /**
+     * Compose needs to know about the floating window so it can drop the
+     * chrome: the same layout that fills a phone is only a thumbnail here.
+     */
+    private val pipMode = mutableStateOf(false)
+    /**
+     * `onPause` fires before the system reports the PiP transition, so the
+     * request is latched here and released once the callback arrives.
+     */
+    private var pipRequested = false
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { }
@@ -75,7 +89,9 @@ class MainActivity : ComponentActivity() {
                     Box(Modifier.fillMaxSize()) {
                         ShortVideoApp(
                             viewModel = viewModel,
+                            pipMode = pipMode.value,
                             onFullscreenChanged = ::setPlayerFullscreen,
+                            onPipRequested = ::enterPlayerPip,
                             onBackgroundPlaybackRequested = ::requestMediaNotificationPermission,
                             onDownloadAppUpdate = ::downloadAppUpdate,
                             onInstallAppUpdate = ::installAppUpdate,
@@ -98,8 +114,26 @@ class MainActivity : ComponentActivity() {
         // Leaving the app is the one moment the server copy of the playhead
         // really matters, so this report skips the usual throttle.
         viewModel.saveCurrentPosition(forceReport = true)
-        viewModel.onAppBackgrounded()
         super.onPause()
+    }
+
+    /**
+     * Playback is only torn down once the activity is truly hidden. A floating
+     * window keeps the activity visible, so shrinking the video no longer
+     * silences it the way a plain trip to the home screen does.
+     */
+    override fun onStop() {
+        if (!isInPictureInPictureMode && !pipRequested) viewModel.onAppBackgrounded()
+        super.onStop()
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipRequested = false
+        pipMode.value = isInPictureInPictureMode
     }
 
     private fun setPlayerFullscreen(fullscreen: Boolean) {
@@ -119,6 +153,34 @@ class MainActivity : ComponentActivity() {
                 show(WindowInsetsCompat.Type.systemBars())
             }
         }
+    }
+
+    /**
+     * Shrinks the running video into a floating window. The window keeps the
+     * same aspect ratio as the decoded frame so the picture is not letterboxed
+     * into a fixed 16:9 box.
+     */
+    private fun enterPlayerPip() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        pipRequested = true
+        val entered = runCatching {
+            enterPictureInPictureMode(
+                PictureInPictureParams.Builder()
+                    .setAspectRatio(currentPlayerAspectRatio())
+                    .build(),
+            )
+        }.getOrDefault(false)
+        if (!entered) pipRequested = false
+    }
+
+    private fun currentPlayerAspectRatio(): Rational {
+        val size = runCatching { viewModel.playback.player.videoSize }.getOrNull()
+        val width = size?.width ?: 0
+        val height = size?.height ?: 0
+        if (width <= 0 || height <= 0) return Rational(16, 9)
+        // The platform rejects ratios outside roughly 0.42:1 … 2.39:1.
+        val ratio = (width.toDouble() / height.toDouble()).coerceIn(0.42, 2.39)
+        return Rational((ratio * 1000).toInt(), 1000)
     }
 
     private fun requestMediaNotificationPermission() {

@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Forward10
 import androidx.compose.material.icons.outlined.Fullscreen
 import androidx.compose.material.icons.outlined.FullscreenExit
+import androidx.compose.material.icons.outlined.PictureInPictureAlt
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay10
 import androidx.compose.material3.CircularProgressIndicator
@@ -71,6 +72,7 @@ internal fun FeedScreen(
     player: PlayerSnapshot,
     exoPlayer: ExoPlayer,
     fullscreen: Boolean,
+    pipMode: Boolean,
     onSurface: (MediaSurface) -> Unit,
     onMode: (FeedMode) -> Unit,
     onActive: (Int) -> Unit,
@@ -81,6 +83,7 @@ internal fun FeedScreen(
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
+    onPip: () -> Unit,
     onManage: () -> Unit,
     onCheckUpdate: () -> Unit,
     onLogout: () -> Unit,
@@ -131,11 +134,13 @@ internal fun FeedScreen(
                 playerHost = movablePlayerHost,
                 muted = state.muted,
                 fullscreen = fullscreen,
+                pipMode = pipMode,
                 onTogglePlayback = onTogglePlayback,
                 onMuted = onMuted,
                 onSeek = onSeek,
                 onSeekBy = onSeekBy,
                 onFullscreen = onFullscreen,
+                onPip = onPip,
                 onChromeVisible = { visible ->
                     if (index == pagerState.currentPage) fullscreenChromeVisible = visible
                 },
@@ -167,11 +172,13 @@ private fun FeedPage(
     playerHost: @Composable () -> Unit,
     muted: Boolean,
     fullscreen: Boolean,
+    pipMode: Boolean,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
+    onPip: () -> Unit,
     onChromeVisible: (Boolean) -> Unit,
 ) {
     var chromeVisible by remember(fullscreen, entry.id) { mutableStateOf(true) }
@@ -244,7 +251,7 @@ private fun FeedPage(
         if (shouldAttachFeedPlayer(active, entry.id, player.mediaId)) playerHost()
         BufferSpinner(active && player.isBuffering && player.mediaId == entry.id)
 
-        val controlsVisible = !fullscreen || chromeVisible
+        val controlsVisible = !pipMode && (!fullscreen || chromeVisible)
         if (controlsVisible) {
             Box(
                 Modifier
@@ -296,6 +303,12 @@ private fun FeedPage(
                 ) {
                     Icon(if (fullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen, contentDescription = null)
                 }
+                OverlayIconControl(
+                    label = "浮窗播放",
+                    onClick = onPip,
+                ) {
+                    Icon(Icons.Outlined.PictureInPictureAlt, contentDescription = null)
+                }
             }
             ProgressControl(
                 player = player,
@@ -304,7 +317,7 @@ private fun FeedPage(
             )
         }
 
-        val showPortraitPlay = !fullscreen && !player.playWhenReady
+        val showPortraitPlay = !fullscreen && !pipMode && !player.playWhenReady
         if (active && showPortraitPlay && player.mediaId == entry.id) {
             OverlayIconControl(
                 label = "播放",
@@ -320,7 +333,7 @@ private fun FeedPage(
             }
         }
 
-        if (active && fullscreen && chromeVisible && player.mediaId == entry.id) {
+        if (active && fullscreen && !pipMode && chromeVisible && player.mediaId == entry.id) {
             Row(
                 modifier = Modifier.align(Alignment.Center),
                 horizontalArrangement = Arrangement.spacedBy(36.dp),

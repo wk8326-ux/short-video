@@ -195,6 +195,71 @@ async def test_each_series_returns_once_with_the_episode_to_resume(
 
 
 @pytest.mark.asyncio
+async def test_a_finished_episode_hands_the_series_to_the_next_one(
+    monkeypatch, tmp_path
+):
+    """A short-drama episode is minutes long, so finishing one is the normal way
+    to leave a show.
+
+    Dropping the series the moment its newest episode completed emptied the
+    strip of exactly the shows the user had just worked through — hit a few
+    episodes in a row and only the one left half-watched stayed. The tile has
+    to stay put and point at the episode that comes next.
+    """
+    main = await boot(monkeypatch, tmp_path)
+    source = await scanned_drama_source(main)
+    series = drama_rows(main, source)
+    swap = episode_ids(main, source, str(series[SERIES_SWAP]["id"]))
+    first = swap["交换游戏 第01集 [91crdj-1172-1].mp4"]
+    second = swap["交换游戏 第02集 [91crdj-1172-2].mp4"]
+
+    with TestClient(main.app) as client:
+        headers = headers_for(main)
+        client.post(
+            "/api/progress",
+            json={"videoId": first, "positionMs": 590_000, "durationMs": 600_000},
+            headers=headers,
+        )
+        assert stored_progress(main)[first]["completed"] == 1
+
+        body = client.get("/api/dramas/recent", headers=headers).json()
+
+    assert [item["id"] for item in body["items"]] == [series[SERIES_SWAP]["id"]]
+    assert body["items"][0]["episodeId"] == second
+    assert body["items"][0]["resumePositionMs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_the_last_episode_of_a_finished_series_replays_from_the_top(
+    monkeypatch, tmp_path
+):
+    """Nothing follows the finale, but the show is still the last thing watched.
+
+    The tile keeps naming it and starts it over instead of resuming on the end
+    credits, which is what a linear position would have done.
+    """
+    main = await boot(monkeypatch, tmp_path)
+    source = await scanned_drama_source(main)
+    series = drama_rows(main, source)
+    swap = episode_ids(main, source, str(series[SERIES_SWAP]["id"]))
+    finale = swap["交换游戏 第03集 [91crdj-1172-3].mp4"]
+
+    with TestClient(main.app) as client:
+        headers = headers_for(main)
+        client.post(
+            "/api/progress",
+            json={"videoId": finale, "positionMs": 600_000, "durationMs": 600_000},
+            headers=headers,
+        )
+
+        body = client.get("/api/dramas/recent", headers=headers).json()
+
+    assert [item["id"] for item in body["items"]] == [series[SERIES_SWAP]["id"]]
+    assert body["items"][0]["episodeId"] == finale
+    assert body["items"][0]["resumePositionMs"] == 0
+
+
+@pytest.mark.asyncio
 async def test_removing_a_library_takes_its_history_with_it(monkeypatch, tmp_path):
     main = await boot(monkeypatch, tmp_path)
     source = await movie_source_with(main, ["AAA-001"])
