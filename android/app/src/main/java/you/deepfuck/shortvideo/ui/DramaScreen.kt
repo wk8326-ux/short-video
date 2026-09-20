@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -30,23 +32,16 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.LiveTv
 import androidx.compose.material.icons.outlined.Refresh
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -63,11 +58,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -97,8 +90,8 @@ internal fun DramaScreen(
     imageLoader: ImageLoader,
     fullscreen: Boolean,
     listPosition: ListPosition,
-    onQuery: (String) -> Unit,
     onSelect: (DramaItem) -> Unit,
+    onResume: (DramaItem) -> Unit,
     onBack: () -> Unit,
     onResumeEpisode: (DramaItem, List<DramaEpisode>) -> DramaEpisode?,
     onPlayEpisode: (DramaItem, DramaEpisode) -> Unit,
@@ -158,19 +151,11 @@ internal fun DramaScreen(
         initialFirstVisibleItemScrollOffset = safePosition.offset,
     )
     var listPositionRestored by remember { mutableStateOf(false) }
-    var observedQuery by remember { mutableStateOf(state.dramaQuery) }
     LaunchedEffect(state.dramaItems.size) {
         if (!listPositionRestored && state.dramaItems.isNotEmpty()) {
             val restored = initialListPosition.clamp(state.dramaItems.size)
             gridState.scrollToItem(restored.index, restored.offset)
             listPositionRestored = true
-        }
-    }
-    LaunchedEffect(state.dramaQuery) {
-        if (state.dramaQuery != observedQuery) {
-            observedQuery = state.dramaQuery
-            gridState.scrollToItem(0)
-            onListPosition(ListPosition())
         }
     }
 
@@ -187,8 +172,8 @@ internal fun DramaScreen(
         state = state,
         imageLoader = imageLoader,
         gridState = gridState,
-        onQuery = onQuery,
         onSelect = onSelect,
+        onResume = onResume,
         onRetry = onRetry,
     )
 }
@@ -229,11 +214,10 @@ private fun DramaWall(
     state: AppUiState,
     imageLoader: ImageLoader,
     gridState: LazyGridState,
-    onQuery: (String) -> Unit,
     onSelect: (DramaItem) -> Unit,
+    onResume: (DramaItem) -> Unit,
     onRetry: () -> Unit,
 ) {
-    val focusManager = LocalFocusManager.current
     Column(
         Modifier
             .fillMaxSize()
@@ -241,58 +225,6 @@ private fun DramaWall(
             .statusBarsPadding()
             .padding(top = 62.dp),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedTextField(
-                value = state.dramaQuery,
-                onValueChange = onQuery,
-                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                singleLine = true,
-                placeholder = { Text("搜索短剧") },
-                leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
-                trailingIcon = if (state.dramaQuery.isNotEmpty()) {
-                    {
-                        IconButton(onClick = { onQuery("") }) {
-                            Icon(Icons.Outlined.Close, contentDescription = "清除搜索")
-                        }
-                    }
-                } else {
-                    null
-                },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
-                shape = ControlShape,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = CanvasSoft,
-                    unfocusedContainerColor = CanvasSoft,
-                    focusedBorderColor = GlassLine,
-                    unfocusedBorderColor = Line,
-                    cursorColor = AccentSoft,
-                ),
-            )
-            Box(
-                modifier = Modifier
-                    .height(48.dp)
-                    .width(62.dp)
-                    .glassSurface(fill = GlassFillSoft)
-                    .semantics { contentDescription = "共 ${state.dramaTotal} 部短剧" },
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        state.dramaTotal.toString(),
-                        color = TextPrimary,
-                        fontWeight = FontWeight.SemiBold,
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                    Text("部短剧", color = TextFaint, style = MaterialTheme.typography.labelSmall)
-                }
-            }
-        }
-
         when {
             state.dramaItems.isEmpty() && state.dramaLoading -> DramaSkeletonGrid()
             state.dramaItems.isEmpty() && state.dramaError != null -> DramaWallState(
@@ -301,26 +233,147 @@ private fun DramaWall(
                 onAction = onRetry,
             )
             state.dramaItems.isEmpty() -> DramaWallState(
-                title = if (state.dramaQuery.isBlank()) "还没有短剧索引" else "没有匹配的短剧",
-                action = if (state.dramaQuery.isBlank()) null else "清除搜索",
-                onAction = { onQuery("") },
+                title = "还没有短剧索引",
+                action = null,
+                onAction = {},
             )
-            else -> LazyVerticalGrid(
-                columns = GridCells.Adaptive(112.dp),
-                state = gridState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 34.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                items(state.dramaItems, key = DramaItem::id) { drama ->
-                    DramaCard(drama, imageLoader, onClick = { onSelect(drama) })
+            else -> Column(Modifier.fillMaxSize()) {
+                if (state.recentDramas.isNotEmpty()) {
+                    DramaRecentStrip(
+                        items = state.recentDramas,
+                        imageLoader = imageLoader,
+                        onResume = onResume,
+                    )
                 }
-                if (state.dramaLoading) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(112.dp),
+                    state = gridState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 34.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    items(state.dramaItems, key = DramaItem::id) { drama ->
+                        DramaCard(drama, imageLoader, onClick = { onSelect(drama) })
+                    }
+                    if (state.dramaLoading) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
+                            }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * "Continue watching" for short dramas: the last ten series the app saw, each
+ * one reopening on the episode that was interrupted.
+ */
+@Composable
+private fun DramaRecentStrip(
+    items: List<DramaItem>,
+    imageLoader: ImageLoader,
+    onResume: (DramaItem) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .width(3.dp)
+                    .height(15.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Accent),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "最近播放",
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                "${items.size} 部",
+                color = TextFaint,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+            )
+        }
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 13.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(items, key = { "recent-" + it.id }) { drama ->
+                Surface(
+                    onClick = { onResume(drama) },
+                    modifier = Modifier
+                        .width(124.dp)
+                        .semantics { contentDescription = "继续观看 ${drama.title}" },
+                    color = Color.Transparent,
+                    contentColor = TextPrimary,
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Column {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(2f / 3f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Raised),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            val poster = drama.posterUrl
+                            if (poster.isNullOrBlank()) {
+                                Text(
+                                    drama.title,
+                                    color = TextSecondary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    textAlign = TextAlign.Center,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(8.dp),
+                                )
+                            } else {
+                                AsyncImage(
+                                    model = poster,
+                                    imageLoader = imageLoader,
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop,
+                                )
+                            }
+                            Text(
+                                "继续观看",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                modifier = Modifier
+                                    .align(Alignment.BottomStart)
+                                    .padding(6.dp)
+                                    .glassSurface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        fill = Color.Black.copy(alpha = 0.55f),
+                                    )
+                                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                            )
+                        }
+                        Spacer(Modifier.height(7.dp))
+                        Text(
+                            drama.title,
+                            color = TextPrimary,
+                            fontWeight = FontWeight.Medium,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import posixpath
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from app.alist import AListClient, AListError
@@ -39,19 +39,45 @@ class StepPlan:
 
 def initial_steps(
     scan_mode: str,
-    root_path: str,
+    root_paths: Sequence[str] | str,
     *,
     search_paths: tuple[str, ...] = (),
 ) -> list[tuple[str, str]]:
-    root = "/" + root_path.strip("/")
-    if scan_mode == "authors":
-        return [(STEP_AUTHORS, root)]
-    if scan_mode == "authors_recursive":
-        steps: list[tuple[str, str]] = [(STEP_AUTHORS, root)]
-        for path in search_paths or (root_path,):
-            steps.append((STEP_SEARCH, "/" + str(path).strip("/")))
-        return steps
-    return [(STEP_DIRECTORY, root)]
+    """The first steps of a scan, one set per root folder.
+
+    A source may summarise several folders, and each folder is a root in its
+    own right: it earns its own traversal step so its resume pointer, retry
+    budget and error report stay independent of the others. Duplicate steps
+    collapse, which is why an ASMR source that also carries the global search
+    paths costs nothing when the search path is already one of its roots.
+    """
+    steps: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(kind: str, path: str) -> None:
+        step = (kind, path)
+        if step not in seen:
+            seen.add(step)
+            steps.append(step)
+
+    for root_path in _as_roots(root_paths):
+        root = "/" + root_path.strip("/")
+        if scan_mode == "authors":
+            add(STEP_AUTHORS, root)
+        elif scan_mode == "authors_recursive":
+            add(STEP_AUTHORS, root)
+            for path in search_paths or (root,):
+                add(STEP_SEARCH, "/" + str(path).strip("/"))
+        else:
+            add(STEP_DIRECTORY, root)
+    return steps
+
+
+def _as_roots(root_paths: Sequence[str] | str) -> list[str]:
+    """Every accepted shape of "which folders" as a non-empty list of paths."""
+    raw = [root_paths] if isinstance(root_paths, str) else [str(item) for item in root_paths]
+    roots = [path for path in raw if str(path).strip()]
+    return roots or ["/"]
 
 
 class ResumableScanner:

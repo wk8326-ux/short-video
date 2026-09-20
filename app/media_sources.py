@@ -99,10 +99,14 @@ class MediaSourceRegistry:
             if config["section"] in ("movie", "drama")
             else self.settings.video_extensions
         )
+        # One client serves every folder this source was given: the scan steps
+        # and the direct-URL resolver always name an absolute path, so the
+        # "current" folder is only a fallback for callers that predate them.
+        roots = list(config.get("root_paths") or [config["root_path"]])
         client = AListClient(
             self.settings,
             base_url=config["base_url"],
-            media_path=config["root_path"],
+            media_path=roots[0] if roots else "/",
             extensions=extensions,
             anonymous=config["anonymous"],
             token=config["token"],

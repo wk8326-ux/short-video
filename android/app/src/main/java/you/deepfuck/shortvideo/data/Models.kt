@@ -25,6 +25,27 @@ enum class AsmrFilter(val apiValue: String, val label: String) {
     AUDIO("audio", "音频"),
 }
 
+/**
+ * How the movie wall lays its libraries out.
+ *
+ * [SHELVES] is the original wall: six tiles of every library with a "load more"
+ * row underneath. [LIBRARIES] spends one tile on a library, drawn from the
+ * covers it holds, so a wall of twenty libraries still fits on a screen.
+ * [ROWS] gives every library one sideways-scrolling row, the way an Emby
+ * library page reads.
+ */
+enum class MovieWallView(val apiValue: String, val label: String) {
+    SHELVES("shelves", "分栏"),
+    LIBRARIES("libraries", "媒体库"),
+    ROWS("rows", "单行滑动"),
+    ;
+
+    companion object {
+        fun fromValue(value: String?): MovieWallView =
+            entries.firstOrNull { it.apiValue == value } ?: SHELVES
+    }
+}
+
 enum class LibrarySection(val apiValue: String, val label: String) {
     FEED("feed", "短视频 / 长视频"),
     ASMR("asmr", "ASMR"),
@@ -192,6 +213,9 @@ data class MovieItem(
             genres = value.optStringList("genres"),
             performers = value.optStringList("performers"),
             studio = value.optNullableString("studio"),
+            // "Continue watching" is answered by the server, so the resume
+            // point has to survive the trip; the local store is merged on top.
+            resumePositionMs = value.optLong("resumePositionMs"),
         )
     }
 }
@@ -266,6 +290,10 @@ data class DramaItem(
     val matchStatus: String,
     val source: String?,
     val path: String?,
+    /** Where the newest watch of this series stopped, for the resume strip. */
+    val resumePositionMs: Long = 0L,
+    /** Episode that position belongs to, straight from the server. */
+    val resumeEpisodeId: Long? = null,
 ) {
     /** Categories arrive as raw folder names from the downloader. */
     val categoryLabel: String
@@ -286,6 +314,8 @@ data class DramaItem(
             matchStatus = value.optString("matchStatus", "pending"),
             source = value.optNullableString("source"),
             path = value.optNullableString("path"),
+            resumePositionMs = value.optLong("resumePositionMs"),
+            resumeEpisodeId = value.optNullableLong("episodeId"),
         )
     }
 }
@@ -432,6 +462,8 @@ data class MediaLibrarySource(
     val provider: String,
     val baseUrl: String,
     val rootPath: String,
+    /** Every folder this source scans; [rootPath] mirrors the first entry. */
+    val rootPaths: List<String>,
     val section: LibrarySection,
     val scanMode: String,
     val anonymous: Boolean,
@@ -444,13 +476,21 @@ data class MediaLibrarySource(
     val movieMetadata: MovieMetadataSummary?,
     val dramaMetadata: MovieMetadataSummary?,
 ) {
+    /** Folders to show in the manager, tolerating payloads that predate [rootPaths]. */
+    val effectiveRootPaths: List<String>
+        get() = rootPaths.ifEmpty { listOf(rootPath.ifBlank { "/" }) }
+
     companion object {
-        fun fromJson(value: JSONObject): MediaLibrarySource = MediaLibrarySource(
+        fun fromJson(value: JSONObject): MediaLibrarySource {
+            val roots = value.optStringList("rootPaths")
+            val legacyRoot = value.optString("rootPath", "/").ifBlank { "/" }
+            return MediaLibrarySource(
             id = value.optString("id"),
             name = value.optString("name"),
             provider = value.optString("provider", "alist"),
             baseUrl = value.optString("baseUrl"),
-            rootPath = value.optString("rootPath", "/"),
+            rootPath = roots.firstOrNull() ?: legacyRoot,
+            rootPaths = roots.ifEmpty { listOf(legacyRoot) },
             section = LibrarySection.entries.firstOrNull {
                 it.apiValue == value.optString("section")
             } ?: LibrarySection.FEED,
@@ -464,7 +504,8 @@ data class MediaLibrarySource(
             scan = LibraryScanStatus.fromJson(value.optJSONObject("scan")),
             movieMetadata = MovieMetadataSummary.fromJson(value.optJSONObject("movieMetadata")),
             dramaMetadata = MovieMetadataSummary.fromJson(value.optJSONObject("dramaMetadata")),
-        )
+            )
+        }
     }
 }
 
@@ -472,7 +513,8 @@ data class MediaSourceDraft(
     val name: String,
     val provider: String,
     val baseUrl: String,
-    val rootPath: String,
+    /** One entry per folder; the server keeps them all under the same source. */
+    val rootPaths: List<String>,
     val section: LibrarySection,
     val scanMode: String,
     val anonymous: Boolean,
@@ -505,6 +547,9 @@ private fun <T> JSONObject.optObjectList(name: String, parse: (JSONObject) -> T)
 
 private fun JSONObject.optNullableInt(name: String): Int? =
     if (!has(name) || isNull(name)) null else optInt(name)
+
+private fun JSONObject.optNullableLong(name: String): Long? =
+    if (!has(name) || isNull(name)) null else optLong(name)
 
 private fun JSONObject.optNullableDouble(name: String): Double? =
     if (!has(name) || isNull(name)) null else optDouble(name).takeIf { it.isFinite() }

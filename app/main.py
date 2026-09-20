@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from app.alist import AListError
 from app.app_update import AppUpdateStore, InvalidUpdateManifest, UpdateNotPublished
 from app.auth import LoginRateLimiter, SESSION_COOKIE, SessionManager, verify_password
-from app.database import LibraryDatabase
+from app.database import LibraryDatabase, normalize_root_paths
 from app.drama import (
     CATEGORY_SLUGS,
     build_series,
@@ -50,7 +50,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.19"
+APP_VERSION = "1.6.0-beta.20"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -249,9 +249,12 @@ def refresh_source_states() -> None:
 
 
 def _scan_job_matches(job: dict[str, Any], config: dict[str, Any]) -> bool:
+    # The job carries its roots as JSON so a half-finished traversal can be
+    # told apart from one the user has since redefined. Legacy rows hold a
+    # single path and normalise into the same one-item list.
     return (
         str(job["base_url"]) == str(config["base_url"])
-        and str(job["root_path"]) == str(config["root_path"])
+        and normalize_root_paths(job["root_path"]) == list(config["root_paths"])
         and str(job["scan_mode"]) == str(config["scan_mode"])
     )
 
@@ -274,6 +277,7 @@ async def scan_source(source: str) -> bool:
         refresh_scan_summary()
         job: dict[str, Any] | None = None
         try:
+            roots = list(config["root_paths"])
             job = await asyncio.to_thread(
                 database.latest_incomplete_scan_job, source=source
             )
@@ -289,7 +293,7 @@ async def scan_source(source: str) -> bool:
                 job = await asyncio.to_thread(
                     database.create_scan_job,
                     source=source,
-                    root_path=str(config["root_path"]),
+                    root_path=json.dumps(roots),
                     base_url=str(config["base_url"]),
                     scan_mode=str(config["scan_mode"]),
                     section=str(config["section"]),
@@ -299,7 +303,7 @@ async def scan_source(source: str) -> bool:
                     str(job["id"]),
                     initial_steps(
                         str(config["scan_mode"]),
-                        str(config["root_path"]),
+                        roots,
                         search_paths=settings.asmr_search_paths
                         if source == "asmr"
                         else (),
@@ -405,7 +409,7 @@ async def scan_source(source: str) -> bool:
                 series = await asyncio.to_thread(
                     database.sync_drama_index,
                     source,
-                    str(config["root_path"]),
+                    list(config["root_paths"]),
                     build_series,
                 )
                 logger.info("Grouped %s series for %s", series, source)
@@ -1035,7 +1039,11 @@ class MediaSourceRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     provider: Literal["alist", "openlist"] = "alist"
     baseUrl: str = Field(min_length=8, max_length=500)
-    rootPath: str = Field(min_length=1, max_length=500)
+    # A library is often spread over several folders, so the management screen
+    # sends a list. The single-path field stays accepted because older installs
+    # of the app keep sending it, and one folder is just a one-item list.
+    rootPath: str = Field(default="", max_length=500)
+    rootPaths: list[str] = Field(default_factory=list)
     section: Literal["feed", "asmr", "movie", "drama"]
     scanMode: Literal["tree", "authors", "authors_recursive"] | None = None
     anonymous: bool = True
@@ -1050,7 +1058,11 @@ def normalize_source_payload(payload: MediaSourceRequest) -> dict[str, Any]:
     parsed = urlsplit(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username:
         raise HTTPException(status_code=422, detail="AList 地址必须是有效的 HTTP(S) 地址")
-    root_path = "/" + payload.rootPath.strip().strip("/")
+    submitted = [*payload.rootPaths, payload.rootPath]
+    roots = normalize_root_paths(submitted, fallback="")
+    if not any(str(candidate).strip() for candidate in submitted):
+        raise HTTPException(status_code=422, detail="至少需要一个根目录")
+    root_path = roots[0]
     tree_sections = {"feed", "movie", "drama"}
     scan_mode = payload.scanMode or (
         "tree" if payload.section in tree_sections else "authors_recursive"
@@ -1064,6 +1076,7 @@ def normalize_source_payload(payload: MediaSourceRequest) -> dict[str, Any]:
         "provider": payload.provider,
         "base_url": base_url,
         "root_path": root_path,
+        "root_paths": roots,
         "section": payload.section,
         "scan_mode": scan_mode,
         "anonymous": payload.anonymous,
@@ -1090,6 +1103,7 @@ def public_source(
         "provider": source["provider"],
         "baseUrl": source["base_url"],
         "rootPath": source["root_path"],
+        "rootPaths": list(source["root_paths"]),
         "section": source["section"],
         "scanMode": source["scan_mode"],
         "anonymous": source["anonymous"],
@@ -2055,6 +2069,33 @@ async def report_media_metadata(video_id: int, payload: MediaMetadataReport):
     )
 
 
+class WatchProgressRequest(BaseModel):
+    videoId: int
+    positionMs: int = Field(default=0, ge=0)
+    durationMs: int = Field(default=0, ge=0)
+
+
+@app.post("/api/progress", status_code=204)
+async def save_watch_progress(payload: WatchProgressRequest) -> Response:
+    """Remember where one device left off.
+
+    The position is stored against the media row rather than the phone, so
+    "continue watching" is the same list on every device and survives a
+    reinstall. Reporting is deliberately boring: the client sends what it has
+    every few seconds and the newest report wins.
+    """
+    video = await asyncio.to_thread(database.get_video, payload.videoId)
+    if not video:
+        raise HTTPException(status_code=404, detail="Media not found")
+    await asyncio.to_thread(
+        database.record_watch_progress,
+        video_id=payload.videoId,
+        position_ms=payload.positionMs,
+        duration_ms=payload.durationMs,
+    )
+    return Response(status_code=204)
+
+
 @app.get("/api/asmr/authors")
 async def asmr_authors(
     q: str = Query(default="", max_length=100),
@@ -2287,6 +2328,35 @@ async def movies(
     }
 
 
+@app.get("/api/movies/recent")
+async def recent_movies(
+    limit: int = Query(default=10, ge=1, le=24),
+) -> dict[str, Any]:
+    """The films to pick back up: unfinished, most recently watched first.
+
+    Declared before ``/api/movies/{movie_id}`` so the literal path is matched
+    as a path and not read as a movie id.
+    """
+    sources = source_registry.ids("movie")
+    rows = await asyncio.to_thread(
+        database.recent_movies,
+        sources=sources,
+        limit=limit,
+    )
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = public_movie(row)
+        item["resumePositionMs"] = int(row.get("resume_position_ms") or 0)
+        item["watchedAt"] = row.get("watched_at")
+        items.append(item)
+    if rows:
+        spawn_background(
+            prewarm_movie_wall_images(rows, limit=len(rows)),
+            name="prewarm-recent-movies",
+        )
+    return {"items": items}
+
+
 @app.get("/api/movies/{movie_id}")
 async def movie_detail(movie_id: int) -> dict[str, Any]:
     row = await asyncio.to_thread(
@@ -2378,6 +2448,37 @@ async def dramas(
             )
         },
     }
+
+
+@app.get("/api/dramas/recent")
+async def recent_dramas(
+    limit: int = Query(default=10, ge=1, le=24),
+) -> dict[str, Any]:
+    """The series to pick back up, one entry per show, newest watch first.
+
+    Declared before ``/api/dramas/{drama_id}`` so the literal path is matched
+    as a path rather than read as a series id.
+    """
+    sources = source_registry.ids("drama")
+    rows = await asyncio.to_thread(
+        database.recent_dramas,
+        sources=sources,
+        limit=limit,
+    )
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        item = public_drama(row)
+        resume_video_id = row.get("resume_video_id")
+        item["episodeId"] = int(resume_video_id) if resume_video_id else None
+        item["resumePositionMs"] = int(row.get("resume_position_ms") or 0)
+        item["watchedAt"] = row.get("watched_at")
+        items.append(item)
+    if rows:
+        spawn_background(
+            prewarm_drama_posters(rows, limit=len(rows)),
+            name="prewarm-recent-dramas",
+        )
+    return {"items": items}
 
 
 @app.get("/api/dramas/{drama_id}")

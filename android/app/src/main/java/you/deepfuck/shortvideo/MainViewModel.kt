@@ -38,6 +38,7 @@ import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.data.MediaSourceDraft
 import you.deepfuck.shortvideo.data.MovieGroup
 import you.deepfuck.shortvideo.data.MovieItem
+import you.deepfuck.shortvideo.data.MovieWallView
 import you.deepfuck.shortvideo.data.PlaybackPreferences
 import you.deepfuck.shortvideo.media.PlaybackEngine
 import you.deepfuck.shortvideo.media.PlaybackEndedEvent
@@ -81,6 +82,9 @@ data class AppUiState(
     val movieSort: String = "cover",
     val movieGroups: List<MovieGroup> = emptyList(),
     val movieGroupsLoading: Boolean = false,
+    val movieWallView: MovieWallView = MovieWallView.SHELVES,
+    val recentMovies: List<MovieItem> = emptyList(),
+    val recentDramas: List<DramaItem> = emptyList(),
     // One library opened full-screen ("加载更多"): its own cursor, sort and
     // paging state, so the wall behind it keeps whatever it had loaded.
     val openMovieGroupId: String? = null,
@@ -138,6 +142,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             surface = initialSurface,
             mode = preferences.mode,
             muted = preferences.muted(initialSurface),
+            movieWallView = preferences.movieWallView,
             asmrVideoBackgroundPlayback = preferences.asmrVideoBackgroundPlayback,
             selectedAuthor = preferences.selectedAsmrAuthor,
             nowPlaying = restoredMedia.takeIf {
@@ -178,9 +183,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var movieGroupPageGeneration = 0L
     private var movieRequestGeneration = 0L
     private var movieCatalogDirty = false
+    private var recentJob: Job? = null
+    private var progressReportJob: Job? = null
+    private var reportedVideoId: Long? = null
+    private var reportedPositionMs: Long = 0L
+    private var reportedAtMs: Long = 0L
     private var dramaJob: Job? = null
     private var dramaSearchJob: Job? = null
     private var dramaDetailJob: Job? = null
+    private var pendingDramaResume: String? = null
     private var dramaRequestGeneration = 0L
     private var dramaCatalogDirty = false
     private var appUpdateJob: Job? = null
@@ -241,7 +252,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun logout() {
         appUpdateJob?.cancel()
         appUpdateObserverJob?.cancel()
-        saveCurrentPosition()
+        saveCurrentPosition(forceReport = true)
         viewModelScope.launch(Dispatchers.IO) { api.logout() }
         playback.stop()
         stopPlaybackService()
@@ -253,7 +264,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val previousSurface = mutableState.value.surface
         if (surface == previousSurface) return
         logs.info("surface_change", "from=$previousSurface to=$surface media=${playback.snapshot.value.mediaId}")
-        saveCurrentPosition()
+        saveCurrentPosition(forceReport = true)
         when {
             previousSurface == MediaSurface.ASMR -> persistAsmrPlaybackState()
             previousSurface.isFeed -> persistCurrentFeedSession()
@@ -350,7 +361,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         when {
             mutableState.value.surface == MediaSurface.ASMR -> persistAsmrPlaybackState()
             mutableState.value.surface.isFeed -> persistCurrentFeedSession()
-            mutableState.value.surface == MediaSurface.MOVIE -> saveCurrentPosition()
+            // Pausing is the usual "I am done for now": push the playhead now.
+            mutableState.value.surface == MediaSurface.MOVIE -> saveCurrentPosition(forceReport = true)
         }
         if (playback.player.playWhenReady && keepCurrentAsmrPlaybackInBackground()) {
             startPlaybackService()
@@ -520,7 +532,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeAsmrPlayer() {
-        saveCurrentPosition()
+        saveCurrentPosition(forceReport = true)
         playback.stop()
         stopPlaybackService()
         asmrQueueKey = null
@@ -537,6 +549,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         movieRequestGeneration += 1L
         mutableState.value = mutableState.value.copy(movieSort = sort, movieError = null)
         if (mutableState.value.surface == MediaSurface.MOVIE) loadMovies(reset = true)
+    }
+
+    /**
+     * The wall has three layouts over the same data; only the drawing changes,
+     * so switching one never refetches.
+     */
+    fun setMovieWallView(view: MovieWallView) {
+        if (view == mutableState.value.movieWallView) return
+        preferences.movieWallView = view
+        mutableState.value = mutableState.value.copy(movieWallView = view)
     }
 
     fun setMovieQuery(query: String) {
@@ -738,7 +760,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeMovieDetail() {
         if (mutableState.value.surface != MediaSurface.MOVIE) return
-        saveCurrentPosition()
+        saveCurrentPosition(forceReport = true)
         movieDetailJob?.cancel()
         playback.stop()
         playback.prefetch(MediaSurface.MOVIE, emptyList())
@@ -814,6 +836,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         selectedDrama = detail.copy(item = detail.item.withAbsolutePoster()),
                         dramaDetailLoading = false,
                     )
+                    if (pendingDramaResume == drama.id) {
+                        pendingDramaResume = null
+                        // The strip may hold the only known position (a reinstall
+                        // or a second device), so seed the local store before the
+                        // player reads it.
+                        val target = detail.episodes.firstOrNull { it.videoId == preferences.dramaEpisodeId(drama.id) }
+                            ?: detail.episodes.firstOrNull { it.videoId == drama.resumeEpisodeId }
+                            ?: detail.episodes.firstOrNull()
+                        if (target != null) {
+                            if (drama.resumePositionMs > preferences.position(target.videoId)) {
+                                preferences.savePosition(
+                                    target.videoId,
+                                    drama.resumePositionMs,
+                                    (target.durationSeconds ?: 0.0).times(1_000).toLong(),
+                                )
+                            }
+                            playDramaEpisode(detail.item, target)
+                            return@onSuccess
+                        }
+                    }
                     // The first episode is the likeliest next tap, so warm it while
                     // the user is still reading the synopsis.
                     detail.episodes.firstOrNull()?.let { first ->
@@ -824,6 +866,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!handleUnauthorized(error)) {
                         val state = mutableState.value
                         if (state.surface == MediaSurface.DRAMA && state.selectedDrama?.item?.id == drama.id) {
+                            if (pendingDramaResume == drama.id) pendingDramaResume = null
                             mutableState.value = state.copy(
                                 dramaDetailLoading = false,
                                 dramaError = "无法载入分集列表",
@@ -832,6 +875,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
         }
+    }
+
+    /**
+     * "Continue watching" from the short-drama strip: open the series and drop
+     * straight back into the episode that was interrupted.
+     */
+    fun resumeDrama(drama: DramaItem) {
+        if (mutableState.value.surface != MediaSurface.DRAMA) return
+        pendingDramaResume = drama.id
+        selectDrama(drama)
     }
 
     /** Episode the user should continue from, or null when nothing was watched. */
@@ -844,7 +897,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Leave playback but stay on the series page. */
     fun stopDramaPlayback() {
         if (mutableState.value.surface != MediaSurface.DRAMA) return
-        saveCurrentPosition()
+        saveCurrentPosition(forceReport = true)
         playback.stop()
         playback.prefetch(MediaSurface.DRAMA, emptyList())
         stopPlaybackService()
@@ -875,7 +928,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeDramaDetail() {
         if (mutableState.value.surface != MediaSurface.DRAMA) return
-        saveCurrentPosition()
+        saveCurrentPosition(forceReport = true)
         dramaDetailJob?.cancel()
         playback.stop()
         playback.prefetch(MediaSurface.DRAMA, emptyList())
@@ -1290,12 +1343,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun saveCurrentPosition() {
+    fun saveCurrentPosition(forceReport: Boolean = false) {
         val snapshot = playback.snapshot.value
         snapshot.mediaId?.let {
             preferences.savePosition(it, snapshot.positionMs, snapshot.durationMs)
+            reportWatchProgress(it, snapshot.positionMs, snapshot.durationMs, force = forceReport)
         }
         if (mutableState.value.surface == MediaSurface.MOVIE) updateMovieResumePosition()
+    }
+
+    /**
+     * Mirrors the local position to the server so "继续观看" survives a
+     * reinstall or a second phone.
+     *
+     * The local write happens every second, which is far too often to talk to
+     * the network: reports are coalesced to one every [PROGRESS_REPORT_INTERVAL_MS]
+     * and flushed early whenever the position jumps (a seek) or the user leaves
+     * the media.
+     */
+    private fun reportWatchProgress(
+        mediaId: Long,
+        positionMs: Long,
+        durationMs: Long,
+        force: Boolean,
+    ) {
+        if (mediaId <= 0L || !api.hasSession()) return
+        val now = System.currentTimeMillis()
+        val sameMedia = reportedVideoId == mediaId
+        val unchanged = sameMedia &&
+            now - reportedAtMs < PROGRESS_REPORT_INTERVAL_MS &&
+            kotlin.math.abs(positionMs - reportedPositionMs) < PROGRESS_REPORT_SEEK_MS
+        if (!force && unchanged) return
+        reportedVideoId = mediaId
+        reportedPositionMs = positionMs
+        reportedAtMs = now
+        progressReportJob?.cancel()
+        progressReportJob = viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) { api.recordProgress(mediaId, positionMs, durationMs) }
+            }
+        }
     }
 
     internal fun asmrAuthorListPosition(): ListPosition = preferences.asmrAuthorListPosition()
@@ -1430,6 +1517,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (movieCatalogDirty || catalogEmpty) {
             loadMovies(reset = true)
         }
+        loadRecentMovies()
     }
 
     private fun restoreDramaSurface() {
@@ -1442,6 +1530,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (dramaCatalogDirty || mutableState.value.dramaItems.isEmpty()) {
             loadDramas(reset = true)
         }
+        loadRecentDramas()
     }
 
     private fun loadDramas(reset: Boolean) {
@@ -1569,7 +1658,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             posterUrl = posterUrl?.let(api::absoluteUrl),
             backdropUrl = backdropUrl?.let(api::absoluteUrl),
             wallUrl = wallUrl?.let(api::absoluteUrl),
-            resumePositionMs = preferences.position(videoId),
+            // The server's position is what a second device or a reinstall
+            // brings back; the local one is usually fresher because reports are
+            // throttled. The further along of the two is the useful one.
+            resumePositionMs = maxOf(preferences.position(videoId), resumePositionMs),
         )
 
     private fun loadMovieGroups(reset: Boolean) {
@@ -1651,6 +1743,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieItems = state.movieItems.map { if (it.id == updated.id) updated else it },
             movieGroups = state.movieGroups.map { it.withItem(updated) },
         )
+    }
+
+    /**
+     * The "继续观看" strips.
+     *
+     * They are small, capped lists that the server derives from the newest
+     * position per title, so both surfaces refresh them from one request each
+     * rather than paging the whole catalogue.
+     */
+    private fun loadRecentMovies() {
+        if (!api.hasSession()) return
+        recentJob?.cancel()
+        recentJob = viewModelScope.launch {
+            runApi { api.recentMovies() }
+                .onSuccess { items ->
+                    mutableState.value = mutableState.value.copy(
+                        recentMovies = items.map { it.withResumePosition() },
+                    )
+                }
+        }
+    }
+
+    private fun loadRecentDramas() {
+        if (!api.hasSession()) return
+        viewModelScope.launch {
+            runApi { api.recentDramas() }
+                .onSuccess { items ->
+                    mutableState.value = mutableState.value.copy(
+                        recentDramas = items.map { it.withAbsolutePoster() },
+                    )
+                }
+        }
     }
 
     private fun restoreFeed(surface: MediaSurface) {
@@ -2056,6 +2180,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshMovieLibrary() {
         movieCatalogDirty = true
         if (mutableState.value.surface == MediaSurface.MOVIE) loadMovies(reset = true)
+        if (mutableState.value.surface == MediaSurface.MOVIE) loadRecentMovies()
     }
 
     private fun refreshDramaLibrary() {
@@ -2065,6 +2190,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             mutableState.value = mutableState.value.copy(selectedDrama = null, nowPlaying = null)
             dramaDetailJob?.cancel()
             loadDramas(reset = true)
+            loadRecentDramas()
         }
     }
 
@@ -2372,7 +2498,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         appUpdateJob?.cancel()
         appUpdateObserverJob?.cancel()
-        saveCurrentPosition()
+        saveCurrentPosition(forceReport = true)
         playback.setOnPlaybackEndedListener(null)
         playback.setOnMediaTransitionListener(null)
         super.onCleared()
@@ -2381,3 +2507,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
 /** A library's own page opens on the same ordering the wall uses. */
 private const val DEFAULT_MOVIE_SORT = "cover"
+
+// How often the local playhead is mirrored to the server, and how far it has to
+// move for a seek to be reported straight away.
+private const val PROGRESS_REPORT_INTERVAL_MS = 15_000L
+private const val PROGRESS_REPORT_SEEK_MS = 30_000L

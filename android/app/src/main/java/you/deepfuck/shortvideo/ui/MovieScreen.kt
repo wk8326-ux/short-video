@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -27,6 +28,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -46,6 +49,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Forward10
 import androidx.compose.material.icons.outlined.Fullscreen
 import androidx.compose.material.icons.outlined.FullscreenExit
@@ -99,6 +103,7 @@ import you.deepfuck.shortvideo.AppUiState
 import you.deepfuck.shortvideo.ListPosition
 import you.deepfuck.shortvideo.data.MovieItem
 import you.deepfuck.shortvideo.data.MovieGroup
+import you.deepfuck.shortvideo.data.MovieWallView
 import you.deepfuck.shortvideo.media.PlayerSnapshot
 import you.deepfuck.shortvideo.shouldLoadMore
 
@@ -117,6 +122,7 @@ internal fun MovieScreen(
     onCloseGroup: () -> Unit,
     onGroupSort: (String) -> Unit,
     onLoadMoreGroup: () -> Unit,
+    onWallView: (MovieWallView) -> Unit,
     onRetry: () -> Unit,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
@@ -195,6 +201,7 @@ internal fun MovieScreen(
         wallState = wallState,
         onSelect = onSelect,
         onOpenGroup = onOpenGroup,
+        onWallView = onWallView,
         onRetry = onRetry,
     )
 }
@@ -252,10 +259,12 @@ private fun MovieCatalog(
     wallState: LazyListState,
     onSelect: (MovieItem) -> Unit,
     onOpenGroup: (String) -> Unit,
+    onWallView: (MovieWallView) -> Unit,
     onRetry: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var jumpMenuOpen by remember { mutableStateOf(false) }
+    var viewMenuOpen by remember { mutableStateOf(false) }
     Column(
         Modifier
             .fillMaxSize()
@@ -269,6 +278,38 @@ private fun MovieCatalog(
                 .padding(start = 12.dp, end = 12.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // How the wall draws itself. Mirrors the library menu on the right
+            // so the header reads as one symmetrical pair of controls.
+            Box {
+                GlassIconButton(
+                    label = "电影墙展示方式",
+                    onClick = { viewMenuOpen = true },
+                ) {
+                    Icon(Icons.Outlined.GridView, contentDescription = null)
+                }
+                DropdownMenu(
+                    expanded = viewMenuOpen,
+                    onDismissRequest = { viewMenuOpen = false },
+                    containerColor = RaisedStrong,
+                    shape = GlassPanelShape,
+                    shadowElevation = 0.dp,
+                ) {
+                    MovieWallView.entries.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.label) },
+                            trailingIcon = {
+                                if (state.movieWallView == option) {
+                                    Icon(Icons.Outlined.Check, contentDescription = null)
+                                }
+                            },
+                            onClick = {
+                                viewMenuOpen = false
+                                onWallView(option)
+                            },
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.weight(1f))
             // Quick jump between libraries: the wall is grouped by media source,
             // so the menu mirrors that order.
@@ -329,14 +370,59 @@ private fun MovieCatalog(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 34.dp),
             ) {
-                state.movieGroups.forEach { group ->
-                    item(key = group.sourceId) {
-                        MovieGroupSection(
-                            group = group,
+                if (state.recentMovies.isNotEmpty()) {
+                    item(key = "recent") {
+                        RecentMovieStrip(
+                            items = state.recentMovies,
                             imageLoader = imageLoader,
                             onSelect = onSelect,
-                            onOpenGroup = { onOpenGroup(group.sourceId) },
                         )
+                    }
+                }
+                when (state.movieWallView) {
+                    MovieWallView.SHELVES -> state.movieGroups.forEach { group ->
+                        item(key = group.sourceId) {
+                            MovieGroupSection(
+                                group = group,
+                                imageLoader = imageLoader,
+                                onSelect = onSelect,
+                                onOpenGroup = { onOpenGroup(group.sourceId) },
+                            )
+                        }
+                    }
+                    // One tile per library: a wall of twenty libraries still
+                    // fits on a screen.
+                    MovieWallView.LIBRARIES -> state.movieGroups.chunked(2).forEach { row ->
+                        item(key = "row-" + row.joinToString("-") { it.sourceId }) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                row.forEach { group ->
+                                    Box(Modifier.weight(1f)) {
+                                        MovieLibraryTile(
+                                            group = group,
+                                            imageLoader = imageLoader,
+                                            onClick = { onOpenGroup(group.sourceId) },
+                                        )
+                                    }
+                                }
+                                if (row.size == 1) Spacer(Modifier.weight(1f))
+                            }
+                            Spacer(Modifier.height(16.dp))
+                        }
+                    }
+                    // One sideways row per library, the way a library page in
+                    // Emby reads.
+                    MovieWallView.ROWS -> state.movieGroups.forEach { group ->
+                        item(key = group.sourceId) {
+                            MovieRowSection(
+                                group = group,
+                                imageLoader = imageLoader,
+                                onSelect = onSelect,
+                                onOpenGroup = { onOpenGroup(group.sourceId) },
+                            )
+                        }
                     }
                 }
                 if (state.movieGroupsLoading) {
@@ -346,6 +432,309 @@ private fun MovieCatalog(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Shared shelf header: the accent tick, the library name and its counter.
+ *
+ * Every view of the wall is a stack of these, so they all read the same way
+ * whatever shape the shelves below them take.
+ */
+@Composable
+private fun MovieSectionHeader(
+    title: String,
+    trailing: String,
+    onClick: (() -> Unit)? = null,
+) {
+    val base = Modifier
+        .fillMaxWidth()
+        .padding(start = 14.dp, end = 14.dp, bottom = 10.dp)
+    Row(
+        modifier = if (onClick == null) base else base.clip(ControlShape).clickable(onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .width(3.dp)
+                .height(15.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(Accent),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            title,
+            color = TextPrimary,
+            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            trailing,
+            color = TextFaint,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+        )
+    }
+}
+
+/**
+ * "Keep watching": the last ten titles the app saw half-finished.
+ *
+ * A wall sorted by anything else buries the one row a viewer actually wants,
+ * so this strip sits above every library and never scrolls away sideways.
+ */
+@Composable
+private fun RecentMovieStrip(
+    items: List<MovieItem>,
+    imageLoader: ImageLoader,
+    onSelect: (MovieItem) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp)) {
+        MovieSectionHeader(title = "最近播放", trailing = "${items.size} 部")
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 13.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(items, key = { "recent-" + it.id }) { movie ->
+                RecentMovieCard(movie, imageLoader, onClick = { onSelect(movie) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecentMovieCard(
+    movie: MovieItem,
+    imageLoader: ImageLoader,
+    onClick: () -> Unit,
+) {
+    val watchedPercent = (movie.resumeFraction * 100).toInt()
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .width(178.dp)
+            .semantics {
+                contentDescription = buildString {
+                    append(movie.title)
+                    movie.year?.let { append("，$it 年") }
+                    if (watchedPercent > 0) append("，已观看 $watchedPercent%")
+                }
+            },
+        color = Color.Transparent,
+        contentColor = TextPrimary,
+        shape = RoundedCornerShape(10.dp),
+    ) {
+        Column {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Raised),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.Movie,
+                    contentDescription = null,
+                    tint = TextFaint,
+                    modifier = Modifier.size(24.dp),
+                )
+                (movie.wallUrl ?: movie.posterUrl)?.let { url ->
+                    AsyncImage(
+                        model = url,
+                        imageLoader = imageLoader,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                    )
+                }
+                if (movie.resumeFraction > 0f) {
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .background(Color.Black.copy(alpha = 0.45f)),
+                    )
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomStart)
+                            .fillMaxWidth(movie.resumeFraction)
+                            .height(3.dp)
+                            .background(Accent),
+                    )
+                }
+            }
+            Spacer(Modifier.height(7.dp))
+            Text(
+                movie.title,
+                color = TextPrimary,
+                fontWeight = FontWeight.Medium,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                if (watchedPercent > 0) "已观看 $watchedPercent%" else "继续观看",
+                color = TextFaint,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+/**
+ * One library as a single tile: its first six covers stitched into one poster.
+ *
+ * This is the view for someone who has added twenty sources - the whole wall
+ * then fits on a screen without a single horizontal scroll.
+ */
+@Composable
+private fun MovieLibraryTile(
+    group: MovieGroup,
+    imageLoader: ImageLoader,
+    onClick: () -> Unit,
+) {
+    val covers = group.items
+        .mapNotNull { it.wallUrl ?: it.posterUrl }
+        .distinct()
+        .take(MOSAIC_TILES)
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { contentDescription = "${group.name}，共 ${group.total} 部" },
+        color = Color.Transparent,
+        contentColor = TextPrimary,
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Raised),
+            ) {
+                repeat(MOSAIC_TILES / MOSAIC_COLUMNS) { rowIndex ->
+                    Row(Modifier.fillMaxWidth()) {
+                        repeat(MOSAIC_COLUMNS) { columnIndex ->
+                            val cover = covers.getOrNull(rowIndex * MOSAIC_COLUMNS + columnIndex)
+                            Box(
+                                Modifier
+                                    .weight(1f)
+                                    .aspectRatio(16f / 9f)
+                                    .background(Raised),
+                            ) {
+                                cover?.let { url ->
+                                    AsyncImage(
+                                        model = url,
+                                        imageLoader = imageLoader,
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                group.name,
+                color = TextPrimary,
+                fontWeight = FontWeight.Medium,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "${group.total} 部",
+                color = TextFaint,
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+private const val MOSAIC_COLUMNS = 3
+private const val MOSAIC_TILES = MOSAIC_COLUMNS * 2
+
+/**
+ * One library as a sideways row with a trailing "more" tile, the way a media
+ * server lists a collection: a taste of the library, then the door to it.
+ */
+@Composable
+private fun MovieRowSection(
+    group: MovieGroup,
+    imageLoader: ImageLoader,
+    onSelect: (MovieItem) -> Unit,
+    onOpenGroup: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp)) {
+        MovieSectionHeader(
+            title = group.name,
+            trailing = "${group.items.size}/${group.total}",
+            onClick = onOpenGroup,
+        )
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 13.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(group.items, key = { it.id }) { movie ->
+                Box(Modifier.width(166.dp)) {
+                    MoviePoster(movie, imageLoader, onClick = { onSelect(movie) })
+                }
+            }
+            item(key = "more") {
+                MovieRowMoreCard(
+                    remaining = (group.total - group.items.size).coerceAtLeast(0),
+                    onClick = onOpenGroup,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MovieRowMoreCard(remaining: Int, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .width(96.dp)
+            .heightIn(min = 96.dp),
+        color = GlassFillSoft,
+        contentColor = TextSecondary,
+        shape = RoundedCornerShape(10.dp),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().heightIn(min = 96.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Icon(
+                Icons.AutoMirrored.Outlined.ArrowForward,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text("更多", style = MaterialTheme.typography.labelLarge, maxLines = 1)
+            if (remaining > 0) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "$remaining 部",
+                    color = TextFaint,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                )
             }
         }
     }

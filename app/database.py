@@ -18,6 +18,48 @@ from typing import Any
 SCAN_STEP_MAX_ATTEMPTS = 3
 
 
+def normalize_root_paths(value: Any, *, fallback: str = "/") -> list[str]:
+    """Coerce every shape a root list arrives in into clean, unique paths.
+
+    The management screen sends a list, a row written today carries a JSON
+    string, and a row written before the column existed only has the single
+    ``root_path``. All three end up as the same normalised list, so the
+    scanner and the registry never have to ask which one they were handed.
+    A pasted multi-line block is accepted too: it is how someone copies two
+    folders out of the AList UI.
+    """
+    candidates: list[Any]
+    if isinstance(value, str):
+        text = value.strip()
+        parsed: Any = None
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+        candidates = parsed if isinstance(parsed, list) else text.splitlines()
+    elif isinstance(value, (list, tuple, set)):
+        candidates = list(value)
+    else:
+        candidates = []
+
+    roots: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        # A blank entry is a field the caller left alone, not a folder: the
+        # client posts both the list and the single legacy path, so one of the
+        # two is always empty and must not turn into the server root.
+        if not candidate.strip():
+            continue
+        root = "/" + candidate.strip().strip("/")
+        if root not in roots:
+            roots.append(root)
+    if not roots:
+        roots.append("/" + str(fallback).strip().strip("/"))
+    return roots
+
+
 class LibraryDatabase:
     def __init__(self, path: str):
         self.path = path
@@ -224,8 +266,21 @@ class LibraryDatabase:
                     id TEXT PRIMARY KEY,
                     deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                -- Where every device left off. One row per media row, keyed by
+                -- the row the player actually reports, so "recently played"
+                -- needs no per-device bookkeeping and survives a reinstall.
+                CREATE TABLE IF NOT EXISTS watch_progress (
+                    video_id INTEGER PRIMARY KEY,
+                    position_ms INTEGER NOT NULL DEFAULT 0,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_watch_progress_updated
+                    ON watch_progress(updated_at DESC);
                 """
             )
+            self._migrate_media_source_roots(connection)
             movie_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(movies)").fetchall()
@@ -239,6 +294,83 @@ class LibraryDatabase:
             ):
                 if name not in movie_columns:
                     connection.execute(f"ALTER TABLE movies ADD COLUMN {name} {definition}")
+
+    @staticmethod
+    def _migrate_media_source_roots(connection: sqlite3.Connection) -> None:
+        """Let one media source summarise several root folders.
+
+        A library that is spread over more than one directory (an active
+        downloader folder plus an archive, say) used to require one source per
+        folder, which then showed up as unrelated sections on the wall. The
+        table is rebuilt instead of altered because the single-root UNIQUE
+        constraint no longer describes the data: two sources may share a first
+        root as long as their full root lists differ. ``root_path`` keeps
+        holding the first root so readers that predate this column, and rows
+        that only ever had one, keep working unchanged.
+        """
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(media_sources)").fetchall()
+        }
+        if not columns or "root_paths" in columns:
+            return
+        rows = [
+            dict(row)
+            for row in connection.execute("SELECT * FROM media_sources").fetchall()
+        ]
+        connection.executescript(
+            """
+            ALTER TABLE media_sources RENAME TO media_sources_legacy;
+            CREATE TABLE media_sources (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'alist',
+                base_url TEXT NOT NULL,
+                root_path TEXT NOT NULL,
+                root_paths TEXT NOT NULL DEFAULT '[]',
+                section TEXT NOT NULL,
+                scan_mode TEXT NOT NULL DEFAULT 'tree',
+                anonymous INTEGER NOT NULL DEFAULT 1,
+                token TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT '',
+                password TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_scan_success INTEGER,
+                last_scan_error TEXT,
+                directories INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(base_url, root_paths, section)
+            );
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO media_sources(
+                id, name, provider, base_url, root_path, root_paths, section,
+                scan_mode, anonymous, token, username, password, enabled,
+                last_scan_success, last_scan_error, directories,
+                created_at, updated_at
+            )
+            VALUES(
+                :id, :name, :provider, :base_url, :root_path, :root_paths, :section,
+                :scan_mode, :anonymous, :token, :username, :password, :enabled,
+                :last_scan_success, :last_scan_error, :directories,
+                :created_at, :updated_at
+            )
+            """,
+            [
+                {**row, "root_paths": json.dumps([str(row["root_path"])])}
+                for row in rows
+            ],
+        )
+        connection.executescript(
+            """
+            DROP TABLE media_sources_legacy;
+            CREATE INDEX IF NOT EXISTS idx_media_sources_section
+                ON media_sources(section, enabled, name);
+            """
+        )
 
     @staticmethod
     def _migrate_video_path_uniqueness(connection: sqlite3.Connection) -> None:
@@ -973,14 +1105,21 @@ class LibraryDatabase:
             connection.commit()
         return len(rows)
 
-    def sync_drama_index(self, source: str, root_path: str, builder: Any) -> int:
+    def sync_drama_index(
+        self,
+        source: str,
+        root_paths: Sequence[str] | str,
+        builder: Any,
+    ) -> int:
         """Rebuild the series index for one short-drama source.
 
         The resumable scan has already put every episode into ``videos``; this
         only groups them into series, keeps each episode's ``series_id``
         pointer in sync, and drops series whose folder no longer holds an
         active episode. Artwork and synopses survive a rescan: re-indexing a
-        folder is not a reason to re-fetch what the site already gave us.
+        folder is not a reason to re-fetch what the site already gave us. A
+        source may summarise several roots; the builder is handed all of them
+        and reports which one each series came from.
         """
         with self._lock, self._connect() as connection:
             rows = connection.execute(
@@ -992,7 +1131,7 @@ class LibraryDatabase:
                 """,
                 (source,),
             ).fetchall()
-            series = builder(root_path, [dict(row) for row in rows])
+            series = builder(root_paths, [dict(row) for row in rows])
             # Drop every pointer first so episodes of a series that disappeared
             # cannot keep an orphan ``series_id`` alive.
             connection.execute(
@@ -1339,6 +1478,136 @@ class LibraryDatabase:
             ).fetchone()
         return dict(row) if row else None
 
+    # A title counts as watched once the player reached the very end of it. The
+    # margin absorbs the trailing seconds players routinely skip, and keeps a
+    # finished title from parking itself at the front of "continue watching"
+    # because the last report happened to be at 99% of the file.
+    WATCH_COMPLETE_RATIO = 0.95
+
+    def record_watch_progress(
+        self,
+        *,
+        video_id: int,
+        position_ms: int,
+        duration_ms: int,
+    ) -> dict[str, int]:
+        """Store where one device left off, without touching playback.
+
+        One row per media row: the new devices on the same account agree on a
+        position instead of keeping parallel copies of it, and the row survives
+        a reinstall because it lives with the library rather than the phone.
+        """
+        position = max(0, int(position_ms))
+        duration = max(0, int(duration_ms))
+        if duration > 0:
+            position = min(position, duration)
+        completed = int(
+            duration > 0 and position >= duration * self.WATCH_COMPLETE_RATIO
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO watch_progress(
+                    video_id, position_ms, duration_ms, completed, updated_at
+                )
+                VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(video_id) DO UPDATE SET
+                    position_ms = excluded.position_ms,
+                    duration_ms = excluded.duration_ms,
+                    completed = excluded.completed,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (int(video_id), position, duration, completed),
+            )
+            connection.commit()
+        return {
+            "videoId": int(video_id),
+            "positionMs": position,
+            "durationMs": duration,
+            "completed": completed,
+        }
+
+    def recent_movies(
+        self,
+        *,
+        sources: Sequence[str] = (),
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """The films the user is part-way through, most recent first.
+
+        The row shape matches :meth:`movies` so the wall renders these tiles
+        with the code it already has; the position rides along so tapping a
+        tile resumes instead of restarting.
+        """
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT m.*, v.name, v.path, v.size, v.modified, v.duration_seconds,
+                       v.thumb, v.media_format, v.media_kind,
+                       w.position_ms AS resume_position_ms,
+                       w.duration_ms AS watched_duration_ms,
+                       w.updated_at AS watched_at
+                FROM watch_progress w
+                JOIN movies m ON m.video_id = w.video_id
+                JOIN videos v ON v.id = m.video_id
+                WHERE w.completed = 0 AND v.active = 1 AND {source_clause}
+                ORDER BY w.updated_at DESC, w.video_id DESC
+                LIMIT ?
+                """,
+                [*source_params, max(1, int(limit))],
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def recent_dramas(
+        self,
+        *,
+        sources: Sequence[str] = (),
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """The series the user is part-way through, one row per series.
+
+        Every episode shares its series id, so only the most recent position of
+        each series is interesting: it names both the series to show and the
+        episode to resume. A series whose latest episode was watched through
+        drops out, exactly like a finished film.
+        """
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "v.source IN")
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT v.series_id AS series_id,
+                           w.video_id AS video_id,
+                           w.position_ms AS resume_position_ms,
+                           w.duration_ms AS watched_duration_ms,
+                           w.completed AS completed,
+                           w.updated_at AS watched_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY v.series_id
+                               ORDER BY w.updated_at DESC, w.video_id DESC
+                           ) AS recency
+                    FROM watch_progress w
+                    JOIN videos v ON v.id = w.video_id
+                    WHERE v.active = 1 AND v.series_id IS NOT NULL
+                      AND {source_clause}
+                )
+                SELECT d.*, ranked.video_id AS resume_video_id,
+                       ranked.resume_position_ms, ranked.watched_duration_ms,
+                       ranked.watched_at
+                FROM ranked
+                JOIN dramas d ON d.id = ranked.series_id
+                WHERE ranked.recency = 1 AND ranked.completed = 0
+                  AND d.episode_count > 0
+                ORDER BY ranked.watched_at DESC, ranked.video_id DESC
+                LIMIT ?
+                """,
+                [*source_params, max(1, int(limit))],
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def movie_metadata_candidates(
         self,
         *,
@@ -1449,12 +1718,12 @@ class LibraryDatabase:
             connection.executemany(
                 """
                 INSERT INTO media_sources(
-                    id, name, provider, base_url, root_path, section, scan_mode,
-                    anonymous, token, username, password, enabled
+                    id, name, provider, base_url, root_path, root_paths, section,
+                    scan_mode, anonymous, token, username, password, enabled
                 )
                 VALUES(
-                    :id, :name, :provider, :base_url, :root_path, :section, :scan_mode,
-                    :anonymous, :token, :username, :password, :enabled
+                    :id, :name, :provider, :base_url, :root_path, :root_paths, :section,
+                    :scan_mode, :anonymous, :token, :username, :password, :enabled
                 )
                 ON CONFLICT(id) DO NOTHING
                 """,
@@ -1480,12 +1749,12 @@ class LibraryDatabase:
             connection.execute(
                 """
                 INSERT INTO media_sources(
-                    id, name, provider, base_url, root_path, section, scan_mode,
-                    anonymous, token, username, password, enabled
+                    id, name, provider, base_url, root_path, root_paths, section,
+                    scan_mode, anonymous, token, username, password, enabled
                 )
                 VALUES(
-                    :id, :name, :provider, :base_url, :root_path, :section, :scan_mode,
-                    :anonymous, :token, :username, :password, :enabled
+                    :id, :name, :provider, :base_url, :root_path, :root_paths, :section,
+                    :scan_mode, :anonymous, :token, :username, :password, :enabled
                 )
                 """,
                 record,
@@ -1498,6 +1767,7 @@ class LibraryDatabase:
             "provider",
             "base_url",
             "root_path",
+            "root_paths",
             "section",
             "scan_mode",
             "anonymous",
@@ -1509,6 +1779,20 @@ class LibraryDatabase:
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
             return self.get_media_source(source_id)
+        if "root_paths" in updates:
+            roots = normalize_root_paths(updates["root_paths"])
+            updates["root_paths"] = json.dumps(roots)
+            # The first root is mirrored into the legacy column so nothing that
+            # still reads a single path can disagree with the list.
+            updates["root_path"] = roots[0]
+        elif "root_path" in updates:
+            # A caller that names a single folder means exactly that folder.
+            # Keeping the old list around would leave the row describing a
+            # library the user has since replaced, and the next scan would
+            # resume the traversal of the folder that is no longer configured.
+            roots = normalize_root_paths(updates["root_path"])
+            updates["root_path"] = roots[0]
+            updates["root_paths"] = json.dumps(roots)
         if "anonymous" in updates:
             updates["anonymous"] = int(bool(updates["anonymous"]))
         if "enabled" in updates:
@@ -1532,6 +1816,15 @@ class LibraryDatabase:
                 return False
             connection.execute("DELETE FROM movies WHERE source = ?", (source_id,))
             connection.execute("DELETE FROM dramas WHERE source = ?", (source_id,))
+            # Watch history follows its rows out: a removed library must not
+            # keep feeding "recently played" entries whose media is gone.
+            connection.execute(
+                """
+                DELETE FROM watch_progress
+                WHERE video_id IN (SELECT id FROM videos WHERE source = ?)
+                """,
+                (source_id,),
+            )
             connection.execute("DELETE FROM videos WHERE source = ?", (source_id,))
             # A removed library must not leave its traversal history behind:
             # orphaned jobs kept reporting a half-finished scan for a source the
@@ -1611,12 +1904,17 @@ class LibraryDatabase:
 
     @staticmethod
     def _source_record(source: dict[str, Any]) -> dict[str, Any]:
+        roots = normalize_root_paths(
+            source.get("root_paths"),
+            fallback=source.get("root_path") or "/",
+        )
         return {
             "id": str(source["id"]),
             "name": str(source["name"]),
             "provider": str(source.get("provider") or "alist"),
             "base_url": str(source["base_url"]).rstrip("/"),
-            "root_path": "/" + str(source["root_path"]).strip("/"),
+            "root_path": roots[0],
+            "root_paths": json.dumps(roots),
             "section": str(source["section"]),
             "scan_mode": str(source.get("scan_mode") or "tree"),
             "anonymous": int(bool(source.get("anonymous", True))),
@@ -1631,6 +1929,10 @@ class LibraryDatabase:
         source = dict(row)
         source["anonymous"] = bool(source.get("anonymous"))
         source["enabled"] = bool(source.get("enabled"))
+        source["root_paths"] = normalize_root_paths(
+            source.get("root_paths"),
+            fallback=source.get("root_path") or "/",
+        )
         if "videos" in source:
             source["videos"] = int(source["videos"] or 0)
             source["bytes"] = int(source["bytes"] or 0)

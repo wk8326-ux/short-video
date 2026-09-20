@@ -36,6 +36,10 @@ class PlaybackPreferences(context: Context) {
         }.getOrDefault(FeedMode.SHUFFLE)
         set(value) = preferences.edit().putString(KEY_MODE, value.name).apply()
 
+    var movieWallView: MovieWallView
+        get() = MovieWallView.fromValue(preferences.getString(KEY_MOVIE_WALL_VIEW, null))
+        set(value) = preferences.edit().putString(KEY_MOVIE_WALL_VIEW, value.apiValue).apply()
+
     fun muted(surface: MediaSurface): Boolean {
         val key = "$KEY_MUTED:${surface.name}"
         if (preferences.contains(key)) return preferences.getBoolean(key, false)
@@ -266,6 +270,7 @@ class PlaybackPreferences(context: Context) {
         const val KEY_SESSION = "session_cookie"
         const val KEY_SURFACE = "surface"
         const val KEY_MODE = "mode"
+        const val KEY_MOVIE_WALL_VIEW = "movie_wall_view"
         const val KEY_MUTED = "muted"
         const val KEY_ASMR_VIDEO_BACKGROUND = "asmr_video_background"
         const val KEY_ASMR_AUTHOR = "asmr_author"

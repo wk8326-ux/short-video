@@ -2,6 +2,35 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.20] - 2026-09-20
+
+### Added
+
+- A media source can carry several root folders. One source is one login and one address, but the folders under it are a
+  list, so libraries that belong together -- the same drive split across directories -- can be scanned and counted as one
+  entry instead of being registered again for every folder. The editor keeps one row per folder with an "add folder" action,
+  and the roots are stored as a JSON list while `rootPath` stays as the first entry so older rows keep working.
+- The movie wall opens on a "最近播放" strip: the ten films the server last saw in progress, newest first, each with the
+  fraction already watched drawn under its cover. A wall sorted by anything else buries the one row a viewer actually
+  wants, so it sits above every library and never scrolls away sideways. The short-drama wall gets the same strip.
+- The movie wall can be drawn three ways, chosen from a menu on the left of the header that mirrors the library menu on the
+  right: the existing shelves (six tiles per library plus "加载更多"), a wall of library tiles where each library is one
+  mosaic stitched from its first six covers, and single-row shelves where each library is one sideways row with a trailing
+  "更多" tile, the way a media server lists a collection. The choice is remembered locally.
+- Watch progress is reported to the server while playing (throttled to one report per fifteen seconds, plus an immediate
+  one on seek, pause, surface change and leaving the app). Resume position is therefore no longer local-only: a reinstall or
+  a second device reopens a film where the last one stopped. `POST /api/progress` records it and
+  `GET /api/movies/recent` / `GET /api/dramas/recent` read the two strips back.
+- Continuing a short drama from the strip reopens the series and drops straight into the interrupted episode, preferring
+  the episode the server recorded and falling back to the first one when the series has changed since.
+
+### Changed
+
+- The short-drama header no longer carries a search field and a count tile; both were read-only chrome above a wall that
+  already lists everything, and they are replaced by the recent strip. Searching short dramas is gone with them.
+- Adding or editing a source accepts an empty `rootPath` as long as at least one root in the list is filled, and the scan
+  walks every root the source declares instead of only the first.
+
 ## [1.6.0-beta.19] - 2026-09-20
 
 ### Added

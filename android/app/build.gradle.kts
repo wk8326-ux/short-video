@@ -22,8 +22,8 @@ android {
         applicationId = "you.deepfuck.shortvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 176
-        versionName = "1.6.0-beta.17"
+        versionCode = 177
+        versionName = "1.6.0-beta.20"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

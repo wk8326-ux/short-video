@@ -292,8 +292,10 @@ internal fun ManagementScreen(
         // only needs its folder, not the whole URL.
         val history = state.adminStatus?.sources.orEmpty()
             .filter { it.id != editingSource?.id }
-            .map { it.baseUrl.trim() to it.rootPath.trim() }
-            .filter { it.first.isNotBlank() }
+            .flatMap { entry ->
+                entry.effectiveRootPaths.map { root -> entry.baseUrl.trim() to root.trim() }
+            }
+            .filter { it.first.isNotBlank() && it.second.isNotBlank() }
         MediaSourceDialog(
             source = editingSource,
             history = history,
@@ -474,6 +476,57 @@ private fun sourceScanHint(source: MediaLibrarySource): String? {
 }
 
 @Composable
+private fun RootPathFields(
+    roots: List<String>,
+    onRoots: (List<String>) -> Unit,
+    knownRoots: List<String>,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        roots.forEachIndexed { index, value ->
+            OutlinedTextField(
+                value,
+                { updated -> onRoots(roots.toMutableList().also { it[index] = updated }) },
+                Modifier.fillMaxWidth(),
+                label = { Text(if (roots.size == 1) "根目录" else "根目录 ${index + 1}") },
+                leadingIcon = {
+                    Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                },
+                trailingIcon = {
+                    if (roots.size > 1) {
+                        GlassIconButton(
+                            label = "删除根目录",
+                            onClick = { onRoots(roots.filterIndexed { position, _ -> position != index }) },
+                            size = 40.dp,
+                            tint = TextSecondary,
+                        ) {
+                            Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                },
+                singleLine = true,
+            )
+        }
+        TextButton(onClick = { onRoots(roots + "") }) {
+            Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.size(6.dp))
+            Text("添加目录", style = androidx.compose.material3.MaterialTheme.typography.labelMedium)
+        }
+        SuggestionRow(
+            label = "该地址用过",
+            options = knownRoots,
+            onPick = { picked ->
+                // Fill the first empty row, otherwise hang the folder on the end.
+                val blank = roots.indexOfFirst { it.isBlank() }
+                onRoots(
+                    if (blank >= 0) roots.toMutableList().also { it[blank] = picked }
+                    else (roots + picked).distinct(),
+                )
+            },
+        )
+    }
+}
+
+@Composable
 private fun SuggestionRow(
     label: String,
     options: List<String>,
@@ -526,7 +579,9 @@ private fun MediaSourceDialog(
     var name by remember(source?.id) { mutableStateOf(source?.name.orEmpty()) }
     var provider by remember(source?.id) { mutableStateOf(source?.provider ?: "alist") }
     var baseUrl by remember(source?.id) { mutableStateOf(source?.baseUrl.orEmpty()) }
-    var rootPath by remember(source?.id) { mutableStateOf(source?.rootPath ?: "/") }
+    var rootPaths by remember(source?.id) {
+        mutableStateOf(source?.effectiveRootPaths?.ifEmpty { listOf("/") } ?: listOf("/"))
+    }
     var section by remember(source?.id) { mutableStateOf(source?.section ?: LibrarySection.FEED) }
     var scanMode by remember(source?.id) {
         mutableStateOf(source?.scanMode ?: if (source?.section == LibrarySection.ASMR) "authors_recursive" else "tree")
@@ -536,13 +591,13 @@ private fun MediaSourceDialog(
     var password by remember(source?.id) { mutableStateOf("") }
     var token by remember(source?.id) { mutableStateOf("") }
     var enabled by remember(source?.id) { mutableStateOf(source?.enabled ?: true) }
-    val valid = name.isNotBlank() && baseUrl.startsWith("http") && rootPath.isNotBlank()
+    val valid = name.isNotBlank() && baseUrl.startsWith("http") && rootPaths.any { it.isNotBlank() }
     val knownAddresses = history.map { it.first }.distinct().filter { it != baseUrl.trim() }
     val knownRoots = history
         .filter { it.first == baseUrl.trim() }
         .map { it.second }
         .distinct()
-        .filter { it.isNotBlank() && it != rootPath.trim() }
+        .filter { it.isNotBlank() && it !in rootPaths.map(String::trim) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -626,18 +681,10 @@ private fun MediaSourceDialog(
                         options = knownAddresses,
                         onPick = { baseUrl = it },
                     )
-                    OutlinedTextField(
-                        rootPath,
-                        { rootPath = it },
-                        Modifier.fillMaxWidth(),
-                        label = { Text("根目录") },
-                        leadingIcon = { Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                        singleLine = true,
-                    )
-                    SuggestionRow(
-                        label = "该地址用过",
-                        options = knownRoots,
-                        onPick = { rootPath = it },
+                    RootPathFields(
+                        roots = rootPaths,
+                        onRoots = { rootPaths = it },
+                        knownRoots = knownRoots,
                     )
                 }
                 FieldGroup("鉴权", Icons.Outlined.Key) {
@@ -689,7 +736,10 @@ private fun MediaSourceDialog(
                                 name = name.trim(),
                                 provider = provider,
                                 baseUrl = baseUrl.trim(),
-                                rootPath = rootPath.trim(),
+                                rootPaths = rootPaths
+                                    .map { it.trim() }
+                                    .filter { it.isNotBlank() }
+                                    .distinct(),
                                 section = section,
                                 scanMode = if (section.usesTreeScan) "tree" else scanMode,
                                 anonymous = anonymous,

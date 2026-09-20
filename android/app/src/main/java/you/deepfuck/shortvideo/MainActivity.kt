@@ -95,7 +95,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
-        viewModel.saveCurrentPosition()
+        // Leaving the app is the one moment the server copy of the playhead
+        // really matters, so this report skips the usual throttle.
+        viewModel.saveCurrentPosition(forceReport = true)
         viewModel.onAppBackgrounded()
         super.onPause()
     }

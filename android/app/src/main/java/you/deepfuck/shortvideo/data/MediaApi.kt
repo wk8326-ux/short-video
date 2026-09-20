@@ -12,6 +12,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import you.deepfuck.shortvideo.update.ResumableUpdateDownloader
 import you.deepfuck.shortvideo.update.UpdateDownloadHttpException
@@ -273,6 +274,35 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     fun dramaDetail(dramaId: String): DramaDetail =
         DramaDetail.fromJson(getJson("/api/dramas/$dramaId"))
 
+    /**
+     * The films to pick back up. The server keeps the position per media row,
+     * so this list is the same on every device the account signs in on.
+     */
+    fun recentMovies(limit: Int = RECENT_LIMIT): List<MovieItem> =
+        getJson("/api/movies/recent?limit=$limit")
+            .optObjectList("items", MovieItem::fromJson)
+
+    /** Series with an unfinished episode, newest watch first. */
+    fun recentDramas(limit: Int = RECENT_LIMIT): List<DramaItem> =
+        getJson("/api/dramas/recent?limit=$limit")
+            .optObjectList("items", DramaItem::fromJson)
+
+    /** Fire-and-forget report of where playback stopped. */
+    fun recordProgress(videoId: Long, positionMs: Long, durationMs: Long) {
+        val body = JSONObject()
+            .put("videoId", videoId)
+            .put("positionMs", positionMs.coerceAtLeast(0L))
+            .put("durationMs", durationMs.coerceAtLeast(0L))
+            .toString()
+            .toRequestBody(JSON_MEDIA_TYPE)
+        executeJson(
+            Request.Builder()
+                .url(url("/api/progress"))
+                .post(body)
+                .build(),
+        )
+    }
+
     fun adminStatus(): AdminStatus {
         val payload = getJson("/api/admin/status")
         val library = payload.getJSONObject("library")
@@ -316,11 +346,14 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         post("/api/admin/sources/$sourceId/drama-metadata").optBoolean("started")
 
     fun saveMediaSource(sourceId: String?, draft: MediaSourceDraft) {
+        val roots = draft.rootPaths.map { it.trim() }.filter { it.isNotBlank() }
         val body = JSONObject()
             .put("name", draft.name)
             .put("provider", draft.provider)
             .put("baseUrl", draft.baseUrl)
-            .put("rootPath", draft.rootPath)
+            .put("rootPaths", JSONArray(roots))
+            // Kept for older servers that only know the single-folder field.
+            .put("rootPath", roots.firstOrNull() ?: "/")
             .put("section", draft.section.apiValue)
             .put("scanMode", draft.scanMode)
             .put("anonymous", draft.anonymous)
@@ -454,6 +487,8 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         // smooth without a request per swipe.
         const val MOVIE_LIBRARY_PAGE_SIZE = 60
         const val DRAMA_PAGE_SIZE = 24
+        // How many titles the "continue watching" strips hold.
+        const val RECENT_LIMIT = 10
         const val BASE_URL = "https://short.deepfuck.you/"
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }

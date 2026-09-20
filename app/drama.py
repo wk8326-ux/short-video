@@ -19,6 +19,7 @@ import html
 import json
 import posixpath
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -124,18 +125,34 @@ def episode_order_key(name: str) -> tuple[int, str]:
     return (number if number is not None else 10**9, str(name).casefold())
 
 
-def series_folder(root_path: str, path: str) -> str | None:
-    """The series folder a media path belongs to, relative to the scan root.
+def series_scope(
+    root_paths: str | Sequence[str],
+    path: str,
+) -> tuple[str, str] | None:
+    """Which scan root a media path sits under, and the series folder in it.
 
-    Returns ``None`` for files sitting directly in the root (they are not part
-    of any series) and for anything outside the root.
+    A source can own several roots, so the same file has to be measured
+    against each of them and attributed to the one that actually contains it:
+    the root travels with the series so artwork lookups and later rescans keep
+    describing the same folder. ``None`` means the file sits directly in a
+    root — it is not part of any series — or outside every root.
     """
-    root = "/" + str(root_path or "").strip("/")
+    roots = [root_paths] if isinstance(root_paths, str) else list(root_paths)
     folder = posixpath.dirname("/" + str(path or "").lstrip("/"))
-    if folder == root or not folder.startswith(root + "/"):
-        return None
-    relative = folder[len(root) + 1 :]
-    return relative or None
+    for root_path in roots:
+        root = "/" + str(root_path or "").strip("/")
+        if not folder.startswith(root + "/"):
+            continue
+        relative = folder[len(root) + 1 :]
+        if relative:
+            return root, relative
+    return None
+
+
+def series_folder(root_paths: str | Sequence[str], path: str) -> str | None:
+    """The series folder a media path belongs to, relative to its scan root."""
+    scope = series_scope(root_paths, path)
+    return scope[1] if scope else None
 
 
 def category_of(folder: str) -> str | None:
@@ -144,7 +161,7 @@ def category_of(folder: str) -> str | None:
 
 
 def build_series(
-    root_path: str,
+    root_paths: str | Sequence[str],
     videos: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Group active video rows into dramas.
@@ -156,9 +173,10 @@ def build_series(
     """
     grouped: dict[str, dict[str, Any]] = {}
     for video in videos:
-        folder = series_folder(root_path, str(video.get("path") or ""))
-        if not folder:
+        scope = series_scope(root_paths, str(video.get("path") or ""))
+        if not scope:
             continue
+        root, folder = scope
         entry = grouped.get(folder)
         if entry is None:
             folder_name = posixpath.basename(folder)
@@ -166,7 +184,7 @@ def build_series(
             entry = {
                 "id": drama_id(str(video.get("source") or ""), folder),
                 "source": str(video.get("source") or ""),
-                "root_path": "/" + str(root_path).strip("/"),
+                "root_path": root,
                 "folder": folder,
                 "category": category_of(folder),
                 "folder_title": title or folder_name,
