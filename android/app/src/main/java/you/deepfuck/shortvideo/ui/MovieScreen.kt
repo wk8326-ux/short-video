@@ -91,6 +91,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.media3.exoplayer.ExoPlayer
@@ -1110,12 +1111,17 @@ private fun MovieDetail(
     onFullscreen: (Boolean) -> Unit,
     onPip: () -> Unit,
 ) {
-    if (fullscreen && playbackStarted) {
+    // A started film takes the whole surface. The portrait case used to pin a
+    // sixteen by nine strip under the top edge, leave the rest of the page to the
+    // metadata and draw the controls over the picture with no way to clear them;
+    // now it is the same immersive surface as the landscape one, with the video
+    // letterboxed in the middle and chrome that fades on its own.
+    if (playbackStarted) {
         MoviePlayer(
             player = player,
             exoPlayer = exoPlayer,
             muted = muted,
-            fullscreen = true,
+            fullscreen = fullscreen,
             onTogglePlayback = onTogglePlayback,
             onMuted = onMuted,
             onSeek = onSeek,
@@ -1123,6 +1129,11 @@ private fun MovieDetail(
             onFullscreen = onFullscreen,
             pipMode = pipMode,
             onPip = onPip,
+            // The landscape bar already carries the exit button, so the arrow is
+            // only an affordance where the metadata page it used to sit on is
+            // gone.
+            onBack = if (fullscreen) null else onBack,
+            title = movie.title,
             modifier = Modifier.fillMaxSize(),
         )
         return
@@ -1166,24 +1177,7 @@ private fun MovieDetail(
     ) {
         item {
             Box(Modifier.fillMaxWidth()) {
-                if (playbackStarted) {
-                    MoviePlayer(
-                        player = player,
-                        exoPlayer = exoPlayer,
-                        muted = muted,
-                        fullscreen = false,
-                        onTogglePlayback = onTogglePlayback,
-                        onMuted = onMuted,
-                        onSeek = onSeek,
-                        onSeekBy = onSeekBy,
-                        onFullscreen = onFullscreen,
-                        pipMode = pipMode,
-                        onPip = onPip,
-                        modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-                    )
-                } else {
-                    MovieHero(movie, imageLoader)
-                }
+                MovieHero(movie, imageLoader)
                 GlassIconButton(
                     label = "返回片库",
                     onClick = onBack,
@@ -1338,6 +1332,7 @@ internal fun MoviePlayer(
     pipMode: Boolean = false,
     onPip: (() -> Unit)? = null,
     onBack: (() -> Unit)? = null,
+    title: String? = null,
     modifier: Modifier = Modifier,
 ) {
     var chromeVisible by remember(fullscreen) { mutableStateOf(true) }
@@ -1346,8 +1341,11 @@ internal fun MoviePlayer(
     var seekBaseMs by remember { mutableStateOf(0L) }
     val latestPositionMs = rememberUpdatedState(player.positionMs)
 
-    LaunchedEffect(fullscreen, chromeVisible, player.isPlaying, player.mediaId) {
-        if (fullscreen && chromeVisible && player.isPlaying) {
+    // Five quiet seconds of playback and the controls step aside, in portrait as
+    // well as landscape. A paused film keeps them: the pause was deliberate, and
+    // hiding the way to resume it is how a video ends up looking frozen.
+    LaunchedEffect(chromeVisible, player.isPlaying, player.mediaId, pipMode, fullscreen) {
+        if (chromeVisible && player.isPlaying && !pipMode) {
             delay(5_000)
             chromeVisible = false
         }
@@ -1390,12 +1388,14 @@ internal fun MoviePlayer(
         Modifier
     }
 
-    val surfaceTapModifier = if (fullscreen) {
-        Modifier.pointerInput(fullscreen) {
+    // One tap anywhere toggles the chrome, portrait included. Buttons inside the
+    // surface handle their own presses first, so a tap on play still plays.
+    val surfaceTapModifier = if (pipMode) {
+        Modifier
+    } else {
+        Modifier.pointerInput(fullscreen, pipMode) {
             detectTapGestures { chromeVisible = !chromeVisible }
         }
-    } else {
-        Modifier
     }
     Box(
         modifier = modifier
@@ -1406,7 +1406,9 @@ internal fun MoviePlayer(
         PlayerHost(exoPlayer, Modifier.fillMaxSize())
         BufferSpinner(player.isBuffering)
 
-        val controlsVisible = !pipMode && (!fullscreen || chromeVisible)
+        // Chrome follows the tap in both orientations. Inside the floating window
+        // it never draws at all: the system already frames that surface.
+        val controlsVisible = !pipMode && chromeVisible
         if (controlsVisible) {
             onBack?.let { back ->
                 GlassIconButton(
@@ -1417,32 +1419,30 @@ internal fun MoviePlayer(
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
                 }
             }
-            if (!pipMode && (!player.playWhenReady || fullscreen)) {
-                Row(
-                    modifier = Modifier.align(Alignment.Center),
-                    horizontalArrangement = Arrangement.spacedBy(if (fullscreen) 34.dp else 18.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+            Row(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalArrangement = Arrangement.spacedBy(if (fullscreen) 34.dp else 18.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (fullscreen) {
+                    OverlayIconControl(label = "后退 10 秒", onClick = { onSeekBy(-10_000L) }) {
+                        Icon(Icons.Outlined.Replay10, contentDescription = null)
+                    }
+                }
+                OverlayIconControl(
+                    label = if (player.playWhenReady) "暂停" else "播放",
+                    size = 64,
+                    onClick = onTogglePlayback,
                 ) {
-                    if (fullscreen) {
-                        OverlayIconControl(label = "后退 10 秒", onClick = { onSeekBy(-10_000L) }) {
-                            Icon(Icons.Outlined.Replay10, contentDescription = null)
-                        }
-                    }
-                    OverlayIconControl(
-                        label = if (player.playWhenReady) "暂停" else "播放",
-                        size = 64,
-                        onClick = onTogglePlayback,
-                    ) {
-                        Icon(
-                            if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            contentDescription = null,
-                            modifier = Modifier.size(32.dp),
-                        )
-                    }
-                    if (fullscreen) {
-                        OverlayIconControl(label = "快进 10 秒", onClick = { onSeekBy(10_000L) }) {
-                            Icon(Icons.Outlined.Forward10, contentDescription = null)
-                        }
+                    Icon(
+                        if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(32.dp),
+                    )
+                }
+                if (fullscreen) {
+                    OverlayIconControl(label = "快进 10 秒", onClick = { onSeekBy(10_000L) }) {
+                        Icon(Icons.Outlined.Forward10, contentDescription = null)
                     }
                 }
             }
@@ -1455,6 +1455,9 @@ internal fun MoviePlayer(
                     .padding(start = 8.dp, top = 2.dp, end = 8.dp, bottom = 4.dp),
             ) {
                 FineProgressBar(player, onSeek, compact = true)
+                // The metadata page is gone once playback starts, so the bar is
+                // what still says which film is running.
+                val barTitle = title?.takeIf { it.isNotBlank() }
                 Row(
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1476,7 +1479,19 @@ internal fun MoviePlayer(
                         color = TextSecondary,
                         style = MaterialTheme.typography.labelSmall,
                     )
-                    Spacer(Modifier.weight(1f))
+                    if (barTitle != null) {
+                        Text(
+                            barTitle,
+                            modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                        )
+                    } else {
+                        Spacer(Modifier.weight(1f))
+                    }
                     IconButton(
                         onClick = { onMuted(!muted) },
                         modifier = Modifier.size(48.dp),

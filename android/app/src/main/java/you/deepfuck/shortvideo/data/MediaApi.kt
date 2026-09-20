@@ -459,13 +459,16 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         }
         .memoryCache {
             MemoryCache.Builder(context)
-                .maxSizePercent(0.18)
+                .maxSizePercent(0.25)
                 .build()
         }
         .diskCache {
             DiskCache.Builder()
                 .directory(context.cacheDir.resolve("movie-posters"))
-                .maxSizeBytes(256L * 1024 * 1024)
+                // Covers are immutable and small: a phone that keeps a whole
+                // library on disk opens it off local storage on every later
+                // visit instead of re-crossing the Pacific for the same JPEG.
+                .maxSizeBytes(1024L * 1024 * 1024)
                 .build()
         }
         // The wall, the library page and the detail hero all build their URL

@@ -50,7 +50,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.21"
+APP_VERSION = "1.6.0-beta.22"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -112,7 +112,12 @@ movie_image_client: httpx.AsyncClient | None = None
 MOVIE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
 MOVIE_IMAGE_CACHE_SECONDS = 7 * 24 * 60 * 60
 MOVIE_IMAGE_USER_AGENT = "deepfuck-movie-library/1"
-MOVIE_IMAGE_CACHE_MAX_BYTES = 256 * 1024 * 1024
+# Phones read these covers straight off the origin, so the cache is the whole
+# first-frame budget: a phone that has to wait for a Pacific round trip sees the
+# poster arrive half a second late every time it scrolls back. The disk beside
+# the library database is far larger than this ceiling, so it is set by what the
+# artwork hosts can hand out per hour rather than by free space.
+MOVIE_IMAGE_CACHE_MAX_BYTES = 2048 * 1024 * 1024
 # Posters are proxied so phones never touch JavBus/DMM directly. The wall only
 # ever draws them a few hundred pixels wide, so the proxy can hand out a
 # downscaled WebP instead of the multi-megabyte original: same picture, a
@@ -120,13 +125,30 @@ MOVIE_IMAGE_CACHE_MAX_BYTES = 256 * 1024 * 1024
 MOVIE_IMAGE_WIDTHS = (240, 360, 480, 720, 1080, 1440)
 # The width every wall card (movie, drama, library page) ends up asking for on a
 # 3x phone: prewarming a different size filled cache entries nothing ever read.
-MOVIE_WALL_IMAGE_WIDTH = 480
+# Snapping a 178dp card on a 3x screen lands on 720, and the access log of the
+# old 480px warm-up showed exactly that: a few hundred entries read, a few dozen
+# ever used. Both sizes are still derived from the same cached original, so a
+# 2x phone pays a local resize instead of a second download.
+MOVIE_WALL_IMAGE_WIDTH = 720
+# A cover that failed upstream is retried on every scroll otherwise, and the
+# upstream hosts take twelve seconds to admit they are down. Remembering the
+# failure for a short while turns a scrolling stall into an instant placeholder.
+MOVIE_IMAGE_FAILURE_TTL_SECONDS = 10 * 60
+# A library page shows a grid, so it warms two screens' worth of cards.
+MOVIE_LIBRARY_PREWARM_LIMIT = 12
+# Every section of the wall is warmed, but a wall with twenty libraries must not
+# start a hundred downloads on a phone's first frame.
+MOVIE_WALL_PREWARM_MAX_ROWS = 48
 # The shared catalogue is the only metadata writer this app still runs, so a row
 # stamped with anything else came from a scraper that has since been deleted.
 ACTIVE_METADATA_PROVIDER = "shared"
 movie_image_cache_dir = Path(settings.database_path).resolve().parent / "movie-images"
 movie_image_cache_locks: dict[str, asyncio.Lock] = {}
 movie_image_cache_guard = threading.RLock()
+# cache_key -> time.monotonic() deadline. Only ever holds covers that just proved
+# unreachable, so it stays a few hundred entries and empties itself.
+movie_image_failure_cache: dict[str, float] = {}
+movie_image_failure_guard = threading.RLock()
 # One client for the whole process: the folded catalogue is the expensive part
 # of a scrape, and building it per run made every rescan pay for the same walk.
 # The mirror is a SQLite file next to the library database, so the catalogue
@@ -1319,6 +1341,48 @@ def _movie_image_cache_key(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
+def _movie_image_request_key(url: str, width: int | None) -> str:
+    """The identity of one cached cover: the upstream URL plus its target width.
+
+    A scaled copy is a different object, so the wall asking for a 720px strip
+    must not evict the full-size cover the detail page wants. Both the proxy and
+    the warm-up funnel through here so the two can never disagree about where a
+    given picture lives.
+    """
+    return f"{url}#w{width}" if width else url
+
+
+def _movie_image_failure_remaining(cache_key: str) -> float:
+    """Seconds left on a recorded failure, ``0`` when there is nothing on file."""
+    now = time.monotonic()
+    with movie_image_failure_guard:
+        expiry = movie_image_failure_cache.get(cache_key)
+        if expiry is None:
+            return 0.0
+        if expiry <= now:
+            movie_image_failure_cache.pop(cache_key, None)
+            return 0.0
+        return expiry - now
+
+
+def _remember_movie_image_failure(cache_key: str) -> None:
+    now = time.monotonic()
+    with movie_image_failure_guard:
+        if len(movie_image_failure_cache) > 4096:
+            for key, expiry in list(movie_image_failure_cache.items()):
+                if expiry <= now:
+                    movie_image_failure_cache.pop(key, None)
+            while len(movie_image_failure_cache) > 4096:
+                soonest = min(movie_image_failure_cache, key=movie_image_failure_cache.__getitem__)
+                movie_image_failure_cache.pop(soonest, None)
+        movie_image_failure_cache[cache_key] = now + MOVIE_IMAGE_FAILURE_TTL_SECONDS
+
+
+def _forget_movie_image_failure(cache_key: str) -> None:
+    with movie_image_failure_guard:
+        movie_image_failure_cache.pop(cache_key, None)
+
+
 def _movie_image_cache_paths(url: str) -> tuple[Path, Path]:
     key = _movie_image_cache_key(url)
     return movie_image_cache_dir / f"{key}.bin", movie_image_cache_dir / f"{key}.json"
@@ -1435,16 +1499,14 @@ async def _proxy_movie_image(
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(status_code=404, detail="Movie image not found")
 
-    # A scaled copy is a different object, so it gets its own cache entry: the
-    # wall asking for a 480px strip must not evict the full-size cover that the
-    # detail page wants.
-    cache_key = f"{url}#w{width}" if width else url
+    cache_key = _movie_image_request_key(url, width)
     with movie_image_cache_guard:
         lock = movie_image_cache_locks.setdefault(cache_key, asyncio.Lock())
     async with lock:
         cached = await asyncio.to_thread(_read_movie_image_cache, cache_key)
         if cached:
             content, media_type, etag = cached
+            _forget_movie_image_failure(cache_key)
             return _movie_image_response(
                 content,
                 media_type,
@@ -1452,6 +1514,13 @@ async def _proxy_movie_image(
                 cache_status="hit",
                 if_none_match=if_none_match,
             )
+
+        if _movie_image_failure_remaining(cache_key) > 0:
+            # This exact cover failed a moment ago. Re-asking the artwork host
+            # costs a twelve second stall per scroll for a picture that is not
+            # coming back; the placeholder the client already drew is the honest
+            # answer until the recorded window lapses.
+            raise HTTPException(status_code=502, detail="Movie image upstream unavailable")
 
         if width:
             # Every width is cut from the full-size copy, which the first
@@ -1473,6 +1542,7 @@ async def _proxy_movie_image(
                         "image/webp",
                         derived_etag,
                     )
+                    _forget_movie_image_failure(cache_key)
                     return _movie_image_response(
                         derived,
                         "image/webp",
@@ -1550,10 +1620,16 @@ async def _proxy_movie_image(
                             original_copy = (content, media_type)
                             content = resized
                             media_type = "image/webp"
-            except HTTPException:
+            except HTTPException as exc:
+                # 404 means the artwork is gone and 502 is what every upstream
+                # hiccup looks like; both are worth remembering, an invalid
+                # request is not.
+                if exc.status_code in {404, 502}:
+                    _remember_movie_image_failure(cache_key)
                 raise
             except httpx.HTTPError as exc:
                 logger.info("Movie image proxy failed for %s: %s", url, exc)
+                _remember_movie_image_failure(cache_key)
                 raise HTTPException(status_code=502, detail="Movie image upstream unavailable") from exc
         finally:
             if owns_client:
@@ -1563,6 +1639,7 @@ async def _proxy_movie_image(
         await asyncio.to_thread(
             _write_movie_image_cache, cache_key, content, media_type, etag
         )
+        _forget_movie_image_failure(cache_key)
         if original_copy is not None:
             await asyncio.to_thread(
                 _write_movie_image_cache,
@@ -1943,6 +2020,10 @@ async def prewarm_movie_image_at_width(source_url: str | None, width: int) -> No
     """
     if not source_url:
         return
+    if _movie_image_failure_remaining(_movie_image_request_key(source_url, width)) > 0:
+        # Warming a cover the proxy just failed on spends a download slot and a
+        # twelve second timeout per section for a picture that cannot arrive.
+        return
     try:
         await _proxy_movie_image(source_url, width=width)
     except Exception as exc:
@@ -2251,11 +2332,15 @@ async def movie_groups(
         for source, rows in zip(ordered, pages)
     ]
     if groups:
-        # Only the first two sections can be on screen before the user scrolls.
+        # Every section, not just the two that fit on the first screen: the wall
+        # is scrolled with a thumb, so a section that starts empty stays empty
+        # until the user waits for it. Covers are warmed in section order, which
+        # is also the order they come on screen, so the visible ones lead.
+        rows = [row for group_rows in pages for row in group_rows]
         spawn_background(
             prewarm_movie_wall_images(
-                [row for group_rows in pages[:2] for row in group_rows],
-                limit=perGroup * 2,
+                rows,
+                limit=min(len(rows), MOVIE_WALL_PREWARM_MAX_ROWS),
             ),
             name="prewarm-movie-wall-groups",
         )
@@ -2292,6 +2377,14 @@ async def movie_group_items(
         ),
         asyncio.to_thread(database.movie_count, search=search, sources=(source_id,)),
     )
+    if offset == 0 and rows:
+        # Opening a library used to draw its first six cards from the network one
+        # by one while the rest of the page sat empty. Warming the first screens
+        # of the grid in the background is what makes the page appear filled.
+        spawn_background(
+            prewarm_movie_wall_images(rows, limit=MOVIE_LIBRARY_PREWARM_LIMIT),
+            name=f"prewarm-movie-library-{source_id}",
+        )
     return _movie_group_payload(source_id, rows, total=total, offset=offset)
 
 
@@ -2317,7 +2410,7 @@ async def movies(
     )
     if offset == 0 and rows:
         spawn_background(
-            prewarm_movie_wall_images(rows),
+            prewarm_movie_wall_images(rows, limit=MOVIE_LIBRARY_PREWARM_LIMIT),
             name="prewarm-movie-wall",
         )
     return {
@@ -2469,11 +2562,14 @@ async def drama_groups(
         for category, rows in zip(ordered, pages)
     ]
     if groups:
-        # Only the first two sections can be on screen before the user scrolls.
+        # Same reasoning as the movie wall: every category is warmed so a section
+        # the user scrolls to is already there, capped so a big library list
+        # cannot start an unbounded download storm on a phone's first frame.
+        rows = [row for group_rows in pages for row in group_rows]
         spawn_background(
             prewarm_drama_posters(
-                [row for group_rows in pages[:2] for row in group_rows],
-                limit=perGroup * 2,
+                rows,
+                limit=min(len(rows), MOVIE_WALL_PREWARM_MAX_ROWS),
             ),
             name="prewarm-drama-wall-groups",
         )
@@ -2517,7 +2613,7 @@ async def dramas(
     )
     if offset == 0 and rows:
         spawn_background(
-            prewarm_drama_posters(rows),
+            prewarm_drama_posters(rows, limit=MOVIE_LIBRARY_PREWARM_LIMIT),
             name="prewarm-drama-wall",
         )
     return {

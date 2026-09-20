@@ -46,7 +46,7 @@ def test_movie_images_use_same_origin_proxy_and_follow_redirects(monkeypatch, tm
             follow_redirects=True,
             transport=httpx.MockTransport(image_handler),
         )
-        async def skip_wall_prewarm(rows):
+        async def skip_wall_prewarm(rows, **_kwargs):
             return None
 
         monkeypatch.setattr(main, "prewarm_movie_wall_images", skip_wall_prewarm)

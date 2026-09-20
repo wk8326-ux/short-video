@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.22] - 2026-09-20
+
+### Added
+
+- The movie player is one immersive surface in portrait too. Starting a film no longer pins a sixteen by nine strip
+  under the top edge with the metadata page and the controls below it; the picture fills the screen, letterboxed in the
+  middle, and the controls fade away after five quiet seconds. One tap anywhere brings them back, the way the landscape
+  surface has always worked, and a paused film keeps them on screen because the pause was deliberate.
+- Each library page warms its own first screens of covers, so opening a library draws a filled grid instead of stacking
+  its first six tiles one network round trip at a time while the rest of the page sits empty.
+
+### Changed
+
+- The picture cache on the server is eight times larger (256MB to 2GB) and the warmed width now matches the width a
+  phone actually asks for. Snapping a 178dp tile on a 3x screen lands on 720px; the warm-up was filling 480px entries
+  that nothing ever read, so most first paint still crossed to the artwork host. Both sizes are still cut from the same
+  cached original, so a 2x phone pays a local resize instead of a second download.
+- Every section of the movie and drama walls is warmed, capped at forty-eight rows, in the order they come on screen.
+  Warming only the first two sections left a wall that starts empty as soon as the viewer scrolls.
+- A phone keeps the covers it has seen: the artwork cache on the device goes from 256MB to 1GB, and the memory cache
+  from 0.18 to 0.25 of the heap. Covers are immutable, so a library opened once should open off local storage next time.
+
+### Fixed
+
+- A cover that failed upstream is remembered for ten minutes instead of being retried on every scroll. The artwork
+  hosts take about twelve seconds to admit they are down, so a dead cover used to cost a stall per pass over it, and
+  the warm-up spent a download slot on every section for a picture that could not arrive.
+
 ## [1.6.0-beta.21] - 2026-09-20
 
 ### Added
