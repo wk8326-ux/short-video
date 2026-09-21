@@ -197,7 +197,11 @@ private fun FeedPage(
         if (active) onChromeVisible(chromeVisible)
     }
 
-    val gestureModifier = if (fullscreen) {
+    // Scrubbing works in both orientations; the vertical pager keeps owning the
+    // up and down gesture, so only the horizontal drag is claimed here.
+    val gestureModifier = if (pipMode) {
+        Modifier
+    } else {
         Modifier.pointerInput(player.durationMs, entry.id) {
             detectHorizontalDragGestures(
                 onDragStart = {
@@ -231,8 +235,6 @@ private fun FeedPage(
                 },
             )
         }
-    } else {
-        Modifier
     }
 
     Box(

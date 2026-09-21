@@ -400,6 +400,23 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         executeJson(request)
     }
 
+    /**
+     * Publishes the order the management list was dragged into. The server keeps
+     * one order per section, and the movie wall reads it, so the front page
+     * follows the same arrangement without a second request.
+     */
+    fun reorderMediaSources(sourceIds: List<String>) {
+        val body = JSONObject()
+            .put("ids", JSONArray(sourceIds))
+            .toString()
+            .toRequestBody(JSON_MEDIA_TYPE)
+        val request = Request.Builder()
+            .url(url("/api/admin/sources/order"))
+            .put(body)
+            .build()
+        executeJson(request)
+    }
+
     fun startFastStartCheck() = post("/api/admin/fast-start")
 
     fun appUpdate(): AppUpdateInfo = AppUpdateInfo.fromJson(getJson("/api/app/update"))

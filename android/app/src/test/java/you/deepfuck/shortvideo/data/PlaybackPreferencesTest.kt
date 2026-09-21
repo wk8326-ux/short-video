@@ -91,6 +91,26 @@ class PlaybackPreferencesTest {
         assertEquals(you.deepfuck.shortvideo.ListPosition(27, 14), restored.movieListPosition())
     }
 
+    @Test
+    fun eachLibraryKeepsItsOwnGridPositionAndSort() {
+        val context = RuntimeEnvironment.getApplication()
+        context.getSharedPreferences("short_video", Context.MODE_PRIVATE).edit().clear().commit()
+        val preferences = PlaybackPreferences(context)
+
+        preferences.saveMovieGroupListPosition("source-julia", you.deepfuck.shortvideo.ListPosition(9, 3))
+        preferences.saveMovieGroupSort("source-julia", "title")
+
+        val restored = PlaybackPreferences(context)
+        assertEquals(
+            you.deepfuck.shortvideo.ListPosition(9, 3),
+            restored.movieGroupListPosition("source-julia"),
+        )
+        assertEquals("title", restored.movieGroupSort("source-julia"))
+        // A library nobody has opened yet starts at the top with no sort saved.
+        assertEquals(you.deepfuck.shortvideo.ListPosition(0, 0), restored.movieGroupListPosition("source-new"))
+        assertEquals("", restored.movieGroupSort("source-new"))
+    }
+
     private fun media(id: Long) = MediaEntry(
         id = id,
         title = "video-$id",

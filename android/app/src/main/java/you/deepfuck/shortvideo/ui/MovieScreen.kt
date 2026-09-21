@@ -70,6 +70,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -118,6 +119,7 @@ internal fun MovieScreen(
     fullscreen: Boolean,
     pipMode: Boolean,
     listPosition: ListPosition,
+    groupListPosition: ListPosition,
     onSelect: (MovieItem) -> Unit,
     onBack: () -> Unit,
     onPlay: (MovieItem) -> Unit,
@@ -125,6 +127,7 @@ internal fun MovieScreen(
     onCloseGroup: () -> Unit,
     onGroupSort: (String) -> Unit,
     onLoadMoreGroup: () -> Unit,
+    onGroupListPosition: (String, ListPosition) -> Unit,
     onWallView: (MovieWallView) -> Unit,
     onRetry: () -> Unit,
     onTogglePlayback: () -> Unit,
@@ -185,6 +188,7 @@ internal fun MovieScreen(
     }
 
     if (state.openMovieGroupId != null) {
+        val groupId = state.openMovieGroupId
         MovieLibraryPage(
             name = state.openMovieGroupName,
             items = state.openMovieGroupItems,
@@ -197,6 +201,8 @@ internal fun MovieScreen(
             onSort = onGroupSort,
             onSelect = onSelect,
             onLoadMore = onLoadMoreGroup,
+            initialPosition = groupListPosition,
+            onListPosition = { onGroupListPosition(groupId, it) },
         )
         return
     }
@@ -860,8 +866,22 @@ private fun MovieLibraryPage(
     onSort: (String) -> Unit,
     onSelect: (MovieItem) -> Unit,
     onLoadMore: () -> Unit,
+    initialPosition: ListPosition,
+    onListPosition: (ListPosition) -> Unit,
 ) {
-    val gridState = rememberLazyGridState()
+    // The grid reopens where it was left, so coming back from a detail page
+    // lands on the poster that was tapped instead of the top of the library.
+    val gridState = rememberLazyGridState(
+        initialFirstVisibleItemIndex = initialPosition.index.coerceAtLeast(0),
+        initialFirstVisibleItemScrollOffset = initialPosition.offset.coerceAtLeast(0),
+    )
+    DisposableEffect(gridState) {
+        onDispose {
+            onListPosition(
+                ListPosition(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset),
+            )
+        }
+    }
     var sortMenuOpen by remember { mutableStateOf(false) }
     val hasMore = items.size < total
     TrackMovieGrid(
@@ -1140,37 +1160,9 @@ private fun MovieDetail(
     }
 
     Box(Modifier.fillMaxSize().background(Canvas)) {
-        // Use the high-resolution landscape cover as the detail artwork. The
-        // small thumb/backdrop image is not suitable for full-screen scaling.
-        val detailBackgroundUrl = movie.wallUrl ?: movie.posterUrl ?: movie.backdropUrl
-        detailBackgroundUrl?.let { url ->
-            AsyncImage(
-                model = url,
-                imageLoader = imageLoader,
-                contentDescription = null,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = 1.16f
-                        scaleY = 1.16f
-                    },
-                contentScale = ContentScale.Crop,
-                alignment = Alignment.CenterEnd,
-            )
-        }
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color.Transparent,
-                        0.32f to Color.Black.copy(alpha = 0.04f),
-                        0.66f to Canvas.copy(alpha = 0.78f),
-                        0.94f to Canvas.copy(alpha = 0.98f),
-                        1f to Canvas,
-                    ),
-                ),
-        )
+    // The detail page keeps one piece of artwork: the landscape cover at the top.
+    // A second, full-page copy of the same picture behind the metadata only made
+    // the text harder to read and doubled the image traffic.
     LazyColumn(
         modifier = Modifier.fillMaxSize().safeDrawingPadding(),
         contentPadding = PaddingValues(bottom = 40.dp),
@@ -1351,7 +1343,12 @@ internal fun MoviePlayer(
         }
     }
 
-    val gestureModifier = if (fullscreen) {
+    // Scrubbing is a drag, so it never competes with the tap that shows or hides
+    // the chrome. Portrait used to be left out of this, which is why the gesture
+    // only worked after rotating.
+    val gestureModifier = if (pipMode) {
+        Modifier
+    } else {
         Modifier.pointerInput(player.durationMs, player.mediaId) {
             detectHorizontalDragGestures(
                 onDragStart = {
@@ -1384,8 +1381,6 @@ internal fun MoviePlayer(
                 },
             )
         }
-    } else {
-        Modifier
     }
 
     // One tap anywhere toggles the chrome, portrait included. Buttons inside the

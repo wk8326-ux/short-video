@@ -203,6 +203,7 @@ class LibraryDatabase:
                     last_scan_success INTEGER,
                     last_scan_error TEXT,
                     directories INTEGER NOT NULL DEFAULT 0,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(base_url, root_path, section)
@@ -288,6 +289,7 @@ class LibraryDatabase:
                 """
             )
             self._migrate_media_source_roots(connection)
+            self._migrate_media_source_order(connection)
             movie_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(movies)").fetchall()
@@ -378,6 +380,46 @@ class LibraryDatabase:
                 ON media_sources(section, enabled, name);
             """
         )
+
+    @staticmethod
+    def _migrate_media_source_order(connection: sqlite3.Connection) -> None:
+        """Give every library a place in a user-controlled order.
+
+        The management screen lets a library be dragged above another one, and
+        the wall renders its sections in the same order, so the position has to
+        outlive the process rather than being a client-side arrangement. New
+        rows keep the column's default and sort last inside their section,
+        which is where an added library used to land anyway.
+        """
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(media_sources)").fetchall()
+        }
+        if not columns or "sort_order" in columns:
+            return
+        connection.execute(
+            "ALTER TABLE media_sources ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+        )
+        # Backfill from the ordering the column replaces, so the first launch
+        # after the upgrade shows exactly the list the user saw before it.
+        rows = connection.execute(
+            """
+            SELECT id, section FROM media_sources
+            ORDER BY section, created_at, rowid
+            """
+        ).fetchall()
+        position: dict[str, int] = {}
+        updates: list[tuple[int, str]] = []
+        for row in rows:
+            section = str(row["section"])
+            index = position.get(section, 0)
+            position[section] = index + 1
+            updates.append((index, str(row["id"])))
+        connection.executemany(
+            "UPDATE media_sources SET sort_order = ? WHERE id = ?",
+            updates,
+        )
+        connection.commit()
 
     @staticmethod
     def _migrate_video_path_uniqueness(connection: sqlite3.Connection) -> None:
@@ -1745,6 +1787,31 @@ class LibraryDatabase:
         summary["lastSuccess"] = int(row["last_success"]) if row["last_success"] else None
         return summary
 
+    def movie_metadata_pending_sources(self) -> list[str]:
+        """Movie sources that still hold rows the cover pass has not resolved.
+
+        The cover pass is single-flight, so a request that arrives while it runs
+        is queued in memory. A restart loses that queue, and a library whose
+        scan finished during the previous process is exactly the one that would
+        stay coverless forever: the rows are already in the database, and
+        nothing else in the app would ever look at them again.
+        """
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT m.source AS source
+                FROM movies m
+                JOIN videos v ON v.id = m.video_id
+                WHERE v.active = 1
+                  AND (
+                      m.match_status IN ('pending', 'ambiguous')
+                      OR (m.match_status = 'matched' AND COALESCE(m.poster_url, '') = '')
+                  )
+                ORDER BY m.source
+                """
+            ).fetchall()
+        return [str(row["source"]) for row in rows]
+
     def update_movie_metadata(self, movie_id: int, **values: Any) -> None:
         allowed = {
             "display_title", "normalized_title", "original_title", "year", "overview",
@@ -1806,15 +1873,25 @@ class LibraryDatabase:
             {**source, "id": source.get("id") or f"source-{secrets.token_hex(6)}"}
         )
         with self._lock, self._connect() as connection:
+            # A new library belongs at the end of its own section, not at the
+            # top: ``sort_order`` defaults to zero, and every existing row has
+            # been numbered, so the next free slot has to be asked for.
+            row = connection.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM media_sources WHERE section = ?",
+                (record["section"],),
+            ).fetchone()
+            record["sort_order"] = int(row[0] or 0)
             connection.execute(
                 """
                 INSERT INTO media_sources(
                     id, name, provider, base_url, root_path, root_paths, section,
-                    scan_mode, anonymous, token, username, password, enabled
+                    scan_mode, anonymous, token, username, password, enabled,
+                    sort_order
                 )
                 VALUES(
                     :id, :name, :provider, :base_url, :root_path, :root_paths, :section,
-                    :scan_mode, :anonymous, :token, :username, :password, :enabled
+                    :scan_mode, :anonymous, :token, :username, :password, :enabled,
+                    :sort_order
                 )
                 """,
                 record,
@@ -1924,9 +2001,11 @@ class LibraryDatabase:
                 LEFT JOIN videos v ON v.source = s.id AND v.active = 1
                 {enabled_clause}
                 GROUP BY s.id
-                -- rowid breaks ties inside the same second, so sections keep
-                -- the order they were added in.
-                ORDER BY s.section, s.created_at, s.rowid
+                -- ``sort_order`` is the order the user dragged the libraries
+                -- into; the timestamp and rowid only break ties for rows that
+                -- never took part in a reorder, so sections keep the order
+                -- they were added in until somebody changes it.
+                ORDER BY s.section, s.sort_order, s.created_at, s.rowid
                 """
             ).fetchall()
         return [self._normalize_source(row) for row in rows]
@@ -1937,11 +2016,56 @@ class LibraryDatabase:
                 """
                 SELECT id FROM media_sources
                 WHERE section = ? AND enabled = 1
-                ORDER BY created_at, rowid
+                ORDER BY sort_order, created_at, rowid
                 """,
                 (section,),
             ).fetchall()
         return tuple(str(row["id"]) for row in rows)
+
+    def reorder_media_sources(self, order: Sequence[str]) -> int:
+        """Apply a dragged order and return how many rows moved.
+
+        The list arrives from one screen that shows every section at once, so
+        the position is assigned per section: dragging a library past one from
+        another section must not silently move it between the wall tabs.
+        Libraries the caller did not mention keep their relative order and
+        follow the ones it did.
+        """
+        wanted = [str(source_id) for source_id in order]
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, section, sort_order FROM media_sources"
+            ).fetchall()
+            by_id = {str(row["id"]): row for row in rows}
+            positions: dict[str, int] = {}
+            updates: list[tuple[int, str]] = []
+            seen: set[str] = set()
+            for source_id in wanted:
+                row = by_id.get(source_id)
+                if row is None or source_id in seen:
+                    continue
+                seen.add(source_id)
+                section = str(row["section"])
+                index = positions.get(section, 0)
+                positions[section] = index + 1
+                if int(row["sort_order"] or 0) != index:
+                    updates.append((index, source_id))
+            for row in rows:
+                source_id = str(row["id"])
+                if source_id in seen:
+                    continue
+                section = str(row["section"])
+                index = positions.get(section, 0)
+                positions[section] = index + 1
+                if int(row["sort_order"] or 0) != index:
+                    updates.append((index, source_id))
+            if updates:
+                connection.executemany(
+                    "UPDATE media_sources SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    updates,
+                )
+                connection.commit()
+        return len(updates)
 
     def update_source_scan_state(
         self,

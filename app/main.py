@@ -50,7 +50,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.22"
+APP_VERSION = "1.6.0-beta.23"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -89,6 +89,12 @@ movie_metadata_state: dict[str, Any] = {
     "lastError": None,
 }
 movie_metadata_lock = asyncio.Lock()
+# Sources whose cover pass was requested while another one held the lock. The
+# pass is a single-flight job, and dropping the request instead of queueing it
+# is what left whole libraries stamped ``pending`` forever: the scan that
+# finished second simply returned ``False`` and nothing ever looked again.
+movie_metadata_queue: list[tuple[str, bool, bool]] = []
+movie_metadata_queued: set[str] = set()
 drama_metadata_state: dict[str, Any] = {
     "running": False,
     "source": None,
@@ -98,6 +104,8 @@ drama_metadata_state: dict[str, Any] = {
     "lastSuccess": None,
     "lastError": None,
 }
+drama_metadata_queue: list[str] = []
+drama_metadata_queued: set[str] = set()
 drama_metadata_lock = asyncio.Lock()
 fast_start_state: dict[str, Any] = {
     "running": False,
@@ -726,6 +734,7 @@ async def _fetch_drama_page(
 
 def start_drama_metadata_job(source: str, *, force: bool = False) -> bool:
     if drama_metadata_lock.locked() or drama_metadata_state["running"]:
+        _queue_drama_metadata(source, force=force)
         return False
     drama_metadata_state.update(
         {
@@ -744,90 +753,123 @@ def start_drama_metadata_job(source: str, *, force: bool = False) -> bool:
     return True
 
 
+def _queue_drama_metadata(source: str, *, force: bool) -> None:
+    """Hold a cover pass that could not start yet instead of discarding it."""
+    if source in drama_metadata_queued:
+        return
+    drama_metadata_queued.add(source)
+    drama_metadata_queue.append((source, force))
+    logger.info(
+        "Drama cover pass for %s queued behind %s (%s waiting)",
+        source,
+        drama_metadata_state["source"],
+        len(drama_metadata_queue),
+    )
+
+
+def _drain_drama_metadata_queue() -> None:
+    while drama_metadata_queue:
+        source, force = drama_metadata_queue.pop(0)
+        drama_metadata_queued.discard(source)
+        if source not in source_registry.ids("drama"):
+            continue
+        start_drama_metadata_job(source, force=force)
+        return
+
+
 async def scrape_drama_metadata(source: str, *, force: bool = False) -> None:
     """One 91crdj lookup per series: real title, synopsis, tags and cover."""
     if drama_metadata_lock.locked():
         return
-    async with drama_metadata_lock:
-        drama_metadata_state.update(
-            {
-                "running": True,
-                "source": source,
-                "checked": 0,
-                "total": 0,
-                "matched": 0,
-                "lastError": None,
-            }
-        )
-        try:
-            dramas = await asyncio.to_thread(
-                database.drama_metadata_candidates,
-                sources=(source,),
-                force=force,
+    try:
+        async with drama_metadata_lock:
+            drama_metadata_state.update(
+                {
+                    "running": True,
+                    "source": source,
+                    "checked": 0,
+                    "total": 0,
+                    "matched": 0,
+                    "lastError": None,
+                }
             )
-            drama_metadata_state["total"] = len(dramas)
-            semaphore = asyncio.Semaphore(4)
-            client = httpx.AsyncClient(
-                follow_redirects=True,
-                timeout=httpx.Timeout(15.0, connect=5.0),
-                headers={"User-Agent": DRAMA_USER_AGENT},
-                limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
-            )
-
-            async def enrich(drama: dict[str, Any]) -> None:
-                async with semaphore:
-                    lookup = await _fetch_drama_page(
-                        client,
-                        str(drama.get("code") or ""),
-                        drama.get("category"),
-                    )
-                    if lookup is None:
-                        await asyncio.to_thread(
-                            database.update_drama_metadata,
-                            str(drama["id"]),
-                            metadata_status="unmatched",
-                        )
-                        drama_metadata_state["checked"] += 1
-                        return
-                    page, page_url = lookup
-                    metadata = parse_series_metadata(
-                        str(drama.get("code") or ""), page, page_url
-                    )
-                    values: dict[str, Any] = {
-                        "metadata_status": "matched" if metadata.poster_url else "unmatched"
-                    }
-                    # ``title`` is NOT NULL, so only ever send a real string.
-                    if metadata.title:
-                        values["title"] = metadata.title
-                    if metadata.overview:
-                        values["overview"] = metadata.overview
-                    if metadata.tags:
-                        values["tags"] = json.dumps(metadata.tags, ensure_ascii=False)
-                    if metadata.poster_url:
-                        values["poster_url"] = metadata.poster_url
-                    await asyncio.to_thread(
-                        database.update_drama_metadata, str(drama["id"]), **values
-                    )
-                    if metadata.poster_url:
-                        drama_metadata_state["matched"] += 1
-                    drama_metadata_state["checked"] += 1
-
             try:
-                await asyncio.gather(*(enrich(drama) for drama in dramas))
+                dramas = await asyncio.to_thread(
+                    database.drama_metadata_candidates,
+                    sources=(source,),
+                    force=force,
+                )
+                drama_metadata_state["total"] = len(dramas)
+                semaphore = asyncio.Semaphore(4)
+                client = httpx.AsyncClient(
+                    follow_redirects=True,
+                    timeout=httpx.Timeout(15.0, connect=5.0),
+                    headers={"User-Agent": DRAMA_USER_AGENT},
+                    limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+                )
+
+                async def enrich(drama: dict[str, Any]) -> None:
+                    async with semaphore:
+                        lookup = await _fetch_drama_page(
+                            client,
+                            str(drama.get("code") or ""),
+                            drama.get("category"),
+                        )
+                        if lookup is None:
+                            await asyncio.to_thread(
+                                database.update_drama_metadata,
+                                str(drama["id"]),
+                                metadata_status="unmatched",
+                            )
+                            drama_metadata_state["checked"] += 1
+                            return
+                        page, page_url = lookup
+                        metadata = parse_series_metadata(
+                            str(drama.get("code") or ""), page, page_url
+                        )
+                        values: dict[str, Any] = {
+                            "metadata_status": "matched"
+                            if metadata.poster_url
+                            else "unmatched"
+                        }
+                        # ``title`` is NOT NULL, so only ever send a real string.
+                        if metadata.title:
+                            values["title"] = metadata.title
+                        if metadata.overview:
+                            values["overview"] = metadata.overview
+                        if metadata.tags:
+                            values["tags"] = json.dumps(
+                                metadata.tags, ensure_ascii=False
+                            )
+                        if metadata.poster_url:
+                            values["poster_url"] = metadata.poster_url
+                        await asyncio.to_thread(
+                            database.update_drama_metadata, str(drama["id"]), **values
+                        )
+                        if metadata.poster_url:
+                            drama_metadata_state["matched"] += 1
+                        drama_metadata_state["checked"] += 1
+
+                try:
+                    await asyncio.gather(*(enrich(drama) for drama in dramas))
+                finally:
+                    await client.aclose()
+                drama_metadata_state["lastSuccess"] = int(time.time())
+                logger.info(
+                    "Drama metadata resolved %s/%s series for %s",
+                    drama_metadata_state["matched"],
+                    drama_metadata_state["total"],
+                    source,
+                )
+            except Exception as exc:
+                drama_metadata_state["lastError"] = str(exc)
+                logger.exception("Drama metadata pass failed for %s", source)
             finally:
-                await client.aclose()
-            drama_metadata_state["lastSuccess"] = int(time.time())
-            logger.info(
-                "Drama metadata resolved %s/%s series for %s",
-                drama_metadata_state["matched"],
-                drama_metadata_state["total"],
-                source,
-            )
-        except Exception as exc:
-            drama_metadata_state["lastError"] = str(exc)
-            logger.exception("Drama metadata pass failed for %s", source)
-        finally:
-            drama_metadata_state["running"] = False
+                drama_metadata_state["running"] = False
+    finally:
+        # Released outside the lock, exactly like the movie queue: draining
+        # while the pass still holds it would just re-queue the same library.
+        _drain_drama_metadata_queue()
 
 
 def start_movie_metadata_job(
@@ -836,8 +878,16 @@ def start_movie_metadata_job(
     force: bool = False,
     refresh_index: bool = False,
 ) -> bool:
-    """Kick off a metadata pass and report whether this call started it."""
+    """Kick off a metadata pass and report whether this call started it.
+
+    The pass is single-flight because it walks one catalogue and writes rows as
+    it goes, but a request that arrives while another one holds the lock is
+    queued rather than dropped. Dropping it was silent and permanent: a user who
+    scanned eight libraries in a row got covers for the first one and rows
+    stamped ``pending`` for the rest, with nothing left to retry them.
+    """
     if movie_metadata_lock.locked() or movie_metadata_state["running"]:
+        _queue_movie_metadata(source, force=force, refresh_index=refresh_index)
         return False
     movie_metadata_state.update(
         {
@@ -856,6 +906,51 @@ def start_movie_metadata_job(
     return True
 
 
+def _queue_movie_metadata(source: str, *, force: bool, refresh_index: bool) -> None:
+    """Remember a pass that could not start yet, merging repeat requests.
+
+    Repeat requests for the same library collapse into one, but the flags are
+    folded with OR: a manual ``force`` or ``refresh_index`` request that lands
+    while the library is already waiting still has to run with those flags.
+    """
+    if source in movie_metadata_queued:
+        for index, (queued_source, queued_force, queued_refresh) in enumerate(
+            movie_metadata_queue
+        ):
+            if queued_source == source:
+                movie_metadata_queue[index] = (
+                    source,
+                    queued_force or force,
+                    queued_refresh or refresh_index,
+                )
+                break
+        return
+    movie_metadata_queued.add(source)
+    movie_metadata_queue.append((source, force, refresh_index))
+    logger.info(
+        "Movie cover pass for %s queued behind %s (%s waiting)",
+        source,
+        movie_metadata_state["source"],
+        len(movie_metadata_queue),
+    )
+
+
+def _drain_movie_metadata_queue() -> None:
+    """Start the next queued cover pass once the running one has finished."""
+    while movie_metadata_queue:
+        source, force, refresh_index = movie_metadata_queue.pop(0)
+        movie_metadata_queued.discard(source)
+        # A library can be deleted while its pass waits in line.
+        if source not in source_registry.ids("movie"):
+            continue
+        start_movie_metadata_job(
+            source,
+            force=force,
+            refresh_index=refresh_index,
+        )
+        return
+
+
 async def scrape_movie_metadata(
     source: str,
     *,
@@ -864,86 +959,92 @@ async def scrape_movie_metadata(
 ) -> None:
     if movie_metadata_lock.locked():
         return
-    async with movie_metadata_lock:
-        movie_metadata_state.update(
-            {
-                "running": True,
-                "source": source,
-                "checked": 0,
-                "total": 0,
-                "matched": 0,
-                "lastError": None,
-            }
-        )
-        try:
-            has_shared_metadata = bool(settings.shared_metadata_base_url)
-            if not has_shared_metadata:
-                raise RuntimeError("共享元数据接口未配置")
-            source_ids = (source,)
-            movies = await asyncio.to_thread(
-                database.movie_metadata_candidates,
-                sources=source_ids,
-                force=force,
+    try:
+        async with movie_metadata_lock:
+            movie_metadata_state.update(
+                {
+                    "running": True,
+                    "source": source,
+                    "checked": 0,
+                    "total": 0,
+                    "matched": 0,
+                    "lastError": None,
+                }
             )
-            movie_metadata_state["total"] = len(movies)
-            async with shared_metadata_service().borrow() as shared_metadata:
-                # Titles the catalogue knows but has no cover for are queued
-                # again by ``movie_metadata_candidates``, so the covers have to
-                # come from the current catalogue rather than the 10-minute-old
-                # copy: warming first is what turns "I uploaded covers" into a
-                # visible change on the very next refresh.
-                await shared_metadata.warm_index(refresh=refresh_index)
-                for movie in movies:
-                    parsed_name = parse_movie_filename(str(movie.get("name") or ""))
-                    # The shared service already holds the sidecar covers and NFO
-                    # metadata produced for the Emby stack, so it is both faster
-                    # and more complete than re-scraping the same title here.
-                    shared_match = await shared_metadata.lookup(
-                        str(movie.get("name") or ""),
-                        str(movie.get("media_path") or ""),
-                    )
-                    if shared_match is None:
-                        # The shared catalogue is the only artwork source: a title
-                        # it does not know stays unmatched instead of being guessed
-                        # from a coincidental title match somewhere else.
-                        await _mark_movie_unmatched(
-                            movie,
-                            fallback_title=parsed_name.display_title,
-                            authoritative=force,
+            try:
+                has_shared_metadata = bool(settings.shared_metadata_base_url)
+                if not has_shared_metadata:
+                    raise RuntimeError("共享元数据接口未配置")
+                source_ids = (source,)
+                movies = await asyncio.to_thread(
+                    database.movie_metadata_candidates,
+                    sources=source_ids,
+                    force=force,
+                )
+                movie_metadata_state["total"] = len(movies)
+                async with shared_metadata_service().borrow() as shared_metadata:
+                    # Titles the catalogue knows but has no cover for are queued
+                    # again by ``movie_metadata_candidates``, so the covers have to
+                    # come from the current catalogue rather than the 10-minute-old
+                    # copy: warming first is what turns "I uploaded covers" into a
+                    # visible change on the very next refresh.
+                    await shared_metadata.warm_index(refresh=refresh_index)
+                    for movie in movies:
+                        parsed_name = parse_movie_filename(str(movie.get("name") or ""))
+                        # The shared service already holds the sidecar covers and NFO
+                        # metadata produced for the Emby stack, so it is both faster
+                        # and more complete than re-scraping the same title here.
+                        shared_match = await shared_metadata.lookup(
+                            str(movie.get("name") or ""),
+                            str(movie.get("media_path") or ""),
                         )
+                        if shared_match is None:
+                            # The shared catalogue is the only artwork source: a title
+                            # it does not know stays unmatched instead of being guessed
+                            # from a coincidental title match somewhere else.
+                            await _mark_movie_unmatched(
+                                movie,
+                                fallback_title=parsed_name.display_title,
+                                authoritative=force,
+                            )
+                            movie_metadata_state["checked"] += 1
+                            continue
+                        # The shared catalogue is the only cover source for the rows
+                        # it curates, so a match that arrives without artwork has to
+                        # clear whatever the row held: that value may belong to the
+                        # very release the matcher has just ruled out, and keeping it
+                        # is what re-surfaced one poster across a whole flat folder.
+                        await asyncio.to_thread(
+                            database.update_movie_metadata,
+                            int(movie["id"]),
+                            display_title=shared_match.title or movie["display_title"],
+                            original_title=shared_match.original_title or None,
+                            year=shared_match.year or movie.get("year"),
+                            overview=shared_match.overview or None,
+                            poster_url=shared_match.poster_url or None,
+                            backdrop_url=shared_match.backdrop_url or None,
+                            tmdb_id=None,
+                            metadata_provider=ACTIVE_METADATA_PROVIDER,
+                            release_date=str(shared_match.year) if shared_match.year else None,
+                            genres="[]",
+                            performers=json.dumps(shared_match.performers, ensure_ascii=False),
+                            studio=shared_match.studio or None,
+                            match_status="matched",
+                            match_confidence=shared_match.confidence,
+                        )
+                        movie_metadata_state["matched"] += 1
                         movie_metadata_state["checked"] += 1
-                        continue
-                    # The shared catalogue is the only cover source for the rows
-                    # it curates, so a match that arrives without artwork has to
-                    # clear whatever the row held: that value may belong to the
-                    # very release the matcher has just ruled out, and keeping it
-                    # is what re-surfaced one poster across a whole flat folder.
-                    await asyncio.to_thread(
-                        database.update_movie_metadata,
-                        int(movie["id"]),
-                        display_title=shared_match.title or movie["display_title"],
-                        original_title=shared_match.original_title or None,
-                        year=shared_match.year or movie.get("year"),
-                        overview=shared_match.overview or None,
-                        poster_url=shared_match.poster_url or None,
-                        backdrop_url=shared_match.backdrop_url or None,
-                        tmdb_id=None,
-                        metadata_provider=ACTIVE_METADATA_PROVIDER,
-                        release_date=str(shared_match.year) if shared_match.year else None,
-                        genres="[]",
-                        performers=json.dumps(shared_match.performers, ensure_ascii=False),
-                        studio=shared_match.studio or None,
-                        match_status="matched",
-                        match_confidence=shared_match.confidence,
-                    )
-                    movie_metadata_state["matched"] += 1
-                    movie_metadata_state["checked"] += 1
-            movie_metadata_state["lastSuccess"] = int(time.time())
-        except Exception as exc:
-            movie_metadata_state["lastError"] = str(exc)
-            logger.exception("Movie metadata scrape failed for %s", source)
-        finally:
-            movie_metadata_state["running"] = False
+                movie_metadata_state["lastSuccess"] = int(time.time())
+            except Exception as exc:
+                movie_metadata_state["lastError"] = str(exc)
+                logger.exception("Movie metadata scrape failed for %s", source)
+            finally:
+                movie_metadata_state["running"] = False
+    finally:
+        # A scan that finished while this pass held the lock left its request in
+        # the queue, and the lock is only free once the ``async with`` above has
+        # exited: draining any earlier would queue the same library again.
+        _drain_movie_metadata_queue()
 
 
 @asynccontextmanager
@@ -971,6 +1072,14 @@ async def lifespan(_: FastAPI):
         spawn_background(
             _warm_shared_metadata_index(shared_metadata_service()),
             name="shared-metadata-index-warmup",
+        )
+        # A queue is in-memory, so a restart is exactly when a library can be
+        # left with rows still stamped ``pending``: the pass that was going to
+        # fix them died with the process. Resuming from the database is what
+        # makes the queue survive a deploy instead of needing another scan.
+        spawn_background(
+            _resume_movie_metadata_passes(),
+            name="movie-metadata-resume",
         )
     try:
         yield
@@ -1002,6 +1111,32 @@ async def _warm_shared_metadata_index(client: SharedMetadataClient) -> None:
         len(index.codes),
         time.monotonic() - started,
     )
+
+
+async def _resume_movie_metadata_passes() -> None:
+    """Re-queue the libraries a restart left with unresolved rows.
+
+    The queue that carries a cover pass from one library to the next lives in
+    memory, and so does the lock: a deploy in the middle of a batch left the
+    remaining libraries stamped ``pending`` with nothing scheduled to look at
+    them. Reading the database back is what closes that hole -- and it runs on
+    every boot, so a library that was never matched is fixed without the user
+    having to remember which one it was.
+    """
+    pending = await asyncio.to_thread(database.movie_metadata_pending_sources)
+    # The registry is authoritative: a source that was deleted or disabled
+    # while its rows sat unresolved must not bring a worker back to life.
+    active = set(source_registry.ids("movie"))
+    pending = [source for source in pending if source in active]
+    if not pending:
+        return
+    logger.info(
+        "Resuming cover passes for %s movie library(ies) left pending: %s",
+        len(pending),
+        ", ".join(pending),
+    )
+    for source in pending:
+        start_movie_metadata_job(source)
 
 
 def shared_metadata_service() -> SharedMetadataClient:
@@ -1073,6 +1208,16 @@ class MediaSourceRequest(BaseModel):
     username: str = Field(default="", max_length=200)
     password: str = Field(default="", max_length=500)
     enabled: bool = True
+
+
+class MediaSourceOrderRequest(BaseModel):
+    """The whole library list in the order the user dragged it into.
+
+    Sending every id, rather than a pair of neighbours, keeps the write
+    idempotent: a dropped request can simply be retried with the same list.
+    """
+
+    ids: list[str] = Field(default_factory=list, max_length=500)
 
 
 def normalize_source_payload(payload: MediaSourceRequest) -> dict[str, Any]:
@@ -1878,6 +2023,31 @@ async def add_source(payload: MediaSourceRequest) -> dict[str, Any]:
     await asyncio.to_thread(refresh_source_states)
     source = await asyncio.to_thread(database.get_media_source, source["id"])
     return public_source(source)
+
+
+@app.put("/api/admin/sources/order")
+async def reorder_sources(payload: MediaSourceOrderRequest) -> dict[str, Any]:
+    """Persist the order the management screen was dragged into.
+
+    The wall groups its sections by this order, so reordering here is also the
+    reordering of the movie wall; no separate publish step is needed. Declared
+    before the ``/{source_id}`` routes so ``order`` is read as a literal path
+    rather than as the id of a library called "order".
+    """
+    existing = {
+        source["id"]
+        for source in await asyncio.to_thread(database.list_media_sources)
+    }
+    unknown = [source_id for source_id in payload.ids if source_id not in existing]
+    if unknown:
+        raise HTTPException(status_code=404, detail=f"媒体源不存在: {unknown[0]}")
+    moved = await asyncio.to_thread(database.reorder_media_sources, payload.ids)
+    await source_registry.reload()
+    sources = await asyncio.to_thread(database.list_media_sources)
+    return {
+        "moved": moved,
+        "items": [public_source(source) for source in sources],
+    }
 
 
 @app.put("/api/admin/sources/{source_id}")

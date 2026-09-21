@@ -3,6 +3,7 @@ package you.deepfuck.shortvideo.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.DragIndicator
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.IosShare
@@ -63,21 +65,28 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -95,6 +104,7 @@ internal fun ManagementScreen(
     onScanSource: (String) -> Unit,
     onSaveSource: (String?, MediaSourceDraft) -> Unit,
     onDeleteSource: (String) -> Unit,
+    onReorderSources: (List<String>) -> Unit,
     onFastStart: () -> Unit,
     onShowLogs: () -> Unit,
     onDismissLogs: () -> Unit,
@@ -186,22 +196,17 @@ internal fun ManagementScreen(
                         Spacer(Modifier.height(8.dp))
                         Text(formatBytes(status.totalBytes), color = TextFaint)
                         Spacer(Modifier.height(18.dp))
-                        status.sources.forEachIndexed { index, source ->
-                            if (index > 0) {
-                                Spacer(Modifier.height(8.dp))
-                            }
-                            MediaSourceRow(
-                                source = source,
-                                starting = "scan-${source.id}" in state.adminActions,
-                                deleting = "delete-source-${source.id}" in state.adminActions,
-                                onScan = onScanSource,
-                                onEdit = {
-                                    editingSource = source
-                                    sourceDialogOpen = true
-                                },
-                                onDelete = { deletingSource = source },
-                            )
-                        }
+                        DraggableSourceList(
+                            sources = status.sources,
+                            adminActions = state.adminActions,
+                            onReorder = onReorderSources,
+                            onScan = onScanSource,
+                            onEdit = {
+                                editingSource = it
+                                sourceDialogOpen = true
+                            },
+                            onDelete = { deletingSource = it },
+                        )
                         if (status.sources.isEmpty()) {
                             Text("尚未添加媒体源", color = TextFaint)
                         }
@@ -332,6 +337,115 @@ internal fun ManagementScreen(
     }
 }
 
+/**
+ * The library list, reorderable by long-pressing a card and dragging it.
+ *
+ * A new library used to land at the bottom of both this list and the movie
+ * wall with no way to move it, so the wall's order was whatever order the
+ * libraries happened to be added in. The drag is deliberately long-press first:
+ * a plain drag on a card competes with the page's own scroll.
+ */
+@Composable
+private fun DraggableSourceList(
+    sources: List<MediaLibrarySource>,
+    adminActions: Set<String>,
+    onReorder: (List<String>) -> Unit,
+    onScan: (String) -> Unit,
+    onEdit: (MediaLibrarySource) -> Unit,
+    onDelete: (MediaLibrarySource) -> Unit,
+) {
+    // The rows are drawn from this local copy while a drag is in flight, so the
+    // card follows the finger without waiting for the server round trip.
+    var draft by remember { mutableStateOf(sources) }
+    var draggingId by remember { mutableStateOf<String?>(null) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    var rowStride by remember { mutableFloatStateOf(0f) }
+    val density = LocalDensity.current
+    LaunchedEffect(sources) {
+        if (draggingId == null) draft = sources
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        draft.forEachIndexed { index, source ->
+            if (index > 0) Spacer(Modifier.height(8.dp))
+            val dragging = draggingId == source.id
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onSizeChanged { size ->
+                        // Cards are uniform, so one measured height is the
+                        // stride the drag arithmetic needs.
+                        if (rowStride <= 0f) {
+                            rowStride = size.height.toFloat() + with(density) { 8.dp.toPx() }
+                        }
+                    }
+                    .graphicsLayer {
+                        if (dragging) {
+                            translationY = dragOffset
+                            scaleX = 1.02f
+                            scaleY = 1.02f
+                            shadowElevation = with(density) { 12.dp.toPx() }
+                        }
+                    }
+                    .zIndex(if (dragging) 1f else 0f)
+                    .pointerInput(source.id) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = {
+                                draggingId = source.id
+                                dragOffset = 0f
+                            },
+                            onDrag = { change, amount ->
+                                change.consume()
+                                dragOffset += amount.y
+                                val target = dragTargetIndex(
+                                    index = draft.indexOfFirst { it.id == source.id },
+                                    dragOffsetPx = dragOffset,
+                                    stridePx = rowStride,
+                                    count = draft.size,
+                                )
+                                val from = draft.indexOfFirst { it.id == source.id }
+                                if (from >= 0 && target != from) {
+                                    draft = moveItem(draft, from, target)
+                                    dragOffset -= (target - from) * rowStride
+                                }
+                            },
+                            onDragEnd = {
+                                val moved = draft
+                                draggingId = null
+                                dragOffset = 0f
+                                if (moved.map { it.id } != sources.map { it.id }) {
+                                    onReorder(moved.map { it.id })
+                                }
+                            },
+                            onDragCancel = {
+                                draggingId = null
+                                dragOffset = 0f
+                                draft = sources
+                            },
+                        )
+                    },
+            ) {
+                MediaSourceRow(
+                    source = source,
+                    starting = "scan-${source.id}" in adminActions,
+                    deleting = "delete-source-${source.id}" in adminActions,
+                    onScan = onScan,
+                    onEdit = { onEdit(source) },
+                    onDelete = { onDelete(source) },
+                    dragHandle = {
+                        Icon(
+                            Icons.Outlined.DragIndicator,
+                            contentDescription = "长按拖动排序",
+                            tint = if (dragging) TextPrimary else TextFaint,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    },
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun MediaSourceRow(
     source: MediaLibrarySource,
@@ -340,6 +454,7 @@ private fun MediaSourceRow(
     onScan: (String) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    dragHandle: (@Composable () -> Unit)? = null,
 ) {
     val busy = source.scan.running || starting
     // Two rows sharing two edges: the name and the media count both start on the
@@ -357,6 +472,10 @@ private fun MediaSourceRow(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            dragHandle?.let {
+                it()
+                Spacer(Modifier.width(4.dp))
+            }
             Text(
                 source.name,
                 modifier = Modifier.weight(1f),

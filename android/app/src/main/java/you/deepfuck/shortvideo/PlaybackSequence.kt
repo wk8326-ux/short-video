@@ -158,10 +158,28 @@ internal fun mergeMoviePages(
     current: List<MovieItem>,
     incoming: List<MovieItem>,
     reset: Boolean,
+    sort: String = "cover",
 ): List<MovieItem> {
-    if (reset) return incoming.distinctBy(MovieItem::id)
+    if (reset) return orderMoviePage(incoming.distinctBy(MovieItem::id), sort)
     val ids = current.mapTo(mutableSetOf(), MovieItem::id)
-    return current + incoming.filter { ids.add(it.id) }
+    return orderMoviePage(current + incoming.filter { ids.add(it.id) }, sort)
+}
+
+/**
+ * Keeps "cover first" true across pages, not just inside one.
+ *
+ * The server already orders each page this way, so in the healthy case this
+ * changes nothing. It matters when a page arrives with a cover the client had
+ * already written off, or when the first page was seeded from the wall: the
+ * titles without artwork then end up at the front of the grid, which is exactly
+ * the ordering the user asked for. Other sorts are left exactly as sent, because
+ * only the server knows the timestamps and titles they are based on.
+ */
+private fun orderMoviePage(items: List<MovieItem>, sort: String): List<MovieItem> {
+    if (sort != "cover") return items
+    // sortedBy is stable, so titles that share a rank keep the order they
+    // arrived in and the grid does not reshuffle on every page.
+    return items.sortedBy { if (it.wallUrl != null || it.posterUrl != null) 0 else 1 }
 }
 
 internal fun shouldApplyMovieResponse(

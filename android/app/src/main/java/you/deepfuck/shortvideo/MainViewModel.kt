@@ -644,10 +644,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (state.surface != MediaSurface.MOVIE) return
         val group = state.movieGroups.firstOrNull { it.sourceId == sourceId } ?: return
         cancelMovieGroupPageLoad()
+        // The page reopens on the sort it was last browsed with, so its first
+        // six posters stay the ones the wall was previewing.
+        val sort = preferences.movieGroupSort(sourceId).ifBlank { DEFAULT_MOVIE_SORT }
         // The wall already fetched the first slice of this library, so the
         // page opens on those covers instead of a skeleton and swaps in the
         // full first page when it lands.
-        val prefetched = group.items.map { it.withResumePosition() }
+        val prefetched = group.items
+            .takeIf { sort == state.movieSort }
+            .orEmpty()
+            .map { it.withResumePosition() }
         mutableState.value = state.copy(
             openMovieGroupId = sourceId,
             openMovieGroupName = group.name,
@@ -656,7 +662,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openMovieGroupNextOffset = if (prefetched.isEmpty()) 0 else group.nextOffset,
             openMovieGroupLoading = true,
             openMovieGroupError = null,
-            openMovieGroupSort = DEFAULT_MOVIE_SORT,
+            openMovieGroupSort = sort,
         )
         loadMovieGroupPage(reset = true)
     }
@@ -678,7 +684,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setMovieGroupSort(sort: String) {
         val state = mutableState.value
-        if (state.openMovieGroupId == null || state.openMovieGroupSort == sort) return
+        val sourceId = state.openMovieGroupId ?: return
+        if (state.openMovieGroupSort == sort) return
+        preferences.saveMovieGroupSort(sourceId, sort)
         mutableState.value = state.copy(
             openMovieGroupSort = sort,
             openMovieGroupItems = emptyList(),
@@ -686,6 +694,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openMovieGroupError = null,
         )
         loadMovieGroupPage(reset = true)
+        // The wall previews the first six titles of each library, so reordering
+        // the page has to reorder the preview; otherwise the two disagree the
+        // moment the user goes back.
+        refreshMovieGroupPreview(sourceId, sort)
+    }
+
+    /** Re-reads one section of the wall with the sort its page now uses. */
+    private fun refreshMovieGroupPreview(sourceId: String, sort: String) {
+        viewModelScope.launch {
+            runApi {
+                api.movieGroupItems(
+                    sourceId = sourceId,
+                    offset = 0,
+                    limit = MediaApi.MOVIE_GROUP_SIZE,
+                    sort = sort,
+                )
+            }.onSuccess { page ->
+                val current = mutableState.value
+                if (current.surface != MediaSurface.MOVIE) return@onSuccess
+                val incoming = page.items.map { it.withResumePosition() }
+                mutableState.value = current.copy(
+                    movieGroups = current.movieGroups.map { group ->
+                        if (group.sourceId != sourceId) group
+                        else group.replaceItems(
+                            items = incoming,
+                            nextOffset = page.nextOffset,
+                            total = maxOf(page.total, incoming.size),
+                        )
+                    },
+                )
+            }
+        }
     }
 
     fun loadMoreMovieGroup() {
@@ -719,7 +759,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         return@onSuccess
                     }
                     val incoming = page.items.map { it.withResumePosition() }
-                    val merged = mergeMoviePages(current.openMovieGroupItems, incoming, reset = reset)
+                    val merged = mergeMoviePages(
+                        current.openMovieGroupItems,
+                        incoming,
+                        reset = reset,
+                        sort = requestedSort,
+                    )
                     mutableState.value = current.copy(
                         openMovieGroupItems = merged,
                         openMovieGroupTotal = maxOf(page.total, merged.size),
@@ -1281,6 +1326,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startFastStartCheck() = runAdminAction("fast-start") { api.startFastStartCheck() }
 
+    /**
+     * Saves the order the management list was dragged into.
+     *
+     * The list is reordered locally first so the card the user is holding stays
+     * under the thumb; the server call then makes it stick. A failure puts the
+     * previous order back rather than leaving the screen disagreeing with what
+     * was actually stored.
+     */
+    fun reorderMediaSources(sourceIds: List<String>) {
+        val status = mutableState.value.adminStatus ?: return
+        val current = status.sources.map { it.id }
+        if (sourceIds == current) return
+        if (sourceIds.toSet() != current.toSet()) return
+        val reordered = sourceIds.mapNotNull { id -> status.sources.firstOrNull { it.id == id } }
+        mutableState.update {
+            it.copy(adminStatus = it.adminStatus?.copy(sources = reordered), adminError = null)
+        }
+        viewModelScope.launch {
+            runApi { api.reorderMediaSources(sourceIds) }
+                .onSuccess {
+                    // Section membership can change which board each source
+                    // belongs to, so the wall re-reads its sections.
+                    refreshMovieLibrary()
+                    loadAdminStatus()
+                }
+                .onFailure { error ->
+                    if (!handleUnauthorized(error)) {
+                        mutableState.update {
+                            it.copy(adminError = error.message ?: "保存媒体源顺序失败")
+                        }
+                        loadAdminStatus()
+                    }
+                }
+        }
+    }
+
     fun checkForAppUpdate() {
         appUpdateJob?.cancel()
         appUpdateObserverJob?.cancel()
@@ -1584,6 +1665,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.saveMovieListPosition(position)
     }
 
+    internal fun movieGroupListPosition(sourceId: String): ListPosition =
+        preferences.movieGroupListPosition(sourceId)
+
+    internal fun saveMovieGroupListPosition(sourceId: String, position: ListPosition) {
+        preferences.saveMovieGroupListPosition(sourceId, position)
+    }
+
     internal fun dramaListPosition(): ListPosition = preferences.dramaListPosition()
 
     internal fun saveDramaListPosition(position: ListPosition) {
@@ -1865,7 +1953,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     ) return@onSuccess
                     val incoming = page.items.map { it.withResumePosition() }
-                    val merged = mergeMoviePages(current.movieItems, incoming, reset)
+                    val merged = mergeMoviePages(current.movieItems, incoming, reset, requestedSort)
                     movieCatalogDirty = false
                     mutableState.value = current.copy(
                         movieItems = merged,

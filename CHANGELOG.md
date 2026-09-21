@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.23] - 2026-09-21
+
+### Added
+
+- Libraries can be dragged into the order the viewer wants. The handle on each row in the management screen moves a
+  library up or down, the new order is stored on the server, and the film wall draws its sections in that order, so a
+  library that matters can sit above the ones that do not.
+- A library remembers where it was left. Opening a film from a library page and coming back returns to the same tile
+  instead of snapping to the top of the grid, and each library keeps its own scroll position and its own sort.
+- The sort chosen inside a library now reaches the wall. The six tiles a section shows are the first six of that
+  library's own order, so "covers first" holds on the wall as well as on the library page.
+- Portrait playback gained the horizontal seek gesture that only the landscape surface had. A drag left or right seeks
+  by a fraction of the running time from wherever the film actually is, on films, dramas, clips and ASMR alike.
+
+### Changed
+
+- The film detail page is one picture instead of two. The full-bleed blurred backdrop is gone; the hero still, cropped
+  to its right half, is the single image, and the title and metadata sit on the gradient beneath it. A film that had a
+  cover on the wall now has that same cover here, because both read the same field.
+
+### Fixed
+
+- A library could stay blank forever when its cover pass was requested while another one was already running. The pass
+  was refused instead of queued, so three libraries — 月度更新, 洗脑轮奸 and RKI系列 — sat with every row pending and
+  drew an empty wall. Passes are queued now and the pending libraries are picked up again after a restart, which fills
+  the covers the shared index has held all along.
+
 ## [1.6.0-beta.22] - 2026-09-20
 
 ### Added

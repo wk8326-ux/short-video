@@ -182,6 +182,7 @@ fun ShortVideoApp(
                 onScanSource = viewModel::startLibraryScan,
                 onSaveSource = viewModel::saveMediaSource,
                 onDeleteSource = viewModel::deleteMediaSource,
+                onReorderSources = viewModel::reorderMediaSources,
                 onFastStart = viewModel::startFastStartCheck,
                 onShowLogs = viewModel::showRuntimeLogs,
                 onDismissLogs = viewModel::dismissRuntimeLogs,
@@ -242,6 +243,9 @@ fun ShortVideoApp(
                                 fullscreen = fullscreen,
                                 pipMode = pipMode,
                                 listPosition = viewModel.movieListPosition(),
+                                groupListPosition = state.openMovieGroupId
+                                    ?.let(viewModel::movieGroupListPosition)
+                                    ?: you.deepfuck.shortvideo.ListPosition(),
                                 onSelect = viewModel::selectMovie,
                                 onBack = viewModel::closeMovieDetail,
                                 onPlay = viewModel::playMovie,
@@ -249,6 +253,7 @@ fun ShortVideoApp(
                                 onCloseGroup = viewModel::closeMovieGroup,
                                 onGroupSort = viewModel::setMovieGroupSort,
                                 onLoadMoreGroup = viewModel::loadMoreMovieGroup,
+                                onGroupListPosition = viewModel::saveMovieGroupListPosition,
                                 onWallView = viewModel::setMovieWallView,
                                 onRetry = viewModel::retryMovies,
                                 onTogglePlayback = viewModel::togglePlayback,

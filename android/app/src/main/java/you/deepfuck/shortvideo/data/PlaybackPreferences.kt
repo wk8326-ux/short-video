@@ -233,6 +233,29 @@ class PlaybackPreferences(context: Context) {
     internal fun saveMovieListPosition(position: ListPosition) =
         saveListPosition(KEY_MOVIE_LIST_POSITION, position)
 
+    /**
+     * One library page per source, so each keeps its own scroll offset. Opening a
+     * film from deep inside a library and coming back used to drop the user at the
+     * top of the grid.
+     */
+    internal fun movieGroupListPosition(sourceId: String): ListPosition =
+        listPosition("$KEY_MOVIE_GROUP_LIST_POSITION:$sourceId")
+
+    internal fun saveMovieGroupListPosition(sourceId: String, position: ListPosition) =
+        saveListPosition("$KEY_MOVIE_GROUP_LIST_POSITION:$sourceId", position)
+
+    /**
+     * The sort a library page was last browsed with. Keeping it means the wall
+     * preview and the page agree on which six titles lead, and reopening a
+     * library does not silently drop the order the user picked.
+     */
+    internal fun movieGroupSort(sourceId: String): String =
+        preferences.getString("$KEY_MOVIE_GROUP_SORT:$sourceId", null).orEmpty()
+
+    internal fun saveMovieGroupSort(sourceId: String, sort: String) {
+        preferences.edit().putString("$KEY_MOVIE_GROUP_SORT:$sourceId", sort).apply()
+    }
+
     internal fun dramaListPosition(): ListPosition =
         listPosition(KEY_DRAMA_LIST_POSITION)
 
@@ -279,6 +302,8 @@ class PlaybackPreferences(context: Context) {
         const val KEY_ASMR_AUTHOR_LIST_POSITION = "asmr_author_list_position"
         const val KEY_ASMR_MEDIA_LIST_POSITION = "asmr_media_list_position"
         const val KEY_MOVIE_LIST_POSITION = "movie_list_position"
+        const val KEY_MOVIE_GROUP_LIST_POSITION = "movie_group_list_position"
+        const val KEY_MOVIE_GROUP_SORT = "movie_group_sort"
         const val KEY_DRAMA_LIST_POSITION = "drama_list_position"
         const val KEY_DRAMA_EPISODE = "drama_episode"
         const val KEY_RECENT = "recent"
