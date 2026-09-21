@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.6.0-beta.25] - 2026-09-21
+
+### Fixed
+
+- Dragging a library in the management screen now actually moves it. The rows had no stable identity, so the first time
+  a card traded places with a neighbour Compose rebuilt that row and dropped the finger tracking; the card fell back
+  where it started. Each row is keyed by its library now, and the drag keeps following the finger to the end of the
+  gesture.
+- A drag stops at the edge of its own section. The server keeps one order per section and the management list shows
+  every section at once, so a card dragged past a library from another section would be put back on the next refresh.
+  The card is now fenced inside the block it started in, which is the only move that can be stored.
+
+## [1.6.0-beta.24] - 2026-09-21
+
+### Added
+
+- Each library card in the management screen shows how many root folders it scans, as a folder chip on the name row.
+  Tapping the chip expands the folder paths in place, so a library can be checked without opening the editor, and tapping
+  it again collapses the list.
+
 ## [1.6.0-beta.23] - 2026-09-21
 
 ### Added

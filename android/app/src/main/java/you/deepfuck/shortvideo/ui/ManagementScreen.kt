@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
@@ -35,6 +37,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.DragIndicator
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.IosShare
@@ -67,9 +70,11 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,6 +85,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -361,6 +368,10 @@ private fun DraggableSourceList(
     var dragOffset by remember { mutableFloatStateOf(0f) }
     var rowStride by remember { mutableFloatStateOf(0f) }
     val density = LocalDensity.current
+    // The gesture block below is keyed by the card's id, so it is not restarted
+    // when the server hands back a new list; reading the freshest value through
+    // a state holder keeps the "did anything move" check honest.
+    val latestSources by rememberUpdatedState(sources)
     LaunchedEffect(sources) {
         if (draggingId == null) draft = sources
     }
@@ -369,78 +380,102 @@ private fun DraggableSourceList(
         draft.forEachIndexed { index, source ->
             if (index > 0) Spacer(Modifier.height(8.dp))
             val dragging = draggingId == source.id
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .onSizeChanged { size ->
-                        // Cards are uniform, so one measured height is the
-                        // stride the drag arithmetic needs.
-                        if (rowStride <= 0f) {
-                            rowStride = size.height.toFloat() + with(density) { 8.dp.toPx() }
+            // Keying each card by its id is what makes the drag survive its own
+            // first swap. Without it Compose matches children by slot, so moving
+            // an entry rebuilt this row's gesture node mid-drag and the card
+            // snapped back the moment it passed a neighbour.
+            key(source.id) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onSizeChanged { size ->
+                            // Cards are uniform, so one measured height is the
+                            // stride the drag arithmetic needs.
+                            if (rowStride <= 0f) {
+                                rowStride = size.height.toFloat() + with(density) { 8.dp.toPx() }
+                            }
                         }
-                    }
-                    .graphicsLayer {
-                        if (dragging) {
-                            translationY = dragOffset
-                            scaleX = 1.02f
-                            scaleY = 1.02f
-                            shadowElevation = with(density) { 12.dp.toPx() }
+                        .graphicsLayer {
+                            if (dragging) {
+                                translationY = dragOffset
+                                scaleX = 1.02f
+                                scaleY = 1.02f
+                                shadowElevation = with(density) { 12.dp.toPx() }
+                            }
                         }
-                    }
-                    .zIndex(if (dragging) 1f else 0f)
-                    .pointerInput(source.id) {
-                        detectDragGesturesAfterLongPress(
-                            onDragStart = {
-                                draggingId = source.id
-                                dragOffset = 0f
-                            },
-                            onDrag = { change, amount ->
-                                change.consume()
-                                dragOffset += amount.y
-                                val target = dragTargetIndex(
-                                    index = draft.indexOfFirst { it.id == source.id },
-                                    dragOffsetPx = dragOffset,
-                                    stridePx = rowStride,
-                                    count = draft.size,
-                                )
-                                val from = draft.indexOfFirst { it.id == source.id }
-                                if (from >= 0 && target != from) {
-                                    draft = moveItem(draft, from, target)
-                                    dragOffset -= (target - from) * rowStride
-                                }
-                            },
-                            onDragEnd = {
-                                val moved = draft
-                                draggingId = null
-                                dragOffset = 0f
-                                if (moved.map { it.id } != sources.map { it.id }) {
-                                    onReorder(moved.map { it.id })
-                                }
-                            },
-                            onDragCancel = {
-                                draggingId = null
-                                dragOffset = 0f
-                                draft = sources
-                            },
-                        )
-                    },
-            ) {
-                MediaSourceRow(
-                    source = source,
-                    starting = "scan-${source.id}" in adminActions,
-                    deleting = "delete-source-${source.id}" in adminActions,
-                    onScan = onScan,
-                    onEdit = { onEdit(source) },
-                    onDelete = { onDelete(source) },
-                    dragHandle = {
-                        Icon(
-                            Icons.Outlined.DragIndicator,
-                            contentDescription = "长按拖动排序",
-                            tint = if (dragging) TextPrimary else TextFaint,
-                            modifier = Modifier.size(20.dp),
-                        )
-                    },
-                )
+                        .zIndex(if (dragging) 1f else 0f)
+                        .pointerInput(source.id) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = {
+                                    draggingId = source.id
+                                    dragOffset = 0f
+                                },
+                                onDrag = { change, amount ->
+                                    change.consume()
+                                    val from = draft.indexOfFirst { it.id == source.id }
+                                    if (from >= 0) {
+                                        // The server keeps one order per section, so
+                                        // a card can only travel inside its own block.
+                                        // Fencing the offset (not just the landing
+                                        // slot) stops the card from running away from
+                                        // the finger at the top and bottom of a section.
+                                        val bounds = sectionRange(draft, from) { it.section }
+                                        val lower = bounds?.first ?: 0
+                                        val upper = bounds?.last ?: (draft.size - 1)
+                                        dragOffset += amount.y
+                                        if (rowStride > 0f) {
+                                            dragOffset = dragOffset.coerceIn(
+                                                (lower - from) * rowStride,
+                                                (upper - from) * rowStride,
+                                            )
+                                        }
+                                        val target = dragTargetIndex(
+                                            index = from,
+                                            dragOffsetPx = dragOffset,
+                                            stridePx = rowStride,
+                                            count = draft.size,
+                                            minIndex = lower,
+                                            maxIndex = upper,
+                                        )
+                                        if (target != from) {
+                                            draft = moveItem(draft, from, target)
+                                            dragOffset -= (target - from) * rowStride
+                                        }
+                                    }
+                                },
+                                onDragEnd = {
+                                    val moved = draft
+                                    draggingId = null
+                                    dragOffset = 0f
+                                    if (moved.map { it.id } != latestSources.map { it.id }) {
+                                        onReorder(moved.map { it.id })
+                                    }
+                                },
+                                onDragCancel = {
+                                    draggingId = null
+                                    dragOffset = 0f
+                                    draft = latestSources
+                                },
+                            )
+                        },
+                ) {
+                    MediaSourceRow(
+                        source = source,
+                        starting = "scan-${source.id}" in adminActions,
+                        deleting = "delete-source-${source.id}" in adminActions,
+                        onScan = onScan,
+                        onEdit = { onEdit(source) },
+                        onDelete = { onDelete(source) },
+                        dragHandle = {
+                            Icon(
+                                Icons.Outlined.DragIndicator,
+                                contentDescription = "长按拖动排序",
+                                tint = if (dragging) TextPrimary else TextFaint,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        },
+                    )
+                }
             }
         }
     }
@@ -457,6 +492,10 @@ private fun MediaSourceRow(
     dragHandle: (@Composable () -> Unit)? = null,
 ) {
     val busy = source.scan.running || starting
+    // The folder count answers "how many roots does this library carry", but the
+    // only way to check *which* ones was to open the editor. The chip expands in
+    // place instead, so a library can be verified without leaving the list.
+    var rootsExpanded by remember(source.id) { mutableStateOf(false) }
     // Two rows sharing two edges: the name and the media count both start on the
     // card's content edge, the section tag and the action cluster both end on it.
     // The wall of metrics that used to live here pushed a dozen libraries past a
@@ -466,7 +505,10 @@ private fun MediaSourceRow(
         Modifier
             .fillMaxWidth()
             .glassSurface(fill = Raised, line = Line)
-            .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 2.dp),
+            // The root chip sets the name row at 32dp instead of the 20dp a bare
+            // text line took, so the top inset gives back the difference and the
+            // card stays the height it was.
+            .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 2.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -486,12 +528,68 @@ private fun MediaSourceRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.width(12.dp))
+            val roots = source.effectiveRootPaths
+            Box(
+                modifier = Modifier
+                    // A full 48dp target would push the card 28dp taller on every
+                    // row, which undoes the compaction the list was built for. A
+                    // 32dp chip over a 44dp wide target keeps it tappable, and a
+                    // minimum rather than a fixed width lets a two-digit count
+                    // grow instead of clipping.
+                    .defaultMinSize(minWidth = 44.dp, minHeight = 32.dp)
+                    .clip(ControlShape)
+                    .clickable { rootsExpanded = !rootsExpanded }
+                    .semantics {
+                        contentDescription =
+                            if (rootsExpanded) "收起根目录" else "查看 ${roots.size} 个根目录"
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .border(1.dp, Line, RoundedCornerShape(999.dp))
+                        .padding(horizontal = 7.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        if (rootsExpanded) Icons.Outlined.FolderOpen else Icons.Outlined.Folder,
+                        contentDescription = null,
+                        tint = if (rootsExpanded) TextPrimary else TextFaint,
+                        modifier = Modifier.size(11.dp),
+                    )
+                    Text(
+                        roots.size.toString(),
+                        color = if (rootsExpanded) TextPrimary else TextFaint,
+                        style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
             Text(
                 source.section.label,
                 color = AccentSoft,
                 style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 maxLines = 1,
             )
+        }
+        if (rootsExpanded) {
+            Spacer(Modifier.height(4.dp))
+            source.effectiveRootPaths.forEach { root ->
+                Text(
+                    root,
+                    modifier = Modifier.fillMaxWidth(),
+                    color = TextFaint,
+                    fontFamily = FontFamily.Monospace,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    softWrap = false,
+                )
+                Spacer(Modifier.height(2.dp))
+            }
         }
         source.scan.lastError?.let { message ->
             Spacer(Modifier.height(2.dp))

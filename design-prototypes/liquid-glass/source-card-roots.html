@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>媒体库卡片 · 根目录数量排版示意</title>
+    <style>
+      :root {
+        --canvas: #090a0b;
+        --surface: #15171a;
+        --text: #f4f1ed;
+        --muted: #bbb7b1;
+        --faint: #85827e;
+        --accent: #e7464f;
+        --accent-soft: #ff727a;
+        --line: rgba(255, 255, 255, 0.14);
+        --glass-fill: rgba(15, 16, 18, 0.58);
+        --glass-line: rgba(255, 255, 255, 0.2);
+        --radius: 8px;
+        font-family: "Noto Sans SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+        color: var(--text);
+        background: var(--canvas);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 18px 0 40px;
+        background: radial-gradient(120% 80% at 50% 0%, #14171b 0%, var(--canvas) 60%);
+      }
+      .page { width: 390px; margin: 0 auto; }
+      h1 { margin: 0 0 4px; font-size: 15px; font-weight: 600; padding: 0 16px; }
+      .lede { margin: 0 0 20px; padding: 0 16px; color: var(--faint); font-size: 11px; line-height: 1.6; }
+      h2 {
+        margin: 26px 16px 10px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        color: var(--accent-soft);
+        text-transform: uppercase;
+      }
+      .note { margin: 8px 16px 0; color: var(--faint); font-size: 10px; line-height: 1.6; }
+
+      /* Mirrors ManagementScreen.MediaSourceRow: two rows, two shared edges. */
+      .card {
+        margin: 0 16px 10px;
+        padding: 12px 16px 2px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--surface);
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 0;
+      }
+      .row + .row { margin-top: 0; }
+      .grip {
+        display: grid;
+        width: 24px;
+        height: 48px;
+        margin-left: -8px;
+        place-items: center;
+        color: var(--faint);
+      }
+      .grip svg { width: 14px; height: 14px; }
+      .name {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .tag { flex: 0 0 auto; margin-left: 12px; color: var(--accent-soft); font-size: 10px; }
+      .meta { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 11px; }
+      .meta .sep { color: var(--faint); }
+      .actions { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; margin-right: -12px; }
+      .actions button {
+        display: grid;
+        width: 48px;
+        height: 48px;
+        place-items: center;
+        border: 0;
+        border-radius: var(--radius);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .actions button.danger { color: var(--accent-soft); }
+      .actions svg { width: 17px; height: 17px; }
+
+      /* Variant B: a compact chip on the name row. */
+      .chip {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        margin-left: 10px;
+        padding: 2px 7px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--faint);
+        font-size: 10px;
+      }
+      .chip svg { width: 11px; height: 11px; }
+      .chip.open { color: var(--text); border-color: var(--glass-line); }
+      .chip.open svg { color: var(--text); }
+
+      /* Variant B, expanded: the roots list in place, monospaced like a path. */
+      .roots { margin: 2px 0 4px; }
+      .roots code {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        margin-bottom: 2px;
+        color: var(--faint);
+        font-family: "Cascadia Mono", Consolas, monospace;
+        font-size: 10px;
+      }
+
+      /* Variant C: the roots replace the scan age as the second fact. */
+      .facts { flex: 1 1 auto; display: flex; align-items: center; gap: 10px; min-width: 0; }
+      .fact { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
+      .fact b { color: var(--text); font-size: 12px; font-weight: 600; }
+      .fact span { color: var(--faint); font-size: 10px; }
+      .fact + .fact { padding-left: 10px; border-left: 1px solid var(--line); }
+    </style>
+  </head>
+  <body>
+    <svg style="display: none">
+      <symbol id="i-grip" viewBox="0 0 24 24" fill="currentColor">
+        <circle cx="9" cy="6" r="1.6" /><circle cx="15" cy="6" r="1.6" />
+        <circle cx="9" cy="12" r="1.6" /><circle cx="15" cy="12" r="1.6" />
+        <circle cx="9" cy="18" r="1.6" /><circle cx="15" cy="18" r="1.6" />
+      </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      </symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <path d="M4 20h4L20 8l-4-4L4 16z" />
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <polyline points="20 7 20 3 16 3" /><path d="M20 3a9 9 0 1 0 1 10" />
+      </symbol>
+      <symbol id="i-delete" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <path d="M4 7h16" /><path d="M9 7V5h6v2" /><path d="M6 7l1 13h10l1-13" />
+      </symbol>
+    </svg>
+
+    <div class="page">
+      <h1>媒体库卡片 · 根目录数量</h1>
+      <p class="lede">三种排法都保持两行、两条对齐边（名称/数量贴左，板块/操作贴右）。字号沿用现有卡片，未加高。</p>
+
+      <h2>方案 A · 数量后跟随</h2>
+      <section class="card">
+        <div class="row">
+          <span class="grip"><svg><use href="#i-grip" /></svg></span>
+          <span class="name">一线女优</span>
+          <span class="tag">电影</span>
+        </div>
+        <div class="row">
+          <span class="meta">532<span class="sep">  ·  </span>3 个根目录<span class="sep">  ·  </span>刚刚</span>
+          <span class="actions">
+            <button><svg><use href="#i-edit" /></svg></button>
+            <button><svg><use href="#i-refresh" /></svg></button>
+            <button class="danger"><svg><use href="#i-delete" /></svg></button>
+          </span>
+        </div>
+      </section>
+      <p class="note">改动最小：只是把已有的 "数量 · 扫描时间" 中间插一段。根目录为 1 个时省略，卡片回到现在的样子。</p>
+
+      <h2>方案 B · 名称行右侧 chip</h2>
+      <section class="card">
+        <div class="row">
+          <span class="grip"><svg><use href="#i-grip" /></svg></span>
+          <span class="name">一线女优</span>
+          <span class="chip"><svg><use href="#i-folder" /></svg>3</span>
+          <span class="tag">电影</span>
+        </div>
+        <div class="row">
+          <span class="meta">532<span class="sep">  ·  </span>刚刚</span>
+          <span class="actions">
+            <button><svg><use href="#i-edit" /></svg></button>
+            <button><svg><use href="#i-refresh" /></svg></button>
+            <button class="danger"><svg><use href="#i-delete" /></svg></button>
+          </span>
+        </div>
+      </section>
+      <p class="note">收起状态：文件夹图标 + 数字最省字，扫一眼就知道这个库挂了几个目录；代价是名称可用宽度少约 40px，长名字更容易截断。</p>
+
+      <h2>方案 B · 点开后的状态</h2>
+      <section class="card">
+        <div class="row">
+          <span class="grip"><svg><use href="#i-grip" /></svg></span>
+          <span class="name">一线女优</span>
+          <span class="chip open"><svg><use href="#i-folder" /></svg>3</span>
+          <span class="tag">电影</span>
+        </div>
+        <div class="roots">
+          <code>/光鸭/下载器/一线女优</code>
+          <code>/光鸭/下载器/一线女优/合集</code>
+          <code>/光鸭/番号/一线女优</code>
+        </div>
+        <div class="row">
+          <span class="meta">532<span class="sep">  ·  </span>刚刚</span>
+          <span class="actions">
+            <button><svg><use href="#i-edit" /></svg></button>
+            <button><svg><use href="#i-refresh" /></svg></button>
+            <button class="danger"><svg><use href="#i-delete" /></svg></button>
+          </span>
+        </div>
+      </section>
+      <p class="note">点一下 chip 就地展开目录清单，图标换成打开的文件夹、颜色变亮；再点一次收起。不跳页、不改高度（展开时才增高）。</p>
+
+      <h2>方案 C · 数量拆成两组事实</h2>
+      <section class="card">
+        <div class="row">
+          <span class="grip"><svg><use href="#i-grip" /></svg></span>
+          <span class="name">一线女优</span>
+          <span class="tag">电影</span>
+        </div>
+        <div class="row">
+          <span class="facts">
+            <span class="fact"><b>532</b><span>媒体</span></span>
+            <span class="fact"><b>3</b><span>根目录</span></span>
+          </span>
+          <span class="actions">
+            <button><svg><use href="#i-edit" /></svg></button>
+            <button><svg><use href="#i-refresh" /></svg></button>
+            <button class="danger"><svg><use href="#i-delete" /></svg></button>
+          </span>
+        </div>
+      </section>
+      <p class="note">信息密度最高、最好比对，但把 "刚刚" 这类扫描时间挤掉了（可移到长按或编辑页）。</p>
+    </div>
+  </body>
+</html>
