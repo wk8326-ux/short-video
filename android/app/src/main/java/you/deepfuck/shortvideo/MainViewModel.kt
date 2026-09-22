@@ -40,6 +40,7 @@ import you.deepfuck.shortvideo.data.MediaSourceDraft
 import you.deepfuck.shortvideo.data.MovieGroup
 import you.deepfuck.shortvideo.data.MovieItem
 import you.deepfuck.shortvideo.data.MovieWallView
+import you.deepfuck.shortvideo.data.MOVIE_SORT_DEFAULT
 import you.deepfuck.shortvideo.data.PlaybackPreferences
 import you.deepfuck.shortvideo.media.PlaybackEngine
 import you.deepfuck.shortvideo.media.PlaybackEndedEvent
@@ -155,6 +156,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             mode = preferences.mode,
             muted = preferences.muted(initialSurface),
             movieWallView = preferences.movieWallView,
+            movieSort = preferences.movieWallSort.ifBlank { MOVIE_SORT_DEFAULT },
             asmrVideoBackgroundPlayback = preferences.asmrVideoBackgroundPlayback,
             selectedAuthor = preferences.selectedAsmrAuthor,
             nowPlaying = restoredMedia.takeIf {
@@ -575,6 +577,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setMovieSort(sort: String) {
         if (sort == mutableState.value.movieSort) return
+        preferences.movieWallSort = sort
         movieJob?.cancel()
         movieSearchJob?.cancel()
         movieRequestGeneration += 1L
@@ -645,15 +648,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val group = state.movieGroups.firstOrNull { it.sourceId == sourceId } ?: return
         cancelMovieGroupPageLoad()
         // The page reopens on the sort it was last browsed with, so its first
-        // six posters stay the ones the wall was previewing.
-        val sort = preferences.movieGroupSort(sourceId).ifBlank { DEFAULT_MOVIE_SORT }
-        // The wall already fetched the first slice of this library, so the
-        // page opens on those covers instead of a skeleton and swaps in the
-        // full first page when it lands.
-        val prefetched = group.items
-            .takeIf { sort == state.movieSort }
-            .orEmpty()
-            .map { it.withResumePosition() }
+        // six posters stay the ones the wall was previewing. A library the
+        // user has never sorted follows the wall-wide order, which is exactly
+        // what the wall used to draw its preview - falling back to "cover"
+        // instead made the page disagree with the section it was opened from.
+        val sort = preferences.movieGroupSort(sourceId).ifBlank { state.movieSort }
+        // The wall previews this library with the library's own saved order, so
+        // the slice it already holds is the very slice this page is about to
+        // request. Drawing it immediately is what keeps the page from opening
+        // on a skeleton while the identical request is in flight.
+        val prefetched = group.items.map { it.withResumePosition() }
         mutableState.value = state.copy(
             openMovieGroupId = sourceId,
             openMovieGroupName = group.name,
@@ -2014,6 +2018,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!reset && state.movieGroupsLoading) return
         movieJob?.cancel()
         val requestedSort = state.movieSort
+        // Each section previews the library's own first six, so the wall asks
+        // the server for every saved per-library order at once. Without this a
+        // page sorted by title still showed the old arrangement on the wall
+        // until that library was opened again.
+        val perSourceSorts = preferences.movieGroupSorts()
         val requestGeneration = ++movieRequestGeneration
         mutableState.value = state.copy(
             movieGroupsLoading = true,
@@ -2021,7 +2030,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieError = null,
         )
         movieJob = viewModelScope.launch {
-            runApi { api.movieGroups(sort = requestedSort) }
+            runApi {
+                api.movieGroups(sort = requestedSort, perSourceSorts = perSourceSorts)
+            }
                 .onSuccess { page ->
                     val current = mutableState.value
                     if (
@@ -2869,9 +2880,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
     }
 }
-
-/** A library's own page opens on the same ordering the wall uses. */
-private const val DEFAULT_MOVIE_SORT = "cover"
 
 // How often the local playhead is mirrored to the server, and how far it has to
 // move for a seek to be reported straight away.

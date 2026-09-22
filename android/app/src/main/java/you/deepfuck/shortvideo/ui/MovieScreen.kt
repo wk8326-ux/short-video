@@ -86,7 +86,6 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
@@ -107,6 +106,8 @@ import you.deepfuck.shortvideo.ListPosition
 import you.deepfuck.shortvideo.data.MovieItem
 import you.deepfuck.shortvideo.data.MovieGroup
 import you.deepfuck.shortvideo.data.MovieWallView
+import you.deepfuck.shortvideo.data.movieSortOnSelect
+import you.deepfuck.shortvideo.data.movieSortParts
 import you.deepfuck.shortvideo.media.PlayerSnapshot
 import you.deepfuck.shortvideo.shouldLoadMore
 
@@ -563,7 +564,11 @@ private fun RecentMovieCard(
                         imageLoader = imageLoader,
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop,
+                        // The catalogue's covers are not all the same shape.
+                        // Fitting the original inside the cell shows every one
+                        // of them whole; cropping cut the edges off whichever
+                        // titles happened to be wider than the box.
+                        contentScale = ContentScale.Fit,
                     )
                 }
                 if (movie.resumeFraction > 0f) {
@@ -653,7 +658,7 @@ private fun MovieLibraryTile(
                                         imageLoader = imageLoader,
                                         contentDescription = null,
                                         modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop,
+                                        contentScale = ContentScale.Fit,
                                     )
                                 }
                             }
@@ -938,17 +943,28 @@ private fun MovieLibraryPage(
                     shape = GlassPanelShape,
                     shadowElevation = 0.dp,
                 ) {
+                    // Tapping the option that is already selected flips its
+                    // arrow instead of doing nothing, so both directions of
+                    // title and time are reachable from one menu.
+                    val (activeField, activeDirection) = movieSortParts(sort)
                     MovieSort.entries.forEach { option ->
+                        val selected = option.field == activeField
+                        val arrow = if (selected) directionArrow(activeDirection) else ""
                         DropdownMenuItem(
-                            text = { Text(option.label) },
+                            text = {
+                                Text(
+                                    if (arrow.isEmpty()) option.label
+                                    else "${option.label}  $arrow",
+                                )
+                            },
                             trailingIcon = {
-                                if (sort == option.value) {
+                                if (selected) {
                                     Icon(Icons.Outlined.Check, contentDescription = null)
                                 }
                             },
                             onClick = {
                                 sortMenuOpen = false
-                                onSort(option.value)
+                                onSort(movieSortOnSelect(sort, option.field))
                             },
                         )
                     }
@@ -1038,7 +1054,7 @@ private fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () 
                         imageLoader = imageLoader,
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop,
+                        contentScale = ContentScale.Fit,
                     )
                 }
                 if (movie.resumeFraction > 0f) {
@@ -1295,16 +1311,16 @@ private fun MovieHero(movie: MovieItem, imageLoader: ImageLoader) {
         contentAlignment = Alignment.Center,
     ) {
         Icon(Icons.Outlined.Movie, contentDescription = null, tint = TextFaint, modifier = Modifier.size(30.dp))
+        // Exactly the wall's expression, at exactly the wall's URL: the detail
+        // page used to scale the picture up and pin it to one edge, which both
+        // cropped it and asked for a second copy of the same bytes.
         (movie.wallUrl ?: movie.posterUrl)?.let {
             AsyncImage(
                 model = it,
                 imageLoader = imageLoader,
                 contentDescription = null,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer { scaleX = 1.16f; scaleY = 1.16f },
-                contentScale = ContentScale.Crop,
-                alignment = Alignment.CenterEnd,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
             )
         }
     }
@@ -1549,15 +1565,28 @@ private fun movieMeta(movie: MovieItem): String = buildList {
     movie.rating?.takeIf { it > 0.0 }?.let { add("评分 ${String.format(java.util.Locale.ROOT, "%.1f", it)}") }
 }.joinToString("  ·  ")
 
-/** Sort values mirror the API contract; the labels belong to the UI. */
-internal enum class MovieSort(val value: String, val label: String) {
+/**
+ * Sort options mirror the API contract; the labels belong to the UI.
+ *
+ * [field] is what the menu compares against a stored token, so the direction
+ * lives in the token rather than in a separate enum entry.
+ */
+internal enum class MovieSort(val field: String, val label: String) {
     COVER("cover", "封面优先"),
     TITLE("title", "标题"),
     TIME("time", "按时间"),
     ;
 
     companion object {
-        fun labelOf(value: String): String =
-            entries.firstOrNull { it.value == value }?.label ?: COVER.label
+        fun labelOf(value: String): String {
+            val field = movieSortParts(value).first
+            return entries.firstOrNull { it.field == field }?.label ?: COVER.label
+        }
     }
+}
+
+internal fun directionArrow(direction: String): String = when (direction) {
+    "asc" -> "↑"
+    "desc" -> "↓"
+    else -> ""
 }

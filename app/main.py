@@ -50,7 +50,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.26"
+APP_VERSION = "1.6.0-beta.27"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -1300,27 +1300,79 @@ def _artwork_token(source_url: Any) -> str:
     return hashlib.sha1(str(source_url or "").encode("utf-8")).hexdigest()[:8]
 
 
+MOVIE_SORT_FIELDS = ("cover", "title", "time")
+MOVIE_SORT_DIRECTIONS = ("asc", "desc")
+
+
+def movie_sort_token(field: str, direction: str = "") -> str:
+    """Encode one library's order as the single string the client stores.
+
+    ``cover`` carries no direction because "artwork first" has no meaningful
+    reverse; the other two keep whichever arrow the user last tapped.
+    """
+    if field not in MOVIE_SORT_FIELDS:
+        return "cover"
+    if field == "cover":
+        return "cover"
+    if direction not in MOVIE_SORT_DIRECTIONS:
+        # Preserve the historical defaults so an untouched library keeps
+        # looking exactly the way it always did.
+        return field
+    return f"{field}:{direction}"
+
+
+def movie_sort_parts(token: str) -> tuple[str, str] | None:
+    """Split a stored sort token into the field and direction the query wants."""
+    field, _, direction = str(token or "").partition(":")
+    if field not in MOVIE_SORT_FIELDS:
+        return None
+    if field == "cover":
+        return "cover", ""
+    if direction in MOVIE_SORT_DIRECTIONS:
+        return field, direction
+    return field, ""
+
+
+def _parse_source_sorts(raw: str) -> dict[str, str]:
+    """Read the ``id:token`` list the wall sends for its per-library orders."""
+    parsed: dict[str, str] = {}
+    for chunk in str(raw or "").split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        # A token may itself contain a colon ("title:desc"), so only the first
+        # one separates the library id from its order.
+        source_id, separator, token = entry.partition(":")
+        if not separator or not source_id:
+            continue
+        token = token.strip()
+        if movie_sort_parts(token) is None:
+            continue
+        parsed[source_id.strip()] = token
+    return parsed
+
+
 def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
     movie_id = int(row["id"])
-    has_metadata_poster = bool(str(row.get("poster_url") or "").strip())
-    has_thumb = bool(str(row.get("thumb") or "").strip())
-    has_backdrop = bool(str(row.get("backdrop_url") or "").strip())
-    poster_url = (
-        f"/api/movies/{movie_id}/poster?v={_artwork_token(row.get('poster_url'))}"
-        if has_metadata_poster
-        else f"/api/videos/{row['video_id']}/poster"
-        if has_thumb
-        else None
-    )
-    backdrop_url = (
-        f"/api/movies/{movie_id}/backdrop?v={_artwork_token(row.get('backdrop_url'))}"
-        if has_backdrop
-        else None
-    )
-    # JavBus cover_url is the primary landscape wall image. The tiny
-    # thumb_url remains separately available as backdrop_url and is used
-    # only as the blurred detail-page background.
-    wall_url = poster_url or backdrop_url
+    # One title, one picture. The wall, the library page and the detail page all
+    # paint the same image, so they have to be handed the same URL: three
+    # different strings for one upstream file meant three cache entries, and a
+    # device that had drawn the wall cover would still open the detail page on a
+    # blank frame while it fetched its own copy of the identical bytes.
+    #
+    # The fallback chain is the same one the poster endpoint resolves, so a row
+    # whose only artwork is the AList thumbnail is served (and cached) under one
+    # address rather than two.
+    if str(row.get("poster_url") or "").strip():
+        cover_url = f"/api/movies/{movie_id}/poster?v={_artwork_token(row.get('poster_url'))}"
+    elif str(row.get("backdrop_url") or "").strip():
+        cover_url = f"/api/movies/{movie_id}/poster?v={_artwork_token(row.get('backdrop_url'))}"
+    elif str(row.get("thumb") or "").strip():
+        # A plain AList redirect: it is already a stable, cheap URL and the
+        # proxy cannot resize it, so it keeps its own address.
+        cover_url = f"/api/videos/{row['video_id']}/poster"
+    else:
+        cover_url = None
     payload = {
         "id": movie_id,
         "videoId": int(row["video_id"]),
@@ -1331,11 +1383,9 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         # Keep third-party image URLs server-side.  Mobile clients frequently
         # cannot reach JavBus/DMM CDNs directly or are rejected by hotlink
         # protection, while the API host is already authenticated and reachable.
-        "posterUrl": poster_url,
-        "backdropUrl": backdrop_url,
-        # The wall is intentionally landscape-first. Keep posterUrl and
-        # backdropUrl separate so detail screens retain their existing layout.
-        "wallUrl": wall_url,
+        "posterUrl": cover_url,
+        "backdropUrl": cover_url,
+        "wallUrl": cover_url,
         "rating": row.get("rating"),
         "runtimeMinutes": row.get("runtime_minutes"),
         "matchStatus": row.get("match_status") or "pending",
@@ -2206,13 +2256,20 @@ async def prewarm_movie_wall_images(rows: list[dict[str, Any]], *, limit: int = 
 
     async def warm(row: dict[str, Any]) -> None:
         async with semaphore:
-            # The wall renders the landscape cover, so warming the backdrop
-            # first only wasted a download slot. The width has to match what the
-            # client asks for, otherwise the warm-up fills an entry it never reads.
-            await prewarm_movie_image_at_width(
-                row.get("poster_url") or row.get("thumb") or row.get("backdrop_url"),
-                MOVIE_WALL_IMAGE_WIDTH,
-            )
+            # Warm exactly the URL public_movie advertises, at the width the
+            # client will ask for: a warm-up that fills a different cache entry
+            # than the one the wall reads is a wasted download.
+            #
+            # The AList thumbnail branch is served by /api/videos/{id}/poster,
+            # which is a plain redirect the client cannot size, so it is warmed
+            # unsized to match.
+            if row.get("poster_url") or row.get("backdrop_url"):
+                await prewarm_movie_image_at_width(
+                    row.get("poster_url") or row.get("backdrop_url"),
+                    MOVIE_WALL_IMAGE_WIDTH,
+                )
+            elif row.get("thumb"):
+                await prewarm_movie_image_at_width(row.get("thumb"), 0)
 
     await asyncio.gather(*(warm(row) for row in rows[:limit]))
 
@@ -2470,20 +2527,35 @@ async def movie_groups(
     q: str = Query(default="", max_length=100),
     perGroup: int = Query(default=6, ge=1, le=24),
     sort: str = Query(default="cover", pattern="^(cover|title|time)$"),
+    dir: str = Query(default="", pattern="^(asc|desc|)$"),
+    sorts: str = Query(default="", max_length=2000),
 ) -> dict[str, Any]:
     """Group the wall by media source so the UI mirrors how libraries are added.
 
     Counting per source first keeps a source without movies out of the wall
     entirely, instead of rendering an empty section the user cannot explain.
+
+    ``sorts`` carries each library's own order as ``id:token`` pairs. The wall
+    previews the first six titles of a library, so it has to preview them in the
+    order that library's page is browsed with - otherwise sorting a page and
+    going back showed the same six covers in the old arrangement.
     """
     sources = source_registry.ids("movie")
     search = q.strip()
+    per_source_sort = _parse_source_sorts(sorts)
     counts = await asyncio.to_thread(
         database.movie_source_counts,
         search=search,
         sources=sources,
     )
     ordered = [source for source in sources if counts.get(source, 0) > 0]
+
+    def sort_for(source_id: str) -> tuple[str, str]:
+        token = per_source_sort.get(source_id)
+        if not token:
+            return sort, dir
+        return movie_sort_parts(token) or (sort, dir)
+
     pages = await asyncio.gather(
         *(
             asyncio.to_thread(
@@ -2492,7 +2564,8 @@ async def movie_groups(
                 limit=perGroup,
                 offset=0,
                 sources=(source,),
-                sort=sort,
+                sort=sort_for(source)[0],
+                direction=sort_for(source)[1],
             )
             for source in ordered
         )
@@ -2532,6 +2605,7 @@ async def movie_group_items(
     limit: int = Query(default=6, ge=1, le=60),
     offset: int = Query(default=0, ge=0),
     sort: str = Query(default="cover", pattern="^(cover|title|time)$"),
+    dir: str = Query(default="", pattern="^(asc|desc|)$"),
 ) -> dict[str, Any]:
     if source_id not in source_registry.ids("movie"):
         raise HTTPException(status_code=404, detail="Media source not found")
@@ -2544,6 +2618,7 @@ async def movie_group_items(
             offset=offset,
             sources=(source_id,),
             sort=sort,
+            direction=dir,
         ),
         asyncio.to_thread(database.movie_count, search=search, sources=(source_id,)),
     )
@@ -2564,6 +2639,7 @@ async def movies(
     limit: int = Query(default=24, ge=1, le=60),
     offset: int = Query(default=0, ge=0),
     sort: str = Query(default="cover", pattern="^(cover|title|time)$"),
+    dir: str = Query(default="", pattern="^(asc|desc|)$"),
 ) -> dict[str, Any]:
     sources = source_registry.ids("movie")
     search = q.strip()
@@ -2575,6 +2651,7 @@ async def movies(
             offset=offset,
             sources=sources,
             sort=sort,
+            direction=dir,
         ),
         asyncio.to_thread(database.movie_count, search=search, sources=sources),
     )
@@ -2651,7 +2728,9 @@ async def _movie_image(
         raise HTTPException(status_code=404, detail="Movie not found")
     source_url = row.get(field)
     if field == "poster_url" and not source_url:
-        source_url = row.get("thumb")
+        # Same chain public_movie advertises, so the URL the client was given
+        # always resolves to the picture it expects.
+        source_url = row.get("backdrop_url") or row.get("thumb")
     if not source_url:
         raise HTTPException(status_code=404, detail="Movie image not found")
     return await _proxy_movie_image(

@@ -173,12 +173,14 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         query: String = "",
         limit: Int = MOVIE_PAGE_SIZE,
         offset: Int = 0,
-        sort: String = "cover",
+        sort: String = MOVIE_SORT_DEFAULT,
     ): MoviePage {
+        val (field, direction) = movieSortQuery(sort)
         val target = url("/api/movies").newBuilder()
             .addQueryParameter("limit", limit.toString())
             .addQueryParameter("offset", offset.toString())
-            .addQueryParameter("sort", sort)
+            .addQueryParameter("sort", field)
+            .apply { if (direction.isNotBlank()) addQueryParameter("dir", direction) }
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
             .build()
         val payload = getJson(target.toString())
@@ -207,11 +209,24 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     fun movieGroups(
         query: String = "",
         perGroup: Int = MOVIE_GROUP_SIZE,
-        sort: String = "cover",
+        sort: String = MOVIE_SORT_DEFAULT,
+        perSourceSorts: Map<String, String> = emptyMap(),
     ): MovieGroupPage {
+        val (field, direction) = movieSortQuery(sort)
         val target = url("/api/movies/groups").newBuilder()
             .addQueryParameter("perGroup", perGroup.toString())
-            .addQueryParameter("sort", sort)
+            .addQueryParameter("sort", field)
+            .apply { if (direction.isNotBlank()) addQueryParameter("dir", direction) }
+            .apply {
+                // Each library previews its own first six, so the wall has to
+                // know how each one is sorted on its page.
+                if (perSourceSorts.isNotEmpty()) {
+                    addQueryParameter(
+                        "sorts",
+                        perSourceSorts.entries.joinToString(",") { "${it.key}:${it.value}" },
+                    )
+                }
+            }
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
             .build()
         val payload = getJson(target.toString())
@@ -227,13 +242,15 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         offset: Int,
         limit: Int = MOVIE_GROUP_SIZE,
         query: String = "",
-        sort: String = "cover",
+        sort: String = MOVIE_SORT_DEFAULT,
     ): MovieGroupItems {
+        val (field, direction) = movieSortQuery(sort)
         val target = url("/api/movies/groups").newBuilder()
             .addPathSegment(sourceId)
             .addQueryParameter("limit", limit.toString())
             .addQueryParameter("offset", offset.toString())
-            .addQueryParameter("sort", sort)
+            .addQueryParameter("sort", field)
+            .apply { if (direction.isNotBlank()) addQueryParameter("dir", direction) }
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
             .build()
         val payload = getJson(target.toString())

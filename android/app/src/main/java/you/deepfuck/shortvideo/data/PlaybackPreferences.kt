@@ -40,6 +40,14 @@ class PlaybackPreferences(context: Context) {
         get() = MovieWallView.fromValue(preferences.getString(KEY_MOVIE_WALL_VIEW, null))
         set(value) = preferences.edit().putString(KEY_MOVIE_WALL_VIEW, value.apiValue).apply()
 
+    /**
+     * The order the wall itself is browsed in. It survives a restart so the
+     * wall comes back the way the user left it.
+     */
+    internal var movieWallSort: String
+        get() = preferences.getString(KEY_MOVIE_WALL_SORT, null).orEmpty()
+        set(value) = preferences.edit().putString(KEY_MOVIE_WALL_SORT, value).apply()
+
     fun muted(surface: MediaSurface): Boolean {
         val key = "$KEY_MUTED:${surface.name}"
         if (preferences.contains(key)) return preferences.getBoolean(key, false)
@@ -256,6 +264,23 @@ class PlaybackPreferences(context: Context) {
         preferences.edit().putString("$KEY_MOVIE_GROUP_SORT:$sourceId", sort).apply()
     }
 
+    /**
+     * Every library's saved order, for the wall to preview each section with.
+     *
+     * The wall draws the first six titles of a library, so it needs the same
+     * order that library's own page is browsed with; sending them together in
+     * one request is what keeps the two from disagreeing.
+     */
+    internal fun movieGroupSorts(): Map<String, String> =
+        preferences.all
+            .filterKeys { it.startsWith("$KEY_MOVIE_GROUP_SORT:") }
+            .mapNotNull { (key, value) ->
+                val sourceId = key.removePrefix("$KEY_MOVIE_GROUP_SORT:")
+                val sort = value as? String
+                if (sourceId.isBlank() || sort.isNullOrBlank()) null else sourceId to sort
+            }
+            .toMap()
+
     internal fun dramaListPosition(): ListPosition =
         listPosition(KEY_DRAMA_LIST_POSITION)
 
@@ -294,6 +319,7 @@ class PlaybackPreferences(context: Context) {
         const val KEY_SURFACE = "surface"
         const val KEY_MODE = "mode"
         const val KEY_MOVIE_WALL_VIEW = "movie_wall_view"
+        const val KEY_MOVIE_WALL_SORT = "movie_wall_sort"
         const val KEY_MUTED = "muted"
         const val KEY_ASMR_VIDEO_BACKGROUND = "asmr_video_background"
         const val KEY_ASMR_AUTHOR = "asmr_author"

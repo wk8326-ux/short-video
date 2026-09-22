@@ -1463,6 +1463,7 @@ class LibraryDatabase:
         offset: int = 0,
         sources: Sequence[str] = (),
         sort: str = "cover",
+        direction: str = "",
     ) -> list[dict[str, Any]]:
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "m.source IN")
@@ -1476,14 +1477,38 @@ class LibraryDatabase:
             params.extend([f"%{escaped}%", f"%{escaped}%"])
         has_poster = "(LOWER(COALESCE(m.poster_url, '')) <> '')"
         has_thumb = "(LOWER(COALESCE(v.thumb, '')) <> '')"
-        cover_rank = f"CASE WHEN {has_poster} THEN 0 WHEN {has_thumb} THEN 1 ELSE 2 END"
+        has_backdrop = "(LOWER(COALESCE(m.backdrop_url, '')) <> '')"
+        # "Has a cover" means the client will actually be handed an image: the
+        # shared catalogue writes poster_url, the older AList scan wrote thumb,
+        # and a few rows only ever had a backdrop. Ranking on one of the three
+        # alone left titles that do render a picture sitting behind titles that
+        # do not.
+        cover_rank = (
+            f"CASE WHEN {has_poster} OR {has_backdrop} OR {has_thumb} THEN 0 ELSE 1 END"
+        )
+        descending = str(direction).lower() == "desc"
+        ascending = str(direction).lower() == "asc"
         if sort == "title":
-            order = "m.display_title COLLATE NOCASE, m.year, m.id"
+            # Tapping the same option again flips the arrow, so both directions
+            # have to be expressible here; the secondary keys follow along so
+            # the order is still total and stable.
+            order = (
+                "m.display_title COLLATE NOCASE DESC, m.year DESC, m.id DESC"
+                if descending
+                else "m.display_title COLLATE NOCASE, m.year, m.id"
+            )
         elif sort == "time":
-            # Newest first: a library page is browsed by what arrived last, and
-            # v.modified is the downloader's own timestamp for the file.
-            order = "v.modified DESC, m.id DESC"
+            # Newest first by default: a library page is browsed by what arrived
+            # last, and v.modified is the downloader's own timestamp for the
+            # file. "asc" asks for oldest first.
+            order = (
+                "v.modified ASC, m.id ASC"
+                if ascending
+                else "v.modified DESC, m.id DESC"
+            )
         else:
+            # "Cover first" has no meaningful reverse: the whole point of the
+            # order is that artwork leads, so the direction is ignored here.
             order = f"{cover_rank}, m.display_title COLLATE NOCASE, m.year, m.id"
         params.extend([max(1, limit), max(0, offset)])
         with self._lock, self._connect() as connection:

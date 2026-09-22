@@ -2,6 +2,7 @@ package you.deepfuck.shortvideo
 
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MovieItem
+import you.deepfuck.shortvideo.data.movieSortIsCover
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.AsmrFilter
@@ -176,7 +177,7 @@ internal fun mergeMoviePages(
  * only the server knows the timestamps and titles they are based on.
  */
 private fun orderMoviePage(items: List<MovieItem>, sort: String): List<MovieItem> {
-    if (sort != "cover") return items
+    if (!movieSortIsCover(sort)) return items
     // sortedBy is stable, so titles that share a rank keep the order they
     // arrived in and the grid does not reshuffle on every page.
     return items.sortedBy { if (it.wallUrl != null || it.posterUrl != null) 0 else 1 }

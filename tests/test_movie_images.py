@@ -90,7 +90,11 @@ def test_movie_images_use_same_origin_proxy_and_follow_redirects(monkeypatch, tm
         assert listing.status_code == 200
         item = listing.json()["items"][0]
         assert item["posterUrl"].startswith(f"/api/movies/{movie['id']}/poster?v=")
-        assert item["backdropUrl"].startswith(f"/api/movies/{movie['id']}/backdrop?v=")
+        # The wall, the library page and the detail page all paint the same
+        # picture, so the API hands out one URL: three different strings for one
+        # upstream file meant three cache entries and a blank detail page on a
+        # device that had already drawn the wall cover.
+        assert item["backdropUrl"] == item["posterUrl"]
         assert item["wallUrl"] == item["posterUrl"]
 
         row = main.database.movies(sources=(source_id,))[0]

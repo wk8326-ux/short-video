@@ -82,16 +82,41 @@ class MediaSourceRegistry:
             source["id"]
             for source in self.database.list_media_sources(include_disabled=False)
         )
-        for source_id in set(self._runtimes) - set(source_ids):
-            await self._close(source_id)
+        # Rebuild in database order so the dict's insertion order always mirrors
+        # the stored sort_order.
+        previous_runtimes = self._runtimes
+        runtimes: dict[str, SourceRuntime] = {}
+        self._runtimes = runtimes
         for source_id in source_ids:
-            await self.reload_source(source_id)
+            runtime = await self._build_runtime(source_id)
+            if runtime is not None:
+                runtimes[source_id] = runtime
+        for runtime in previous_runtimes.values():
+            await runtime.client.close()
 
     async def reload_source(self, source_id: str) -> None:
-        await self._close(source_id)
+        """Rebuild one source without disturbing where it sits in the order.
+
+        Editing a source (or adding another root folder to it) must never move
+        it to the end of the wall: only brand new sources land last.
+        """
+        runtime = await self._build_runtime(source_id)
+        if runtime is None:
+            await self._close(source_id)
+            return
+        # Assigning over an existing key keeps its original position; a new key
+        # is appended, which is exactly what a freshly added source should do.
+        if source_id in self._runtimes:
+            previous = self._runtimes[source_id]
+            self._runtimes[source_id] = runtime
+            await previous.client.close()
+        else:
+            self._runtimes[source_id] = runtime
+
+    async def _build_runtime(self, source_id: str) -> SourceRuntime | None:
         config = self.database.get_media_source(source_id)
         if not config or not config["enabled"]:
-            return
+            return None
         extensions = (
             self.settings.asmr_extensions
             if config["section"] == "asmr"
@@ -122,7 +147,7 @@ class MediaSourceRegistry:
             # .nfo files must never be indexed as an episode.
             include_unknown_files=config["section"] == "movie",
         )
-        self._runtimes[source_id] = SourceRuntime(
+        return SourceRuntime(
             config=config,
             client=client,
             direct_urls=DirectUrlCache(
