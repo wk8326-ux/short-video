@@ -3,7 +3,10 @@ package you.deepfuck.shortvideo.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -44,12 +47,15 @@ import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Key
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.LiveTv
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
@@ -68,21 +74,18 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
@@ -121,6 +124,20 @@ internal fun ManagementScreen(
     var editingSource by remember { mutableStateOf<MediaLibrarySource?>(null) }
     var sourceDialogOpen by remember { mutableStateOf(false) }
     var deletingSource by remember { mutableStateOf<MediaLibrarySource?>(null) }
+    var ordering by remember { mutableStateOf(false) }
+
+    if (ordering) {
+        SourceOrderScreen(
+            sources = state.adminStatus?.sources.orEmpty(),
+            onCancel = { ordering = false },
+            onSave = { ids ->
+                onReorderSources(ids)
+                ordering = false
+            },
+        )
+        return
+    }
+
     Column(Modifier.fillMaxSize().background(Canvas).safeDrawingPadding()) {
         Row(
             modifier = Modifier.fillMaxWidth().height(68.dp).padding(horizontal = 8.dp),
@@ -203,10 +220,36 @@ internal fun ManagementScreen(
                         Spacer(Modifier.height(8.dp))
                         Text(formatBytes(status.totalBytes), color = TextFaint)
                         Spacer(Modifier.height(18.dp))
-                        DraggableSourceList(
+                        // Only the movie board has an order to edit: the server
+                        // stores one position per section, and the clip, ASMR
+                        // and drama walls do not present their sources in a
+                        // fixed sequence.
+                        if (status.sources.any { it.section == LibrarySection.MOVIE }) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "电影板块按调整后的顺序展示",
+                                    modifier = Modifier.weight(1f),
+                                    color = TextFaint,
+                                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                                )
+                                OutlinedButton(
+                                    onClick = { ordering = true },
+                                    modifier = Modifier.heightIn(min = 40.dp),
+                                    shape = ControlShape,
+                                ) {
+                                    Icon(Icons.Outlined.SwapVert, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.size(6.dp))
+                                    Text("调整顺序")
+                                }
+                            }
+                            Spacer(Modifier.height(12.dp))
+                        }
+                        SourceList(
                             sources = status.sources,
                             adminActions = state.adminActions,
-                            onReorder = onReorderSources,
                             onScan = onScanSource,
                             onEdit = {
                                 editingSource = it
@@ -344,141 +387,250 @@ internal fun ManagementScreen(
     }
 }
 
-/**
- * The library list, reorderable by long-pressing a card and dragging it.
- *
- * A new library used to land at the bottom of both this list and the movie
- * wall with no way to move it, so the wall's order was whatever order the
- * libraries happened to be added in. The drag is deliberately long-press first:
- * a plain drag on a card competes with the page's own scroll.
- */
 @Composable
-private fun DraggableSourceList(
+private fun SourceList(
     sources: List<MediaLibrarySource>,
     adminActions: Set<String>,
-    onReorder: (List<String>) -> Unit,
     onScan: (String) -> Unit,
     onEdit: (MediaLibrarySource) -> Unit,
     onDelete: (MediaLibrarySource) -> Unit,
 ) {
-    // The rows are drawn from this local copy while a drag is in flight, so the
-    // card follows the finger without waiting for the server round trip.
-    var draft by remember { mutableStateOf(sources) }
+    Column(Modifier.fillMaxWidth()) {
+        sources.forEachIndexed { index, source ->
+            if (index > 0) Spacer(Modifier.height(8.dp))
+            key(source.id) {
+                MediaSourceRow(
+                    source = source,
+                    starting = "scan-${source.id}" in adminActions,
+                    deleting = "delete-source-${source.id}" in adminActions,
+                    onScan = onScan,
+                    onEdit = { onEdit(source) },
+                    onDelete = { onDelete(source) },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One row of the reorder screen, gap included.
+ *
+ * The drag arithmetic reads this number as the distance between two slots, so
+ * the gap between cards has to be part of it; a separate Spacer would make the
+ * stride and the height disagree and the card would drift away from the finger
+ * a little more with every swap.
+ */
+private val OrderRowHeight = 68.dp
+private val OrderRowInset = 4.dp
+
+/**
+ * The movie wall's order, edited on its own screen.
+ *
+ * Dragging inside the scrolling management list never worked reliably: a drag
+ * that starts on a card is the same gesture as a scroll, and the list always
+ * won the race, so the card stayed put. Here the drag is owned by an explicit
+ * handle that consumes the pointer itself, and the rows never move between
+ * saves -- the draft order is local until "保存" is pressed, which is also the
+ * only moment the server hears about it.
+ *
+ * Only the movie section appears: the server stores one order per section, so
+ * the clip, ASMR and drama boards have no order to change.
+ */
+@Composable
+private fun SourceOrderScreen(
+    sources: List<MediaLibrarySource>,
+    onCancel: () -> Unit,
+    onSave: (List<String>) -> Unit,
+) {
+    val allIds = remember(sources) { sources.map { it.id } }
+    val movies = remember(sources) { sources.filter { it.section == LibrarySection.MOVIE } }
+    val movieIds = remember(movies) { movies.map { it.id }.toSet() }
+    var draft by remember(movies) { mutableStateOf(movies) }
     var draggingId by remember { mutableStateOf<String?>(null) }
     var dragOffset by remember { mutableFloatStateOf(0f) }
-    var rowStride by remember { mutableFloatStateOf(0f) }
     val density = LocalDensity.current
-    // The gesture block below is keyed by the card's id, so it is not restarted
-    // when the server hands back a new list; reading the freshest value through
-    // a state holder keeps the "did anything move" check honest.
-    val latestSources by rememberUpdatedState(sources)
-    LaunchedEffect(sources) {
-        if (draggingId == null) draft = sources
+    val rowHeightPx = with(density) { OrderRowHeight.toPx() }
+    val scroll = rememberScrollState()
+    var viewportHeightPx by remember { mutableFloatStateOf(0f) }
+    // How close to an edge the card has to get before the list starts scrolling
+    // under it. Without this a library could only travel as far as one screenful.
+    val edgePx = with(density) { 72.dp.toPx() }
+    // One shared drag state: the handle that owns the gesture is the only thing
+    // that ever moves a row, and it consumes the pointer before the page scroll
+    // below can claim the same vertical drag.
+    val dragState = rememberDraggableState { delta ->
+        val movingId = draggingId ?: return@rememberDraggableState
+        val from = draft.indexOfFirst { it.id == movingId }
+        if (from < 0) return@rememberDraggableState
+        dragOffset += delta
+        if (viewportHeightPx > 0f) {
+            val screenTop = from * rowHeightPx + dragOffset - scroll.value
+            when {
+                screenTop < edgePx -> scroll.dispatchRawDelta(screenTop - edgePx)
+                screenTop > viewportHeightPx - edgePx * 2 -> scroll.dispatchRawDelta(screenTop - (viewportHeightPx - edgePx * 2))
+            }
+        }
+        val target = reorderSlot(
+            draggedTopPx = from * rowHeightPx + dragOffset,
+            rowHeightPx = rowHeightPx,
+            count = draft.size,
+        )
+        if (target != from) {
+            draft = moveItem(draft, from, target)
+            // The card keeps following the finger from its new slot instead of
+            // jumping by a row the moment the list rearranges under it.
+            dragOffset -= (target - from) * rowHeightPx
+        }
     }
 
-    Column(Modifier.fillMaxWidth()) {
-        draft.forEachIndexed { index, source ->
-            if (index > 0) Spacer(Modifier.height(8.dp))
-            val dragging = draggingId == source.id
-            // Keying each card by its id is what makes the drag survive its own
-            // first swap. Without it Compose matches children by slot, so moving
-            // an entry rebuilt this row's gesture node mid-drag and the card
-            // snapped back the moment it passed a neighbour.
-            key(source.id) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .onSizeChanged { size ->
-                            // Cards are uniform, so one measured height is the
-                            // stride the drag arithmetic needs.
-                            if (rowStride <= 0f) {
-                                rowStride = size.height.toFloat() + with(density) { 8.dp.toPx() }
+    BackHandler { onCancel() }
+
+    Column(Modifier.fillMaxSize().background(Canvas).safeDrawingPadding()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(68.dp).padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            GlassIconButton(label = "取消", onClick = onCancel, tint = TextPrimary) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "调整电影顺序",
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary,
+                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    "按住左侧手柄上下拖动，保存后电影墙同步",
+                    color = TextFaint,
+                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                )
+            }
+            TextButton(onClick = { onSave(mergeReorderedSection(allIds, movieIds, draft.map { it.id })) }) {
+                Text("保存")
+            }
+        }
+        HorizontalDivider(color = Line)
+
+        if (movies.isEmpty()) {
+            androidx.compose.foundation.layout.Box(
+                Modifier.fillMaxSize().padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("还没有电影媒体源", color = TextFaint)
+            }
+            return@Column
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .onSizeChanged { viewportHeightPx = it.height.toFloat() }
+                .verticalScroll(scroll)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+        ) {
+            draft.forEachIndexed { index, source ->
+                val dragging = draggingId == source.id
+                key(source.id) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(OrderRowHeight)
+                            .padding(vertical = OrderRowInset)
+                            .graphicsLayer {
+                                if (dragging) {
+                                    translationY = dragOffset
+                                    scaleX = 1.02f
+                                    scaleY = 1.02f
+                                    shadowElevation = with(density) { 12.dp.toPx() }
+                                }
                             }
+                            .zIndex(if (dragging) 1f else 0f)
+                            .glassSurface(fill = if (dragging) RaisedStrong else Raised, line = Line)
+                            .padding(horizontal = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Outlined.DragIndicator,
+                            contentDescription = "拖动排序",
+                            tint = if (dragging) TextPrimary else TextFaint,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .draggable(
+                                    state = dragState,
+                                    orientation = Orientation.Vertical,
+                                    // The handle is a dedicated target, so the
+                                    // drag starts on touch-down. Waiting for the
+                                    // slop threshold lets the page scroll claim
+                                    // the same vertical gesture first, which is
+                                    // exactly how the old in-card drag failed.
+                                    startDragImmediately = true,
+                                    onDragStarted = {
+                                        draggingId = source.id
+                                        dragOffset = 0f
+                                    },
+                                    onDragStopped = {
+                                        draggingId = null
+                                        dragOffset = 0f
+                                    },
+                                )
+                                .semantics { contentDescription = "拖动排序" },
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            source.name,
+                            modifier = Modifier.weight(1f),
+                            color = TextPrimary,
+                            fontWeight = FontWeight.SemiBold,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            source.videos.toString(),
+                            color = TextFaint,
+                            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        OrderStepButton(
+                            label = "上移 ${source.name}",
+                            icon = Icons.Outlined.KeyboardArrowUp,
+                            enabled = index > 0,
+                        ) {
+                            draft = moveItem(draft, index, index - 1)
                         }
-                        .graphicsLayer {
-                            if (dragging) {
-                                translationY = dragOffset
-                                scaleX = 1.02f
-                                scaleY = 1.02f
-                                shadowElevation = with(density) { 12.dp.toPx() }
-                            }
+                        OrderStepButton(
+                            label = "下移 ${source.name}",
+                            icon = Icons.Outlined.KeyboardArrowDown,
+                            enabled = index < draft.lastIndex,
+                        ) {
+                            draft = moveItem(draft, index, index + 1)
                         }
-                        .zIndex(if (dragging) 1f else 0f)
-                        .pointerInput(source.id) {
-                            detectDragGesturesAfterLongPress(
-                                onDragStart = {
-                                    draggingId = source.id
-                                    dragOffset = 0f
-                                },
-                                onDrag = { change, amount ->
-                                    change.consume()
-                                    val from = draft.indexOfFirst { it.id == source.id }
-                                    if (from >= 0) {
-                                        // The server keeps one order per section, so
-                                        // a card can only travel inside its own block.
-                                        // Fencing the offset (not just the landing
-                                        // slot) stops the card from running away from
-                                        // the finger at the top and bottom of a section.
-                                        val bounds = sectionRange(draft, from) { it.section }
-                                        val lower = bounds?.first ?: 0
-                                        val upper = bounds?.last ?: (draft.size - 1)
-                                        dragOffset += amount.y
-                                        if (rowStride > 0f) {
-                                            dragOffset = dragOffset.coerceIn(
-                                                (lower - from) * rowStride,
-                                                (upper - from) * rowStride,
-                                            )
-                                        }
-                                        val target = dragTargetIndex(
-                                            index = from,
-                                            dragOffsetPx = dragOffset,
-                                            stridePx = rowStride,
-                                            count = draft.size,
-                                            minIndex = lower,
-                                            maxIndex = upper,
-                                        )
-                                        if (target != from) {
-                                            draft = moveItem(draft, from, target)
-                                            dragOffset -= (target - from) * rowStride
-                                        }
-                                    }
-                                },
-                                onDragEnd = {
-                                    val moved = draft
-                                    draggingId = null
-                                    dragOffset = 0f
-                                    if (moved.map { it.id } != latestSources.map { it.id }) {
-                                        onReorder(moved.map { it.id })
-                                    }
-                                },
-                                onDragCancel = {
-                                    draggingId = null
-                                    dragOffset = 0f
-                                    draft = latestSources
-                                },
-                            )
-                        },
-                ) {
-                    MediaSourceRow(
-                        source = source,
-                        starting = "scan-${source.id}" in adminActions,
-                        deleting = "delete-source-${source.id}" in adminActions,
-                        onScan = onScan,
-                        onEdit = { onEdit(source) },
-                        onDelete = { onDelete(source) },
-                        dragHandle = {
-                            Icon(
-                                Icons.Outlined.DragIndicator,
-                                contentDescription = "长按拖动排序",
-                                tint = if (dragging) TextPrimary else TextFaint,
-                                modifier = Modifier.size(20.dp),
-                            )
-                        },
-                    )
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun OrderStepButton(
+    label: String,
+    icon: ImageVector,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Icon(
+        icon,
+        contentDescription = label,
+        tint = if (enabled) TextSecondary else Line,
+        modifier = Modifier
+            .size(32.dp)
+            .clip(ControlShape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .semantics { contentDescription = label }
+            .padding(4.dp),
+    )
 }
 
 @Composable

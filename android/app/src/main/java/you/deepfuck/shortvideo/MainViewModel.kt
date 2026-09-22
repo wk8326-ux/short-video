@@ -1341,20 +1341,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (sourceIds.toSet() != current.toSet()) return
         val reordered = sourceIds.mapNotNull { id -> status.sources.firstOrNull { it.id == id } }
         mutableState.update {
-            it.copy(adminStatus = it.adminStatus?.copy(sources = reordered), adminError = null)
+            it.copy(
+                adminStatus = it.adminStatus?.copy(sources = reordered),
+                adminActions = it.adminActions + "source-order",
+                adminError = null,
+            )
         }
         viewModelScope.launch {
             runApi { api.reorderMediaSources(sourceIds) }
                 .onSuccess {
                     // Section membership can change which board each source
                     // belongs to, so the wall re-reads its sections.
+                    mutableState.update { it.copy(adminActions = it.adminActions - "source-order") }
                     refreshMovieLibrary()
                     loadAdminStatus()
                 }
                 .onFailure { error ->
                     if (!handleUnauthorized(error)) {
                         mutableState.update {
-                            it.copy(adminError = error.message ?: "保存媒体源顺序失败")
+                            it.copy(
+                                adminActions = it.adminActions - "source-order",
+                                adminError = error.message ?: "保存媒体源顺序失败",
+                            )
                         }
                         loadAdminStatus()
                     }

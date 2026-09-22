@@ -3,59 +3,25 @@ package you.deepfuck.shortvideo.ui
 import kotlin.math.roundToInt
 
 /**
- * Which slot a card held [dragOffsetPx] away from its own wants to land in.
+ * Which slot a card whose top edge sits at [draggedTopPx] belongs in.
  *
- * The library list gives every card the same height, so the slot a drag points
- * at is just its own index shifted by however many whole strides the finger has
- * travelled. Keeping this a pure function means the arithmetic that decides
- * where a card lands can be tested without a device.
+ * The reorder screen gives every row the same height, so a slot is just the
+ * card's position divided by that height. Deriving the slot from the position
+ * rather than from an accumulated offset is what makes the list swap cleanly
+ * and stay put: a card sitting between two slots always resolves to the nearer
+ * one, so it cannot flip back and forth against its neighbour.
  *
- * [minIndex] and [maxIndex] fence the drag inside the block the card started in.
- * The server stores one order per section and the management list is grouped by
- * section, so a card dragged past a neighbour from another section would be put
- * back on the next reload; fencing it keeps the drag honest about what it can
- * actually change.
+ * A list with no height yet leaves the card in the first slot instead of
+ * dividing by zero.
  */
-internal fun dragTargetIndex(
-    index: Int,
-    dragOffsetPx: Float,
-    stridePx: Float,
+internal fun reorderSlot(
+    draggedTopPx: Float,
+    rowHeightPx: Float,
     count: Int,
-    minIndex: Int = 0,
-    maxIndex: Int = count - 1,
 ): Int {
     if (count <= 0) return 0
-    val lower = minIndex.coerceIn(0, count - 1)
-    val upper = maxIndex.coerceIn(lower, count - 1)
-    val safeIndex = index.coerceIn(lower, upper)
-    if (stridePx <= 0f) return safeIndex
-    val shifted = safeIndex + dragOffsetPx / stridePx
-    return shifted.roundToInt().coerceIn(lower, upper)
-}
-
-/**
- * The run of slots around [index] that belongs to the same section.
- *
- * The manager shows every section in one list and the server keeps one order
- * per section, so the entries of a section arrive as one contiguous block.
- * Returning that block lets a drag stop at its own boundary instead of lifting
- * a card over a neighbour it cannot actually be stored next to.
- */
-internal fun <T, K> sectionRange(
-    items: List<T>,
-    index: Int,
-    sectionOf: (T) -> K,
-): IntRange? {
-    if (index !in items.indices) return null
-    val section = sectionOf(items[index])
-    // Expanding from the dragged card rather than taking the first and last
-    // match keeps the range a contiguous run even if a section ever arrives in
-    // more than one block.
-    var start = index
-    while (start > 0 && sectionOf(items[start - 1]) == section) start--
-    var end = index
-    while (end < items.lastIndex && sectionOf(items[end + 1]) == section) end++
-    return start..end
+    if (rowHeightPx <= 0f) return 0
+    return (draggedTopPx / rowHeightPx).roundToInt().coerceIn(0, count - 1)
 }
 
 /** Moves one entry to another slot, leaving every other entry in order. */
@@ -64,4 +30,31 @@ internal fun <T> moveItem(items: List<T>, from: Int, to: Int): List<T> {
     val moved = items.toMutableList()
     moved.add(to, moved.removeAt(from))
     return moved
+}
+
+/**
+ * The id list to hand the server after one section was rearranged.
+ *
+ * The server assigns one position per section, so only the relative order of
+ * the ids *inside* a section survives a save. Sending the rearranged section
+ * ids in the slots they already occupy leaves each of those other sections in
+ * exactly the order it already had, which is what "only the movie wall is
+ * reordered" has to mean: nothing the user did not touch can shift because of
+ * this call, and the management list itself does not jump around either.
+ */
+internal fun mergeReorderedSection(
+    allIds: List<String>,
+    sectionIds: Set<String>,
+    reorderedSectionIds: List<String>,
+): List<String> {
+    val replacement = buildList {
+        reorderedSectionIds.forEach { id -> if (id in sectionIds && id !in this) add(id) }
+        // Anything the caller left out -- a library added by another screen while
+        // this one was open, say -- follows in its old relative order instead of
+        // being dropped from the list.
+        allIds.forEach { id -> if (id in sectionIds && id !in this) add(id) }
+    }
+    if (replacement.isEmpty()) return allIds
+    var cursor = 0
+    return allIds.map { id -> if (id in sectionIds) replacement[cursor++] else id }
 }
