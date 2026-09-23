@@ -50,7 +50,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.29"
+APP_VERSION = "1.6.0-beta.30"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -163,6 +163,18 @@ MOVIE_IMAGE_FAILURE_TTL_SECONDS = 10 * 60
 # moment the host serves the file again - so a cover that comes back is never
 # hidden behind a stale verdict.
 MOVIE_IMAGE_FAILURE_RANK_SECONDS = 6 * 60 * 60
+# Some artwork hosts do not fail at all - they answer 200 with
+# ``Content-Type: image/jpeg`` and a body that is not a picture. That is a
+# property of the file at the source rather than a hiccup, so the verdict is
+# kept far longer than a transient outage, and the phone never has to draw the
+# blank tile again to re-learn it.
+MOVIE_IMAGE_CORRUPT_RANK_SECONDS = 7 * 24 * 60 * 60
+# A long-lived ledger row would otherwise be written once and never refreshed:
+# the in-process mirror makes the next failure a no-op, so the row expires
+# after its window and the blank cover climbs back to the front for good.
+# Re-stamping a row this stale (and never more often) keeps the ranking honest
+# without a database write per scroll.
+MOVIE_IMAGE_FAILURE_RANK_REFRESH_SECONDS = 30 * 60
 # A library page shows a grid, so it warms two screens' worth of cards.
 MOVIE_LIBRARY_PREWARM_LIMIT = 12
 # Every section of the wall is warmed, but a wall with twenty libraries must not
@@ -182,6 +194,9 @@ movie_image_failure_guard = threading.RLock()
 # success path can drop a ledger row without asking the database whether there
 # is one on every single cover it serves.
 movie_image_bad_urls: set[str] = set()
+# url -> time.monotonic() of the last ledger write, so a long-lived "this
+# artwork is broken" verdict can be re-stamped when it is about to lapse.
+movie_image_failure_records: dict[str, float] = {}
 # One client for the whole process: the folded catalogue is the expensive part
 # of a scrape, and building it per run made every rescan pay for the same walk.
 # The mirror is a SQLite file next to the library database, so the catalogue
@@ -1505,22 +1520,94 @@ def _shared_metadata_host() -> str:
         return ""
 
 
-def _image_media_type(content_type: str, content: bytes) -> str | None:
-    normalized = content_type.split(";", 1)[0].strip().lower()
-    if normalized.startswith("image/"):
-        return normalized
-    # A few CDNs omit Content-Type or return application/octet-stream.  Accept
-    # only well-known image signatures in that case; HTML/error pages remain
-    # rejected instead of being cached as a poster.
-    if content.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if content.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if content.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
+# The first bytes of every picture format the artwork hosts actually serve.
+# A CDN that omits Content-Type is common enough to be worth this table, and
+# the same table is what stops a 200-with-junk answer from being cached.
+_IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+)
+# HEIF and AVIF share the ISO base media container, so the brand inside the
+# ``ftyp`` box is what tells them apart. Pillow cannot open either without an
+# extra plugin, so the signature is all the proof the proxy can get and the
+# phone's own decoder has the last word.
+_ISO_MEDIA_BRANDS: tuple[tuple[bytes, str], ...] = (
+    (b"avif", "image/avif"),
+    (b"avis", "image/avif"),
+    (b"heic", "image/heic"),
+    (b"heix", "image/heic"),
+    (b"heim", "image/heic"),
+    (b"heis", "image/heic"),
+    (b"mif1", "image/heic"),
+    (b"msf1", "image/heic"),
+)
+_PILLOW_OPAQUE_TYPES = frozenset({"image/avif", "image/heic"})
+
+
+def _image_signature(content: bytes) -> str | None:
+    """The picture format the bytes themselves declare, if any."""
+    for prefix, media_type in _IMAGE_SIGNATURES:
+        if content.startswith(prefix):
+            return media_type
     if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
         return "image/webp"
+    if content[4:8] == b"ftyp":
+        brand = content[8:12]
+        for candidate, media_type in _ISO_MEDIA_BRANDS:
+            if brand == candidate:
+                return media_type
     return None
+
+
+def _image_payload_decodes(content: bytes, media_type: str, *, deep: bool) -> bool:
+    """Whether Pillow can open the bytes it just called a picture.
+
+    A JPEG header is two bytes and a truncated download, a hotlink block page
+    or a CDN placeholder all keep them. Decoding is the only check that tells
+    a real cover from a body that merely starts like one.
+
+    ``deep`` also decodes the pixels, which the fetch path can afford because
+    the body is already in memory from the download that just finished. The
+    cache read keeps to the header: it runs on every wall scroll, and a header
+    parse is what catches the "200, image/jpeg, random bytes" hosts.
+    """
+    if Image is None or media_type in _PILLOW_OPAQUE_TYPES:
+        return True
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            if deep:
+                image.load()
+            else:
+                image.verify()
+    except Exception as exc:
+        logger.info("Movie image payload rejected: %s", exc)
+        return False
+    return True
+
+
+def _image_media_type(content_type: str, content: bytes, *, deep: bool = False) -> str | None:
+    """The media type of ``content``, or ``None`` when it is not a picture.
+
+    ``content_type`` is only a hint. Some artwork hosts answer 200 with
+    ``Content-Type: image/jpeg`` and a body of something else entirely, and
+    trusting the header meant that body was cached and handed to the phone,
+    which then painted an empty tile for ever. The payload decides: it needs a
+    known signature, and - for the formats Pillow understands - it needs to
+    actually decode.
+    """
+    signature = _image_signature(content)
+    if signature is None:
+        # HTML error pages, JSON, and the encrypted blobs a couple of picture
+        # CDNs hand out all land here instead of in the cache.
+        return None
+    if not _image_payload_decodes(content, signature, deep=deep):
+        return None
+    return signature
 
 
 def _requested_image_width(value: Any) -> int | None:
@@ -1637,12 +1724,23 @@ def _movie_image_failure_remaining(cache_key: str) -> float:
         return expiry - now
 
 
-def _remember_movie_image_failure(cache_key: str, source_url: str | None = None) -> None:
+def _remember_movie_image_failure(
+    cache_key: str,
+    source_url: str | None = None,
+    *,
+    rank_seconds: int = MOVIE_IMAGE_FAILURE_RANK_SECONDS,
+) -> None:
     """Memoise one failed cover, in this process and in the library database.
 
     The in-process copy is what spares the wall a twelve second stall on the
     next scroll; the database copy is what lets "cover first" rank a title whose
     artwork is dead below the titles whose artwork actually arrives.
+
+    The database row carries an expiry, so a long outage has to be re-stated or
+    it stops counting the moment the window lapses - and the in-process mirror
+    would otherwise make every later failure a silent no-op. Re-stamping the
+    row every ``MOVIE_IMAGE_FAILURE_RANK_REFRESH_SECONDS`` is what keeps a
+    permanently broken cover permanently at the back.
     """
     now = time.monotonic()
     with movie_image_failure_guard:
@@ -1655,15 +1753,18 @@ def _remember_movie_image_failure(cache_key: str, source_url: str | None = None)
                 movie_image_failure_cache.pop(soonest, None)
         movie_image_failure_cache[cache_key] = now + MOVIE_IMAGE_FAILURE_TTL_SECONDS
         url = str(source_url or "").strip()
-        already_recorded = url in movie_image_bad_urls
+        written_at = movie_image_failure_records.get(url)
+        stale = written_at is None or (now - written_at) >= MOVIE_IMAGE_FAILURE_RANK_REFRESH_SECONDS
+        if url and stale:
+            movie_image_failure_records[url] = now
         if url:
             movie_image_bad_urls.add(url)
-    if url and not already_recorded:
+    if url and stale:
         spawn_background(
             asyncio.to_thread(
                 database.remember_movie_image_failure,
                 url,
-                ttl_seconds=MOVIE_IMAGE_FAILURE_RANK_SECONDS,
+                ttl_seconds=rank_seconds,
             ),
             name="movie-image-failure-record",
         )
@@ -1677,6 +1778,7 @@ def _forget_movie_image_failure(cache_key: str, source_url: str | None = None) -
         forget_ledger = bool(url) and url in movie_image_bad_urls
         if url:
             movie_image_bad_urls.discard(url)
+            movie_image_failure_records.pop(url, None)
     if forget_ledger:
         spawn_background(
             asyncio.to_thread(database.forget_movie_image_failure, url),
@@ -1706,12 +1808,27 @@ def _read_movie_image_cache(url: str) -> tuple[bytes, str, str] | None:
             return None
     except (OSError, ValueError, KeyError, TypeError):
         return None
+    if _image_media_type("", content) is None:
+        # Written by a build that believed the upstream Content-Type. The phone
+        # paints nothing for it, so it is dropped here and the fetch path gets
+        # to re-ask the host - or to record the verdict that ranks it last.
+        _drop_movie_image_cache(url)
+        return None
     try:
         os.utime(content_path, None)
         os.utime(metadata_path, None)
     except OSError:
         pass
     return content, media_type, etag
+
+
+def _drop_movie_image_cache(url: str) -> None:
+    content_path, metadata_path = _movie_image_cache_paths(url)
+    for path in (content_path, metadata_path):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 def _prune_movie_image_cache() -> None:
@@ -1791,6 +1908,21 @@ def _movie_image_response(
         media_type=media_type,
         headers=headers,
     )
+
+
+class _UndecodableArtwork(HTTPException):
+    """The host answered 200, but the body is not a picture.
+
+    Distinct from a 404/502 because it is a property of the file at the source
+    rather than a passing outage - the host will keep serving the same bytes
+    tomorrow - so the verdict that ranks it last is kept for much longer.
+    """
+
+    def __init__(
+        self,
+        detail: str = "Movie image upstream returned an undecodable payload",
+    ) -> None:
+        super().__init__(status_code=502, detail=detail)
 
 
 async def _proxy_movie_image(
@@ -1909,16 +2041,14 @@ async def _proxy_movie_image(
                             # The reason matters: a missing AES backend and a
                             # corrupt payload look identical from the client.
                             logger.warning("Movie image decrypt failed for %s: %s", url, exc)
-                            raise HTTPException(
-                                status_code=502,
-                                detail="Movie image upstream returned an undecodable payload",
-                            ) from exc
+                            raise _UndecodableArtwork() from exc
                     media_type = _image_media_type(
                         upstream.headers.get("content-type", ""),
                         content,
+                        deep=True,
                     )
                     if not media_type:
-                        raise HTTPException(status_code=502, detail="Movie image upstream returned non-image data")
+                        raise _UndecodableArtwork("Movie image upstream returned non-image data")
                     if width:
                         resized = await asyncio.to_thread(
                             _render_cover_bytes, content, width
@@ -1932,7 +2062,15 @@ async def _proxy_movie_image(
                 # hiccup looks like; both are worth remembering, an invalid
                 # request is not.
                 if exc.status_code in {404, 502}:
-                    _remember_movie_image_failure(cache_key, url)
+                    _remember_movie_image_failure(
+                        cache_key,
+                        url,
+                        rank_seconds=(
+                            MOVIE_IMAGE_CORRUPT_RANK_SECONDS
+                            if isinstance(exc, _UndecodableArtwork)
+                            else MOVIE_IMAGE_FAILURE_RANK_SECONDS
+                        ),
+                    )
                 raise
             except httpx.HTTPError as exc:
                 logger.info("Movie image proxy failed for %s: %s", url, exc)

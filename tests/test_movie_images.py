@@ -1,6 +1,8 @@
+import asyncio
 import importlib
 import io
 import sys
+import time
 
 import httpx
 import pytest
@@ -38,7 +40,7 @@ def test_movie_images_use_same_origin_proxy_and_follow_redirects(monkeypatch, tm
         return httpx.Response(
             200,
             headers={"content-type": "image/jpeg"},
-            content=b"\xff\xd8\xff\xe0fake-jpeg",
+            content=_cover_jpeg(900, 600),
         )
 
     with TestClient(main.app) as client:
@@ -169,6 +171,13 @@ def _cover_png(width: int, height: int) -> bytes:
     image = PIL.new("RGB", (width, height), (120, 30, 200))
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _cover_jpeg(width: int, height: int) -> bytes:
+    image = PIL.new("RGB", (width, height), (30, 120, 200))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=80)
     return buffer.getvalue()
 
 
@@ -419,3 +428,98 @@ def test_a_resized_cover_is_cached_under_the_shape_it_was_rendered_in(monkeypatc
     token_before = main._artwork_token(url)
     monkeypatch.setattr(main, "COVER_RENDER_TAG", "3x2-legacy")
     assert main._artwork_token(url) != token_before
+
+
+@pytest.mark.asyncio
+async def test_a_cover_that_is_junk_under_an_image_header_is_never_served(
+    monkeypatch, tmp_path
+):
+    """Some hosts answer 200 + ``image/jpeg`` with a body no decoder can open.
+
+    One artwork host does exactly that: a couple of hundred kilobytes that
+    merely *start* like a picture. The body used to be cached and handed to the
+    phone, which painted an empty tile for ever - and, because nothing had
+    failed, "cover first" went on ranking that film in front of every cover
+    that actually renders.
+    """
+    main = _load_main(monkeypatch, tmp_path)
+    junk = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 16
+    poster_url = "https://c0.jdbstatic.com/covers/ve/dead.jpg"
+    calls: list[str] = []
+    deferred: list[object] = []
+
+    async def junk_handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, headers={"content-type": "image/jpeg"}, content=junk)
+
+    def record_background(coroutine, *, name):
+        deferred.append(coroutine)
+
+    monkeypatch.setattr(main, "spawn_background", record_background)
+    main.database.initialize()
+    main.movie_image_client = httpx.AsyncClient(
+        follow_redirects=True, transport=httpx.MockTransport(junk_handler)
+    )
+
+    with pytest.raises(main.HTTPException) as failure:
+        await main._proxy_movie_image(poster_url, width=480)
+    assert failure.value.status_code == 502
+    assert calls == [poster_url]
+    assert not list((tmp_path / "movie-images").glob("*.bin"))
+
+    # The verdict reaches the ledger the ranking reads, and it is a week out
+    # rather than six hours: the same bytes will be waiting tomorrow.
+    assert main.movie_image_bad_urls == {poster_url}
+    await asyncio.gather(*deferred)
+    assert main.database.movie_image_failed_urls() == {poster_url}
+    with main.database._lock, main.database._connect() as connection:
+        expires_at = connection.execute(
+            "SELECT expires_at FROM movie_image_failures WHERE url = ?",
+            (poster_url,),
+        ).fetchone()[0]
+    remaining = expires_at - int(time.time())
+    assert main.MOVIE_IMAGE_CORRUPT_RANK_SECONDS - 60 <= remaining <= main.MOVIE_IMAGE_CORRUPT_RANK_SECONDS
+
+    # And the next scroll is answered from the memo, without the host.
+    with pytest.raises(main.HTTPException) as repeat:
+        await main._proxy_movie_image(poster_url, width=480)
+    assert repeat.value.status_code == 502
+    assert calls == [poster_url]
+    await main.movie_image_client.aclose()
+
+
+def test_a_cover_cached_before_this_check_is_dropped_and_re_fetched(monkeypatch, tmp_path):
+    """The disk cache still holds bodies written by a build that trusted the header.
+
+    Those entries paint nothing, so the read drops them and lets the fetch path
+    ask the host again instead of serving poison until the entry ages out.
+    """
+    main = _load_main(monkeypatch, tmp_path)
+    cookie = f"short_session={main.session_manager.issue()}"
+    headers = {"Cookie": cookie}
+    calls: list[str] = []
+    junk = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 16
+
+    async def image_handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(
+            200, headers={"content-type": "image/png"}, content=_cover_png(1200, 800)
+        )
+
+    with TestClient(main.app) as client:
+        monkeypatch.setattr(main, "prewarm_movie_wall_images", _skip_prewarm)
+        movie, upstream = _seed_movie_with_cover(
+            main, client, headers, b"", handler=image_handler
+        )
+        main.movie_image_client = upstream
+
+        poisoned = main._movie_image_request_key(movie["poster_url"], 480)
+        main._write_movie_image_cache(poisoned, junk, "image/jpeg", "poison")
+
+        cover = client.get(f"/api/movies/{movie['id']}/poster?w=480", headers=headers)
+        assert cover.status_code == 200
+        assert cover.headers["content-type"] == "image/webp"
+        assert cover.headers["x-movie-image-cache"] == "miss"
+        assert len(calls) == 1
+        with PIL.open(io.BytesIO(cover.content)) as decoded:
+            assert decoded.width == 480

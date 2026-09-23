@@ -7,10 +7,14 @@ the player the episodes in play order, and the artwork route has to undo the
 picture CDN's AES wrapper instead of forwarding ciphertext.
 """
 
+import io
+
 import httpx
 import pytest
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from fastapi.testclient import TestClient
+
+PIL = pytest.importorskip("PIL.Image", reason="Pillow drives the artwork validator")
 
 from test_drama_scan import (
     DRAMA_ROOT,
@@ -34,7 +38,17 @@ def _aes_cbc(payload: bytes) -> bytes:
 
 
 def _padded_jpeg() -> bytes:
-    body = b"\xff\xd8\xff\xe0fake-jpeg"
+    """A real JPEG, zero-padded to a whole number of AES blocks.
+
+    The bytes have to survive both checks the artwork path makes: the picture
+    CDN hands us ciphertext, so the payload must be block-aligned, and the
+    proxy now decodes what it serves, so a fake header-only blob would be
+    rejected. Trailing zeroes after the EOI marker are ignored by decoders.
+    """
+    image = PIL.new("RGB", (64, 48), (30, 120, 200))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=80)
+    body = buffer.getvalue()
     return body + b"\x00" * (-len(body) % 16)
 
 
