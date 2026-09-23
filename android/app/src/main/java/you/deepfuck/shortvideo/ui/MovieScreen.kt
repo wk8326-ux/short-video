@@ -46,8 +46,10 @@ import androidx.compose.material.icons.automirrored.outlined.VolumeOff
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Forward10
@@ -121,6 +123,7 @@ internal fun MovieScreen(
     pipMode: Boolean,
     listPosition: ListPosition,
     groupListPosition: ListPosition,
+    favoritesListPosition: ListPosition,
     onSelect: (MovieItem) -> Unit,
     onBack: () -> Unit,
     onPlay: (MovieItem) -> Unit,
@@ -129,6 +132,11 @@ internal fun MovieScreen(
     onGroupSort: (String) -> Unit,
     onLoadMoreGroup: () -> Unit,
     onGroupListPosition: (String, ListPosition) -> Unit,
+    onOpenFavorites: () -> Unit,
+    onCloseFavorites: () -> Unit,
+    onLoadMoreFavorites: () -> Unit,
+    onFavoritesListPosition: (ListPosition) -> Unit,
+    onToggleFavorite: (MovieItem) -> Unit,
     onWallView: (MovieWallView) -> Unit,
     onRetry: () -> Unit,
     onTogglePlayback: () -> Unit,
@@ -184,6 +192,25 @@ internal fun MovieScreen(
             onSeekBy = onSeekBy,
             onFullscreen = onFullscreen,
             onPip = onPip,
+            onToggleFavorite = { onToggleFavorite(movie) },
+        )
+        return
+    }
+
+    // The favourites grid is a page like a library page, so it takes the whole
+    // surface and leaves the wall behind it untouched.
+    if (state.openMovieFavorites) {
+        MovieFavoritesPage(
+            items = state.movieFavorites,
+            total = state.movieFavoritesTotal,
+            loading = state.movieFavoritesLoading,
+            error = state.movieFavoritesError,
+            imageLoader = imageLoader,
+            onBack = onCloseFavorites,
+            onSelect = onSelect,
+            onLoadMore = onLoadMoreFavorites,
+            initialPosition = favoritesListPosition,
+            onListPosition = onFavoritesListPosition,
         )
         return
     }
@@ -214,6 +241,7 @@ internal fun MovieScreen(
         wallState = wallState,
         onSelect = onSelect,
         onOpenGroup = onOpenGroup,
+        onOpenFavorites = onOpenFavorites,
         onWallView = onWallView,
         onRetry = onRetry,
     )
@@ -272,6 +300,7 @@ private fun MovieCatalog(
     wallState: LazyListState,
     onSelect: (MovieItem) -> Unit,
     onOpenGroup: (String) -> Unit,
+    onOpenFavorites: () -> Unit,
     onWallView: (MovieWallView) -> Unit,
     onRetry: () -> Unit,
 ) {
@@ -322,6 +351,16 @@ private fun MovieCatalog(
                         )
                     }
                 }
+            }
+            Spacer(Modifier.weight(1f))
+            // Favourites sits centre stage between the two menus: it is the one
+            // destination a viewer comes back to, so it gets the middle of the
+            // header rather than a slot beside the controls.
+            GlassIconButton(
+                label = "收藏",
+                onClick = onOpenFavorites,
+            ) {
+                Icon(Icons.Outlined.FavoriteBorder, contentDescription = null)
             }
             Spacer(Modifier.weight(1f))
             // Quick jump between libraries: the wall is grouped by media source,
@@ -888,14 +927,6 @@ private fun MovieLibraryPage(
         }
     }
     var sortMenuOpen by remember { mutableStateOf(false) }
-    val hasMore = items.size < total
-    TrackMovieGrid(
-        gridState = gridState,
-        itemCount = items.size,
-        loading = loading,
-        hasMore = hasMore,
-        onLoadMore = onLoadMore,
-    )
     Column(
         Modifier
             .fillMaxSize()
@@ -972,42 +1003,162 @@ private fun MovieLibraryPage(
             }
         }
 
-        when {
-            items.isEmpty() && loading -> MovieSkeletonGrid()
-            items.isEmpty() && error != null -> MovieCatalogState(
-                icon = Icons.Outlined.Refresh,
-                title = error,
-                action = "重试",
-                onAction = onLoadMore,
+        MoviePosterGrid(
+            items = items,
+            total = total,
+            loading = loading,
+            error = error,
+            emptyTitle = "这个媒体库还没有影片",
+            gridState = gridState,
+            imageLoader = imageLoader,
+            onSelect = onSelect,
+            onLoadMore = onLoadMore,
+        )
+    }
+}
+
+/**
+ * The favourites grid.
+ *
+ * The same page shape as a library - back arrow, name, count, poster grid - but
+ * with no sort menu: the order is when each heart was tapped, newest first, and
+ * that is the one thing the list means.
+ */
+@Composable
+private fun MovieFavoritesPage(
+    items: List<MovieItem>,
+    total: Int,
+    loading: Boolean,
+    error: String?,
+    imageLoader: ImageLoader,
+    onBack: () -> Unit,
+    onSelect: (MovieItem) -> Unit,
+    onLoadMore: () -> Unit,
+    initialPosition: ListPosition,
+    onListPosition: (ListPosition) -> Unit,
+) {
+    val gridState = rememberLazyGridState(
+        initialFirstVisibleItemIndex = initialPosition.index.coerceAtLeast(0),
+        initialFirstVisibleItemScrollOffset = initialPosition.offset.coerceAtLeast(0),
+    )
+    DisposableEffect(gridState) {
+        onDispose {
+            onListPosition(
+                ListPosition(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset),
             )
-            items.isEmpty() -> MovieCatalogState(
-                icon = Icons.Outlined.Movie,
-                title = "这个媒体库还没有影片",
-                action = null,
-                onAction = {},
-            )
-            else -> LazyVerticalGrid(
-                columns = GridCells.Adaptive(148.dp),
-                state = gridState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 34.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
-            ) {
-                items(items, key = MovieItem::id) { movie ->
-                    MoviePoster(movie, imageLoader, onClick = { onSelect(movie) })
-                }
-                if (loading) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
-                        }
+        }
+    }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Canvas)
+            .statusBarsPadding()
+            .padding(top = 62.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            GlassIconButton(label = "返回电影墙", onClick = onBack) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "收藏",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    if (total > 0) "共 $total 部" else "还没有收藏",
+                    color = TextFaint,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                )
+            }
+        }
+
+        MoviePosterGrid(
+            items = items,
+            total = total,
+            loading = loading,
+            error = error,
+            emptyTitle = "还没有收藏，点影片详情页的心形就能收藏",
+            gridState = gridState,
+            imageLoader = imageLoader,
+            onSelect = onSelect,
+            onLoadMore = onLoadMore,
+        )
+    }
+}
+
+/**
+ * The poster grid both "one list of films" pages draw.
+ *
+ * A library page and the favourites page differ only in where the rows come
+ * from and what sits above them, so the grid itself lives here once: the paging
+ * trigger, the skeleton, the empty and failed states and the poster cells.
+ */
+@Composable
+private fun MoviePosterGrid(
+    items: List<MovieItem>,
+    total: Int,
+    loading: Boolean,
+    error: String?,
+    emptyTitle: String,
+    gridState: LazyGridState,
+    imageLoader: ImageLoader,
+    onSelect: (MovieItem) -> Unit,
+    onLoadMore: () -> Unit,
+) {
+    val hasMore = items.size < total
+    TrackMovieGrid(
+        gridState = gridState,
+        itemCount = items.size,
+        loading = loading,
+        hasMore = hasMore,
+        onLoadMore = onLoadMore,
+    )
+    when {
+        items.isEmpty() && loading -> MovieSkeletonGrid()
+        items.isEmpty() && error != null -> MovieCatalogState(
+            icon = Icons.Outlined.Refresh,
+            title = error,
+            action = "重试",
+            onAction = onLoadMore,
+        )
+        items.isEmpty() -> MovieCatalogState(
+            icon = Icons.Outlined.Movie,
+            title = emptyTitle,
+            action = null,
+            onAction = {},
+        )
+        else -> LazyVerticalGrid(
+            columns = GridCells.Adaptive(148.dp),
+            state = gridState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 34.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+        ) {
+            items(items, key = MovieItem::id) { movie ->
+                MoviePoster(movie, imageLoader, onClick = { onSelect(movie) })
+            }
+            if (loading) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
                     }
-                } else if (hasMore) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
-                            Text("正在载入更多…", color = TextFaint, style = MaterialTheme.typography.labelSmall)
-                        }
+                }
+            } else if (hasMore) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
+                        Text("正在载入更多…", color = TextFaint, style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
@@ -1068,19 +1219,26 @@ private fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () 
                 }
             }
             Spacer(Modifier.height(7.dp))
+            // One line, centred: the frame above is 3:2 and the caption sits
+            // directly under it, so a two-line title left the whole column two
+            // rows taller and every poster below it drifted out of step.
             Text(
                 movie.title,
+                modifier = Modifier.fillMaxWidth(),
                 color = TextPrimary,
                 fontWeight = FontWeight.Medium,
                 style = MaterialTheme.typography.bodyMedium,
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
             )
             Text(
                 movie.year?.toString() ?: "年份未知",
+                modifier = Modifier.fillMaxWidth(),
                 color = TextFaint,
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 1,
+                textAlign = TextAlign.Center,
             )
         }
     }
@@ -1146,6 +1304,7 @@ private fun MovieDetail(
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
     onPip: () -> Unit,
+    onToggleFavorite: () -> Unit,
 ) {
     // A started film takes the whole surface. The portrait case used to pin a
     // sixteen by nine strip under the top edge, leave the rest of the page to the
@@ -1217,21 +1376,40 @@ private fun MovieDetail(
                 }
                 if (!playbackStarted) {
                     Spacer(Modifier.height(18.dp))
-                    Button(
-                        onClick = onPlay,
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
-                        shape = ControlShape,
-                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.White),
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Icons.Filled.PlayArrow, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            if (movie.resumePositionMs > 0L) {
-                                "继续观看  ${formatDuration(movie.resumePositionMs)}"
-                            } else {
-                                "播放"
-                            },
-                        )
+                        Button(
+                            onClick = onPlay,
+                            modifier = Modifier.weight(1f).height(48.dp),
+                            shape = ControlShape,
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.White),
+                        ) {
+                            Icon(Icons.Filled.PlayArrow, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                if (movie.resumePositionMs > 0L) {
+                                    "继续观看  ${formatDuration(movie.resumePositionMs)}"
+                                } else {
+                                    "播放"
+                                },
+                            )
+                        }
+                        // The heart is the one other decision made before
+                        // pressing play, so it sits beside the button rather
+                        // than in a row of its own.
+                        GlassIconButton(
+                            label = if (movie.favorite) "取消收藏" else "收藏",
+                            onClick = onToggleFavorite,
+                            tint = if (movie.favorite) Accent else Color.White,
+                        ) {
+                            Icon(
+                                if (movie.favorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                                contentDescription = null,
+                            )
+                        }
                     }
                 }
                 error?.let {

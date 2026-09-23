@@ -97,6 +97,14 @@ data class AppUiState(
     val openMovieGroupLoading: Boolean = false,
     val openMovieGroupError: String? = null,
     val openMovieGroupSort: String = "cover",
+    // The favourites page: one flat list of hearted titles, newest heart first,
+    // opened over the wall from the header's centre button.
+    val openMovieFavorites: Boolean = false,
+    val movieFavorites: List<MovieItem> = emptyList(),
+    val movieFavoritesTotal: Int = 0,
+    val movieFavoritesNextOffset: Int? = 0,
+    val movieFavoritesLoading: Boolean = false,
+    val movieFavoritesError: String? = null,
     val movieDetailLoading: Boolean = false,
     val selectedMovie: MovieItem? = null,
     val dramaItems: List<DramaItem> = emptyList(),
@@ -195,6 +203,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var movieDetailJob: Job? = null
     private var movieGroupPageJob: Job? = null
     private var movieGroupPageGeneration = 0L
+    private var movieFavoritesJob: Job? = null
+    private var movieFavoritesGeneration = 0L
     private var movieRequestGeneration = 0L
     private var movieCatalogDirty = false
     private var recentJob: Job? = null
@@ -305,7 +315,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieSearchJob?.cancel()
             movieDetailJob?.cancel()
             cancelMovieGroupPageLoad()
+            cancelMovieFavoritesLoad()
             movieGroupPageGeneration += 1L
+            movieFavoritesGeneration += 1L
             movieRequestGeneration += 1L
         }
         if (previousSurface == MediaSurface.DRAMA) {
@@ -339,6 +351,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openMovieGroupNextOffset = 0,
             openMovieGroupLoading = false,
             openMovieGroupError = null,
+            openMovieFavorites = false,
+            movieFavoritesLoading = false,
+            movieFavoritesError = null,
             selectedDrama = null,
             openDramaGroupId = null,
             openDramaGroupName = "",
@@ -647,6 +662,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (state.surface != MediaSurface.MOVIE) return
         val group = state.movieGroups.firstOrNull { it.sourceId == sourceId } ?: return
         cancelMovieGroupPageLoad()
+        // One grid at a time: a library page replaces the favourites page the
+        // same way the favourites page replaces a library page.
+        cancelMovieFavoritesLoad()
+        movieFavoritesGeneration += 1L
         // The page reopens on the sort it was last browsed with, so its first
         // six posters stay the ones the wall was previewing. A library the
         // user has never sorted follows the wall-wide order, which is exactly
@@ -667,6 +686,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openMovieGroupLoading = true,
             openMovieGroupError = null,
             openMovieGroupSort = sort,
+            openMovieFavorites = false,
+            movieFavoritesLoading = false,
+            movieFavoritesError = null,
         )
         loadMovieGroupPage(reset = true)
     }
@@ -801,6 +823,189 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun cancelMovieGroupPageLoad() {
         movieGroupPageJob?.cancel()
         movieGroupPageJob = null
+    }
+
+    /**
+     * Opens the favourites grid.
+     *
+     * It behaves like a library page - the wall stays behind it holding
+     * whatever it had loaded - but it takes no sort, because "newest heart
+     * first" is the only order a favourites list means.
+     */
+    fun openMovieFavorites() {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.MOVIE) return
+        // A library page and the favourites page are two answers to the same
+        // question - "show me a grid" - so opening one closes the other and
+        // back always unwinds exactly one step.
+        closeMovieGroup()
+        mutableState.value = mutableState.value.copy(
+            openMovieFavorites = true,
+            movieFavoritesLoading = true,
+            movieFavoritesError = null,
+        )
+        loadMovieFavorites(reset = true)
+    }
+
+    fun closeMovieFavorites() {
+        if (mutableState.value.surface != MediaSurface.MOVIE) return
+        cancelMovieFavoritesLoad()
+        movieFavoritesGeneration += 1L
+        mutableState.value = mutableState.value.copy(
+            openMovieFavorites = false,
+            movieFavoritesLoading = false,
+            movieFavoritesError = null,
+        )
+    }
+
+    fun loadMoreMovieFavorites() {
+        val state = mutableState.value
+        if (!state.openMovieFavorites || state.movieFavoritesLoading) return
+        if (state.movieFavoritesNextOffset == null) return
+        loadMovieFavorites(reset = false)
+    }
+
+    private fun loadMovieFavorites(reset: Boolean) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.MOVIE || !state.openMovieFavorites) return
+        val offset = if (reset) 0 else state.movieFavoritesNextOffset ?: return
+        cancelMovieFavoritesLoad()
+        val generation = ++movieFavoritesGeneration
+        mutableState.value = state.copy(movieFavoritesLoading = true, movieFavoritesError = null)
+        movieFavoritesJob = viewModelScope.launch {
+            runApi { api.movieFavorites(offset = offset) }
+                .onSuccess { page ->
+                    val current = mutableState.value
+                    if (generation != movieFavoritesGeneration || !current.openMovieFavorites) {
+                        return@onSuccess
+                    }
+                    // Every row this endpoint returns is hearted by definition,
+                    // so stamping the flag here is what lets the detail page
+                    // open with a filled heart before its own request lands.
+                    val incoming = page.items.map { it.withResumePosition().copy(favorite = true) }
+                    val merged = if (reset) {
+                        incoming
+                    } else {
+                        val seen = current.movieFavorites.mapTo(mutableSetOf(), MovieItem::id)
+                        current.movieFavorites + incoming.filter { seen.add(it.id) }
+                    }
+                    mutableState.value = current.copy(
+                        movieFavorites = merged,
+                        movieFavoritesTotal = maxOf(page.total, merged.size),
+                        movieFavoritesNextOffset = page.nextOffset,
+                        movieFavoritesLoading = false,
+                        movieFavoritesError = null,
+                    )
+                }
+                .onFailure { error ->
+                    val current = mutableState.value
+                    if (generation != movieFavoritesGeneration || !current.openMovieFavorites) {
+                        return@onFailure
+                    }
+                    if (!handleUnauthorized(error)) {
+                        mutableState.value = current.copy(
+                            movieFavoritesLoading = false,
+                            // A failure after the first page keeps the hearts
+                            // already on screen; only an empty list has nothing
+                            // to show, so only then does the cursor go away.
+                            movieFavoritesNextOffset =
+                                current.movieFavoritesNextOffset.takeIf {
+                                    current.movieFavorites.isEmpty()
+                                },
+                            movieFavoritesError = "收藏列表暂时载入不了，稍后再试",
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun cancelMovieFavoritesLoad() {
+        movieFavoritesJob?.cancel()
+        movieFavoritesJob = null
+    }
+
+    /**
+     * Hearts or un-hearts one title.
+     *
+     * The heart answers the tap rather than the round trip: a server on the
+     * other side of the ocean must not be able to make a tap look broken. The
+     * server's own verdict is painted over the local guess when it lands, and a
+     * failure puts the previous heart back, which is the whole feedback.
+     */
+    fun toggleMovieFavorite(movie: MovieItem) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.MOVIE) return
+        val wanted = !movie.favorite
+        applyMovieFavorite(movie, wanted)
+        viewModelScope.launch {
+            runApi { api.setMovieFavorite(movie.id, wanted) }
+                .onSuccess { stored ->
+                    val current = mutableState.value
+                    if (current.surface != MediaSurface.MOVIE) return@onSuccess
+                    if (stored.favorite != wanted) applyMovieFavorite(movie, stored.favorite)
+                }
+                .onFailure { error ->
+                    if (handleUnauthorized(error)) return@onFailure
+                    val current = mutableState.value
+                    if (current.surface != MediaSurface.MOVIE) return@onFailure
+                    val selected = current.selectedMovie
+                    applyMovieFavorite(movie, !wanted)
+                    // The heart only ever shows on the metadata page, so the
+                    // note about a failed tap belongs beside the play button
+                    // that page already draws.
+                    if (selected?.id == movie.id) {
+                        mutableState.value = mutableState.value.copy(
+                            movieError = if (wanted) {
+                                "收藏没成功，稍后再试"
+                            } else {
+                                "取消收藏没成功，稍后再试"
+                            },
+                        )
+                    }
+                }
+        }
+    }
+
+    /**
+     * Paints one heart wherever the title is currently drawn.
+     *
+     * The same film can sit in the wall's section, the open library page, the
+     * continue-watching strip, the favourites grid and its own detail page; a
+     * heart that repainted only one of them would look like it had missed.
+     */
+    private fun applyMovieFavorite(movie: MovieItem, favorite: Boolean) {
+        val state = mutableState.value
+        fun MovieItem.stamped(): MovieItem =
+            if (id == movie.id) copy(favorite = favorite) else this
+        val hearted = movie.copy(favorite = true)
+        val without = state.movieFavorites.filterNot { it.id == movie.id }
+        val hadRow = without.size != state.movieFavorites.size
+        // Un-hearting drops the row: the page shows exactly what is hearted, so
+        // leaving it behind would promise a title the next load disagrees with.
+        // Hearting from inside the page puts it back at the top, where the
+        // server is about to report it.
+        val favorites = when {
+            !favorite -> without
+            state.movieFavorites.any { it.id == movie.id } -> state.movieFavorites.map { it.stamped() }
+            state.openMovieFavorites -> listOf(hearted) + state.movieFavorites
+            else -> state.movieFavorites
+        }
+        val delta = when {
+            !favorite && hadRow -> -1
+            favorite && state.openMovieFavorites && !hadRow -> 1
+            else -> 0
+        }
+        mutableState.value = state.copy(
+            selectedMovie = state.selectedMovie?.stamped(),
+            movieItems = state.movieItems.map { it.stamped() },
+            openMovieGroupItems = state.openMovieGroupItems.map { it.stamped() },
+            recentMovies = state.recentMovies.map { it.stamped() },
+            movieGroups = state.movieGroups.map { group ->
+                group.copy(items = group.items.map { it.stamped() })
+            },
+            movieFavorites = favorites,
+            movieFavoritesTotal = (state.movieFavoritesTotal + delta).coerceAtLeast(0),
+        )
     }
 
     fun selectMovie(movie: MovieItem) {
@@ -1684,6 +1889,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.saveMovieGroupListPosition(sourceId, position)
     }
 
+    internal fun movieFavoritesListPosition(): ListPosition =
+        preferences.movieFavoritesListPosition()
+
+    internal fun saveMovieFavoritesListPosition(position: ListPosition) {
+        preferences.saveMovieFavoritesListPosition(position)
+    }
+
     internal fun dramaListPosition(): ListPosition = preferences.dramaListPosition()
 
     internal fun saveDramaListPosition(position: ListPosition) {
@@ -2552,8 +2764,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun refreshMovieLibrary() {
         movieCatalogDirty = true
-        if (mutableState.value.surface == MediaSurface.MOVIE) loadMovies(reset = true)
-        if (mutableState.value.surface == MediaSurface.MOVIE) loadRecentMovies()
+        if (mutableState.value.surface == MediaSurface.MOVIE) {
+            loadMovies(reset = true)
+            loadRecentMovies()
+            // A rescan can retire a title, so a favourites page left open over
+            // a wall that just reloaded is the one list that can go stale.
+            if (mutableState.value.openMovieFavorites) loadMovieFavorites(reset = true)
+        }
     }
 
     private fun refreshDramaLibrary() {

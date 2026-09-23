@@ -157,6 +157,72 @@ async def test_cover_first_ranks_every_kind_of_artwork_ahead_of_none(
 
 
 @pytest.mark.asyncio
+async def test_cover_first_ranks_artwork_the_host_no_longer_serves_as_absent(
+    monkeypatch, tmp_path
+):
+    """A declared cover the host answers 502 for is not a cover.
+
+    The wall paints the same empty placeholder for a dead URL as for a row with
+    no artwork at all, so "cover first" has to rank them together. This was the
+    reported shape of the bug: 一线女优 sorted by cover still led with tiles
+    whose pictures never arrived, because every one of those rows *declared* a
+    poster and the query only ever looked at the column, never at whether the
+    file was still there.
+    """
+    main = await boot(monkeypatch, tmp_path)
+    source = await add_movie_source(main, "一线女优", "/movies/first")
+    # AAA-001 sorts first by title, so the only thing that can push it down is
+    # the verdict about its picture.
+    index_movies(main, source, ["AAA-001", "AAA-002"])
+    rows = {
+        row["name"]: row for row in main.database.movies(sources=(source,), limit=10)
+    }
+    dead = rows["AAA-001.mp4"]
+    live = rows["AAA-002.mp4"]
+    main.database.update_movie_metadata(
+        dead["id"],
+        poster_url="https://images.example/dead.jpg",
+        match_status="matched",
+    )
+    main.database.update_movie_metadata(
+        live["id"],
+        poster_url="https://images.example/live.jpg",
+        match_status="matched",
+    )
+    main.database.remember_movie_image_failure(
+        "https://images.example/dead.jpg",
+        ttl_seconds=3600,
+    )
+    assert main.database.movie_image_failed_urls() == {"https://images.example/dead.jpg"}
+
+    with TestClient(main.app) as client:
+        headers = headers_for(main)
+        body = client.get("/api/movies", params={"sort": "cover"}, headers=headers).json()
+        assert titles(body) == ["AAA-002", "AAA-001"]
+        assert all(item["posterUrl"] for item in body["items"])
+
+        # The verdict is a lease, not a life sentence: once the host serves the
+        # file again the row leads on its own merits.
+        main.database.forget_movie_image_failure("https://images.example/dead.jpg")
+        body = client.get("/api/movies", params={"sort": "cover"}, headers=headers).json()
+        assert titles(body) == ["AAA-001", "AAA-002"]
+
+        # And an expired verdict is the same as none: the ledger is swept by the
+        # same comparison the ranking uses, so a stale row can never hide art.
+        with main.database._lock, main.database._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO movie_image_failures(url, expires_at) VALUES(?, ?)
+                ON CONFLICT(url) DO UPDATE SET expires_at = excluded.expires_at
+                """,
+                ("https://images.example/dead.jpg", 1),
+            )
+            connection.commit()
+        body = client.get("/api/movies", params={"sort": "cover"}, headers=headers).json()
+        assert titles(body) == ["AAA-001", "AAA-002"]
+
+
+@pytest.mark.asyncio
 async def test_title_and_time_each_sort_in_two_directions(monkeypatch, tmp_path):
     main = await boot(monkeypatch, tmp_path)
     source = await add_movie_source(main, "一线女优", "/movies/first")

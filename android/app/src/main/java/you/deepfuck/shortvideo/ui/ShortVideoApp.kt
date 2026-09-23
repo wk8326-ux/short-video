@@ -149,6 +149,13 @@ fun ShortVideoApp(
     }
     BackHandler(
         enabled = !fullscreen && !state.showManagement &&
+            state.surface == MediaSurface.MOVIE && state.selectedMovie == null &&
+            state.openMovieFavorites,
+    ) {
+        viewModel.closeMovieFavorites()
+    }
+    BackHandler(
+        enabled = !fullscreen && !state.showManagement &&
             state.surface == MediaSurface.DRAMA && state.selectedDrama != null && state.nowPlaying != null,
     ) {
         viewModel.stopDramaPlayback()
@@ -246,6 +253,7 @@ fun ShortVideoApp(
                                 groupListPosition = state.openMovieGroupId
                                     ?.let(viewModel::movieGroupListPosition)
                                     ?: you.deepfuck.shortvideo.ListPosition(),
+                                favoritesListPosition = viewModel.movieFavoritesListPosition(),
                                 onSelect = viewModel::selectMovie,
                                 onBack = viewModel::closeMovieDetail,
                                 onPlay = viewModel::playMovie,
@@ -254,6 +262,11 @@ fun ShortVideoApp(
                                 onGroupSort = viewModel::setMovieGroupSort,
                                 onLoadMoreGroup = viewModel::loadMoreMovieGroup,
                                 onGroupListPosition = viewModel::saveMovieGroupListPosition,
+                                onOpenFavorites = viewModel::openMovieFavorites,
+                                onCloseFavorites = viewModel::closeMovieFavorites,
+                                onLoadMoreFavorites = viewModel::loadMoreMovieFavorites,
+                                onFavoritesListPosition = viewModel::saveMovieFavoritesListPosition,
+                                onToggleFavorite = viewModel::toggleMovieFavorite,
                                 onWallView = viewModel::setMovieWallView,
                                 onRetry = viewModel::retryMovies,
                                 onTogglePlayback = viewModel::togglePlayback,

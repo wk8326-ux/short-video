@@ -165,6 +165,8 @@ data class MovieItem(
     val performers: List<String> = emptyList(),
     val studio: String? = null,
     val resumePositionMs: Long = 0L,
+    /** Whether this title sits in the account's favourites list. */
+    val favorite: Boolean = false,
 ) {
     val resumeFraction: Float
         get() {
@@ -216,9 +218,25 @@ data class MovieItem(
             // "Continue watching" is answered by the server, so the resume
             // point has to survive the trip; the local store is merged on top.
             resumePositionMs = value.optLong("resumePositionMs"),
+            // Only the detail response carries this; every other list leaves it
+            // false, which is exactly what the wall needs to draw no heart.
+            favorite = value.optBoolean("favorite"),
         )
     }
 }
+
+/**
+ * One page of the favourites grid.
+ *
+ * Deliberately not a [MovieGroup]: a library is something the user added in
+ * the admin screen and can reorder, while this is one flat list ordered by when
+ * each heart was tapped.
+ */
+data class MovieFavoritesPage(
+    val items: List<MovieItem>,
+    val total: Int,
+    val nextOffset: Int?,
+)
 
 data class MoviePage(
     val items: List<MovieItem>,

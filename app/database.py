@@ -8,6 +8,7 @@ import random
 import secrets
 import sqlite3
 import threading
+import time
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -286,6 +287,29 @@ class LibraryDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_watch_progress_updated
                     ON watch_progress(updated_at DESC);
+                -- Where every device hearted a title. It lives with the
+                -- library rather than the phone for the same reason the
+                -- playhead does: one account, one list, reinstall-proof.
+                CREATE TABLE IF NOT EXISTS movie_favorites (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    video_id INTEGER NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_movie_favorites_recent
+                    ON movie_favorites(id DESC);
+                -- A poster_url whose host answers 404/502 is not artwork: the
+                -- wall paints the same empty placeholder for it as for a row
+                -- with no cover at all. The proxy records every failure it
+                -- meets here (and deletes the row on the first success), so
+                -- "cover first" can rank a dead picture last without spending
+                -- a network round trip inside the list query.
+                CREATE TABLE IF NOT EXISTS movie_image_failures (
+                    url TEXT PRIMARY KEY,
+                    failed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    expires_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_movie_image_failures_expiry
+                    ON movie_image_failures(expires_at);
                 """
             )
             self._migrate_media_source_roots(connection)
@@ -1478,13 +1502,28 @@ class LibraryDatabase:
         has_poster = "(LOWER(COALESCE(m.poster_url, '')) <> '')"
         has_thumb = "(LOWER(COALESCE(v.thumb, '')) <> '')"
         has_backdrop = "(LOWER(COALESCE(m.backdrop_url, '')) <> '')"
+        # The picture ``public_movie`` actually hands the client: the poster,
+        # or the backdrop when the row has no poster. The ranking below and the
+        # recorded failures have to agree on this one expression, or the order
+        # describes a URL nobody ever asks for.
+        effective_cover = (
+            "(CASE WHEN TRIM(COALESCE(m.poster_url, '')) <> '' THEN m.poster_url "
+            "ELSE m.backdrop_url END)"
+        )
         # "Has a cover" means the client will actually be handed an image: the
         # shared catalogue writes poster_url, the older AList scan wrote thumb,
         # and a few rows only ever had a backdrop. Ranking on one of the three
         # alone left titles that do render a picture sitting behind titles that
         # do not.
+        #
+        # A row can also declare a cover whose host no longer serves it - a 404
+        # or a 502 - and then the wall paints the very same empty placeholder it
+        # paints for a row with no artwork at all. Ranking those two the same is
+        # the whole point of "cover first": a library page that led with four
+        # broken tiles was promising pictures that never arrive.
+        declared_cover = f"({has_poster} OR {has_backdrop} OR {has_thumb})"
         cover_rank = (
-            f"CASE WHEN {has_poster} OR {has_backdrop} OR {has_thumb} THEN 0 ELSE 1 END"
+            f"CASE WHEN ({declared_cover}) AND mif.url IS NULL THEN 0 ELSE 1 END"
         )
         descending = str(direction).lower() == "desc"
         ascending = str(direction).lower() == "asc"
@@ -1518,6 +1557,9 @@ class LibraryDatabase:
                        v.thumb, v.media_format, v.media_kind
                 FROM movies m
                 JOIN videos v ON v.id = m.video_id
+                LEFT JOIN movie_image_failures mif
+                    ON mif.url = {effective_cover}
+                   AND mif.expires_at > CAST(strftime('%s', 'now') AS INTEGER)
                 WHERE {' AND '.join(conditions)}
                 ORDER BY {order}
                 LIMIT ? OFFSET ?
@@ -1599,6 +1641,135 @@ class LibraryDatabase:
                 [movie_id, *source_params],
             ).fetchone()
         return dict(row) if row else None
+
+    def set_movie_favorite(self, video_id: int, favorite: bool) -> bool:
+        """Add or drop one title from the account-wide favourites list.
+
+        One list for the account, kept beside the library rather than on the
+        phone, so a second device and a reinstall both see the same hearts.
+        """
+        with self._lock, self._connect() as connection:
+            if favorite:
+                connection.execute(
+                    """
+                    INSERT INTO movie_favorites(video_id, created_at)
+                    VALUES(?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(video_id) DO NOTHING
+                    """,
+                    (int(video_id),),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM movie_favorites WHERE video_id = ?",
+                    (int(video_id),),
+                )
+            connection.commit()
+        return bool(favorite)
+
+    def is_movie_favorite(self, video_id: int) -> bool:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM movie_favorites WHERE video_id = ?",
+                (int(video_id),),
+            ).fetchone()
+        return row is not None
+
+    def favorite_movies(
+        self,
+        *,
+        sources: Sequence[str] = (),
+        limit: int = 24,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """The hearted titles, most recently hearted first.
+
+        The row shape matches :meth:`movies` so the favourites page draws it
+        with the grid the library pages already use. Ordering is by the
+        favourite's own row id rather than its timestamp: two hearts tapped in
+        the same second still land in the order they were tapped, and the
+        newest always leads.
+        """
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT m.*, v.name, v.path, v.size, v.modified, v.duration_seconds,
+                       v.thumb, v.media_format, v.media_kind,
+                       f.created_at AS favorited_at
+                FROM movie_favorites f
+                JOIN movies m ON m.video_id = f.video_id
+                JOIN videos v ON v.id = m.video_id
+                WHERE v.active = 1 AND {source_clause}
+                ORDER BY f.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*source_params, max(1, int(limit)), max(0, int(offset))],
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def favorite_movie_count(self, *, sources: Sequence[str] = ()) -> int:
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM movie_favorites f
+                JOIN movies m ON m.video_id = f.video_id
+                JOIN videos v ON v.id = m.video_id
+                WHERE v.active = 1 AND {source_clause}
+                """,
+                list(source_params),
+            ).fetchone()
+        return int(row[0] or 0)
+
+    def remember_movie_image_failure(self, url: str, *, ttl_seconds: int) -> None:
+        """Record that one artwork URL could not be fetched.
+
+        The picture proxy answers 502 for a dead cover and the wall then draws
+        an empty placeholder, so the ranking in :meth:`movies` needs to know
+        which declared covers are actually dead. This is that ledger.
+        """
+        target = str(url or "").strip()
+        if not target:
+            return
+        expires_at = int(time.time()) + max(60, int(ttl_seconds))
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO movie_image_failures(url, failed_at, expires_at)
+                VALUES(?, CURRENT_TIMESTAMP, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    failed_at = CURRENT_TIMESTAMP,
+                    expires_at = excluded.expires_at
+                """,
+                (target, expires_at),
+            )
+            connection.commit()
+
+    def forget_movie_image_failure(self, url: str) -> None:
+        """Drop one URL from the ledger: it served a picture after all."""
+        target = str(url or "").strip()
+        if not target:
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "DELETE FROM movie_image_failures WHERE url = ?",
+                (target,),
+            )
+            connection.commit()
+
+    def movie_image_failed_urls(self) -> set[str]:
+        """Every unexpired failure, for priming the proxy's own memory."""
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT url FROM movie_image_failures
+                WHERE expires_at > CAST(strftime('%s', 'now') AS INTEGER)
+                """,
+            ).fetchall()
+        return {str(row["url"]) for row in rows}
 
     # A title counts as watched once the player reached the very end of it. The
     # margin absorbs the trailing seconds players routinely skip, and keeps a

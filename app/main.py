@@ -50,7 +50,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.28"
+APP_VERSION = "1.6.0-beta.29"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -156,6 +156,13 @@ MOVIE_WALL_IMAGE_WIDTH = 720
 # upstream hosts take twelve seconds to admit they are down. Remembering the
 # failure for a short while turns a scrolling stall into an instant placeholder.
 MOVIE_IMAGE_FAILURE_TTL_SECONDS = 10 * 60
+# The same failure is also written to the library database, where "cover first"
+# reads it to push titles whose artwork will never render below the ones that do
+# render. That decision has to hold for as long as the picture stays dead, which
+# is far longer than the in-process memo needs to live, and it is cleared the
+# moment the host serves the file again - so a cover that comes back is never
+# hidden behind a stale verdict.
+MOVIE_IMAGE_FAILURE_RANK_SECONDS = 6 * 60 * 60
 # A library page shows a grid, so it warms two screens' worth of cards.
 MOVIE_LIBRARY_PREWARM_LIMIT = 12
 # Every section of the wall is warmed, but a wall with twenty libraries must not
@@ -171,6 +178,10 @@ movie_image_cache_guard = threading.RLock()
 # unreachable, so it stays a few hundred entries and empties itself.
 movie_image_failure_cache: dict[str, float] = {}
 movie_image_failure_guard = threading.RLock()
+# The upstream URLs behind those keys, mirrored from the database so the
+# success path can drop a ledger row without asking the database whether there
+# is one on every single cover it serves.
+movie_image_bad_urls: set[str] = set()
 # One client for the whole process: the folded catalogue is the expensive part
 # of a scrape, and building it per run made every rescan pay for the same walk.
 # The mirror is a SQLite file next to the library database, so the catalogue
@@ -1065,6 +1076,12 @@ async def scrape_movie_metadata(
 async def lifespan(_: FastAPI):
     global movie_image_client, shared_metadata_client
     await asyncio.to_thread(database.initialize)
+    # The ledger of dead artwork outlives the process; carrying it in means a
+    # restart does not have to re-discover every broken cover before the wall
+    # can rank them last again.
+    _prime_movie_image_failures(
+        await asyncio.to_thread(database.movie_image_failed_urls)
+    )
     await source_registry.initialize()
     orphaned = await asyncio.to_thread(database.reconcile_orphaned_scan_jobs)
     if orphaned:
@@ -1620,7 +1637,13 @@ def _movie_image_failure_remaining(cache_key: str) -> float:
         return expiry - now
 
 
-def _remember_movie_image_failure(cache_key: str) -> None:
+def _remember_movie_image_failure(cache_key: str, source_url: str | None = None) -> None:
+    """Memoise one failed cover, in this process and in the library database.
+
+    The in-process copy is what spares the wall a twelve second stall on the
+    next scroll; the database copy is what lets "cover first" rank a title whose
+    artwork is dead below the titles whose artwork actually arrives.
+    """
     now = time.monotonic()
     with movie_image_failure_guard:
         if len(movie_image_failure_cache) > 4096:
@@ -1631,11 +1654,40 @@ def _remember_movie_image_failure(cache_key: str) -> None:
                 soonest = min(movie_image_failure_cache, key=movie_image_failure_cache.__getitem__)
                 movie_image_failure_cache.pop(soonest, None)
         movie_image_failure_cache[cache_key] = now + MOVIE_IMAGE_FAILURE_TTL_SECONDS
+        url = str(source_url or "").strip()
+        already_recorded = url in movie_image_bad_urls
+        if url:
+            movie_image_bad_urls.add(url)
+    if url and not already_recorded:
+        spawn_background(
+            asyncio.to_thread(
+                database.remember_movie_image_failure,
+                url,
+                ttl_seconds=MOVIE_IMAGE_FAILURE_RANK_SECONDS,
+            ),
+            name="movie-image-failure-record",
+        )
 
 
-def _forget_movie_image_failure(cache_key: str) -> None:
+def _forget_movie_image_failure(cache_key: str, source_url: str | None = None) -> None:
+    """One cover arrived after all: forget the verdict everywhere."""
     with movie_image_failure_guard:
         movie_image_failure_cache.pop(cache_key, None)
+        url = str(source_url or "").strip()
+        forget_ledger = bool(url) and url in movie_image_bad_urls
+        if url:
+            movie_image_bad_urls.discard(url)
+    if forget_ledger:
+        spawn_background(
+            asyncio.to_thread(database.forget_movie_image_failure, url),
+            name="movie-image-failure-clear",
+        )
+
+
+def _prime_movie_image_failures(urls: set[str]) -> None:
+    """Carry the ledger's verdicts over from the previous process."""
+    with movie_image_failure_guard:
+        movie_image_bad_urls.update(str(url).strip() for url in urls if str(url).strip())
 
 
 def _movie_image_cache_paths(url: str) -> tuple[Path, Path]:
@@ -1761,7 +1813,7 @@ async def _proxy_movie_image(
         cached = await asyncio.to_thread(_read_movie_image_cache, cache_key)
         if cached:
             content, media_type, etag = cached
-            _forget_movie_image_failure(cache_key)
+            _forget_movie_image_failure(cache_key, url)
             return _movie_image_response(
                 content,
                 media_type,
@@ -1797,7 +1849,7 @@ async def _proxy_movie_image(
                         "image/webp",
                         derived_etag,
                     )
-                    _forget_movie_image_failure(cache_key)
+                    _forget_movie_image_failure(cache_key, url)
                     return _movie_image_response(
                         derived,
                         "image/webp",
@@ -1880,11 +1932,11 @@ async def _proxy_movie_image(
                 # hiccup looks like; both are worth remembering, an invalid
                 # request is not.
                 if exc.status_code in {404, 502}:
-                    _remember_movie_image_failure(cache_key)
+                    _remember_movie_image_failure(cache_key, url)
                 raise
             except httpx.HTTPError as exc:
                 logger.info("Movie image proxy failed for %s: %s", url, exc)
-                _remember_movie_image_failure(cache_key)
+                _remember_movie_image_failure(cache_key, url)
                 raise HTTPException(status_code=502, detail="Movie image upstream unavailable") from exc
         finally:
             if owns_client:
@@ -1894,7 +1946,7 @@ async def _proxy_movie_image(
         await asyncio.to_thread(
             _write_movie_image_cache, cache_key, content, media_type, etag
         )
-        _forget_movie_image_failure(cache_key)
+        _forget_movie_image_failure(cache_key, url)
         if original_copy is not None:
             await asyncio.to_thread(
                 _write_movie_image_cache,
@@ -2757,6 +2809,66 @@ async def recent_movies(
     return {"items": items}
 
 
+@app.get("/api/movies/favorites")
+async def movie_favorites(
+    limit: int = Query(default=24, ge=1, le=60),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """The hearted titles, most recently hearted first.
+
+    Declared before ``/api/movies/{movie_id}`` for the same reason as the
+    "recent" strip: a literal path has to be matched as a path, not read as a
+    movie id. The page is paged exactly like a library page so the favourites
+    grid can reuse it whole.
+    """
+    sources = source_registry.ids("movie")
+    rows, total = await asyncio.gather(
+        asyncio.to_thread(
+            database.favorite_movies,
+            sources=sources,
+            limit=limit,
+            offset=offset,
+        ),
+        asyncio.to_thread(database.favorite_movie_count, sources=sources),
+    )
+    if offset == 0 and rows:
+        spawn_background(
+            prewarm_movie_wall_images(rows, limit=MOVIE_LIBRARY_PREWARM_LIMIT),
+            name="prewarm-movie-favorites",
+        )
+    return {
+        "items": [public_movie(row) for row in rows],
+        "total": total,
+        "nextOffset": offset + len(rows) if offset + len(rows) < total else None,
+    }
+
+
+async def _set_movie_favorite(movie_id: int, favorite: bool) -> dict[str, Any]:
+    """Heart or un-heart one title and hand the caller the updated record."""
+    sources = source_registry.ids("movie")
+    row = await asyncio.to_thread(database.get_movie, movie_id, sources=sources)
+    if not row:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    await asyncio.to_thread(
+        database.set_movie_favorite,
+        int(row["video_id"]),
+        favorite,
+    )
+    payload = public_movie(row, detail=True)
+    payload["favorite"] = favorite
+    return payload
+
+
+@app.put("/api/movies/{movie_id}/favorite")
+async def add_movie_favorite(movie_id: int) -> dict[str, Any]:
+    return await _set_movie_favorite(movie_id, True)
+
+
+@app.delete("/api/movies/{movie_id}/favorite")
+async def remove_movie_favorite(movie_id: int) -> dict[str, Any]:
+    return await _set_movie_favorite(movie_id, False)
+
+
 @app.get("/api/movies/{movie_id}")
 async def movie_detail(movie_id: int) -> dict[str, Any]:
     row = await asyncio.to_thread(
@@ -2770,7 +2882,12 @@ async def movie_detail(movie_id: int) -> dict[str, Any]:
         prewarm_play_url(row),
         name=f"prewarm-movie-play-{row['id']}",
     )
-    return public_movie(row, detail=True)
+    payload = public_movie(row, detail=True)
+    payload["favorite"] = await asyncio.to_thread(
+        database.is_movie_favorite,
+        int(row["video_id"]),
+    )
+    return payload
 
 
 async def _movie_image(

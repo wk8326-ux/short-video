@@ -262,6 +262,45 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         )
     }
 
+    /**
+     * The account's favourites, most recently hearted first.
+     *
+     * Paged exactly like a library page so the grid can be shared, but with no
+     * sort argument: the order is the one thing a favourites list means.
+     */
+    fun movieFavorites(
+        offset: Int = 0,
+        limit: Int = MOVIE_LIBRARY_PAGE_SIZE,
+    ): MovieFavoritesPage {
+        val target = url("/api/movies/favorites").newBuilder()
+            .addQueryParameter("limit", limit.toString())
+            .addQueryParameter("offset", offset.toString())
+            .build()
+        val payload = getJson(target.toString())
+        return MovieFavoritesPage(
+            items = payload.optObjectList("items", MovieItem::fromJson),
+            total = payload.optInt("total"),
+            nextOffset = payload.optIntOrNull("nextOffset"),
+        )
+    }
+
+    /**
+     * Hearts or un-hearts one title.
+     *
+     * The reply is the movie record itself, so the caller settles the row with
+     * what the server actually stored instead of with the guess it painted a
+     * moment earlier.
+     */
+    fun setMovieFavorite(movieId: Long, favorite: Boolean): MovieItem {
+        val builder = Request.Builder().url(url("/api/movies/$movieId/favorite"))
+        val request = if (favorite) {
+            builder.put(ByteArray(0).toRequestBody(null)).build()
+        } else {
+            builder.delete().build()
+        }
+        return MovieItem.fromJson(executeJson(request))
+    }
+
     fun dramas(
         query: String = "",
         limit: Int = DRAMA_PAGE_SIZE,

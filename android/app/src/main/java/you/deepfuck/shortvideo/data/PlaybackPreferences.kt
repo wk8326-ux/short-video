@@ -287,6 +287,17 @@ class PlaybackPreferences(context: Context) {
     internal fun saveDramaListPosition(position: ListPosition) =
         saveListPosition(KEY_DRAMA_LIST_POSITION, position)
 
+    /**
+     * The favourites grid is a permanent destination of its own, so it keeps a
+     * scroll offset like a library page does: opening a film from halfway down
+     * and coming back should land on that poster again.
+     */
+    internal fun movieFavoritesListPosition(): ListPosition =
+        listPosition(KEY_MOVIE_FAVORITES_LIST_POSITION)
+
+    internal fun saveMovieFavoritesListPosition(position: ListPosition) =
+        saveListPosition(KEY_MOVIE_FAVORITES_LIST_POSITION, position)
+
     fun dramaEpisodeId(dramaId: String): Long? =
         preferences.getLong("${KEY_DRAMA_EPISODE}:$dramaId", -1L).takeIf { it > 0L }
 
@@ -330,6 +341,7 @@ class PlaybackPreferences(context: Context) {
         const val KEY_MOVIE_LIST_POSITION = "movie_list_position"
         const val KEY_MOVIE_GROUP_LIST_POSITION = "movie_group_list_position"
         const val KEY_MOVIE_GROUP_SORT = "movie_group_sort"
+        const val KEY_MOVIE_FAVORITES_LIST_POSITION = "movie_favorites_list_position"
         const val KEY_DRAMA_LIST_POSITION = "drama_list_position"
         const val KEY_DRAMA_EPISODE = "drama_episode"
         const val KEY_RECENT = "recent"
