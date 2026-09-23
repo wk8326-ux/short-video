@@ -455,7 +455,7 @@ select:focus-visible {
   position: relative;
   display: block;
   overflow: hidden;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 3 / 2;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 7px;
   background: #17181b;
@@ -614,7 +614,7 @@ select:focus-visible {
 .movie-detail-poster {
   flex: 0 0 168px;
   width: 168px;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 3 / 2;
   overflow: hidden;
   display: grid;
   place-items: center;

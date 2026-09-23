@@ -547,7 +547,7 @@ private fun RecentMovieCard(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
+                    .aspectRatio(3f / 2f)
                     .clip(RoundedCornerShape(10.dp))
                     .background(Raised),
                 contentAlignment = Alignment.Center,
@@ -564,10 +564,10 @@ private fun RecentMovieCard(
                         imageLoader = imageLoader,
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
-                        // The catalogue's covers are not all the same shape.
-                        // Fitting the original inside the cell shows every one
-                        // of them whole; cropping cut the edges off whichever
-                        // titles happened to be wider than the box.
+                        // Every cell is one fixed 3:2 frame and the proxy cuts
+                        // the cover to match, so a wide picture lands edge to
+                        // edge and a portrait one keeps its own proportions
+                        // inside the frame.
                         contentScale = ContentScale.Fit,
                     )
                 }
@@ -649,7 +649,7 @@ private fun MovieLibraryTile(
                             Box(
                                 Modifier
                                     .weight(1f)
-                                    .aspectRatio(16f / 9f)
+                                    .aspectRatio(3f / 2f)
                                     .background(Raised),
                             ) {
                                 cover?.let { url ->
@@ -1037,7 +1037,7 @@ private fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () 
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(16f / 9f)
+                    .aspectRatio(3f / 2f)
                     .clip(RoundedCornerShape(10.dp))
                     .background(Raised),
                 contentAlignment = Alignment.Center,
@@ -1098,7 +1098,7 @@ private fun MovieSkeletonGrid() {
     ) {
         items(9) {
             Column {
-                Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(6.dp)).background(Raised))
+                Box(Modifier.fillMaxWidth().aspectRatio(3f / 2f).clip(RoundedCornerShape(6.dp)).background(Raised))
                 Spacer(Modifier.height(8.dp))
                 Box(Modifier.fillMaxWidth(0.78f).height(12.dp).clip(RoundedCornerShape(3.dp)).background(RaisedStrong))
                 Spacer(Modifier.height(6.dp))
@@ -1306,14 +1306,15 @@ private fun MovieHero(movie: MovieItem, imageLoader: ImageLoader) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(16f / 9f)
+            .aspectRatio(3f / 2f)
             .background(Color.Transparent),
         contentAlignment = Alignment.Center,
     ) {
         Icon(Icons.Outlined.Movie, contentDescription = null, tint = TextFaint, modifier = Modifier.size(30.dp))
-        // Exactly the wall's expression, at exactly the wall's URL: the detail
-        // page used to scale the picture up and pin it to one edge, which both
-        // cropped it and asked for a second copy of the same bytes.
+        // Exactly the wall's expression, at exactly the wall's URL and in
+        // exactly the wall's 3:2 frame: the detail page used to scale the
+        // picture up and pin it to one edge, which both cropped it and asked
+        // for a second copy of the same bytes.
         (movie.wallUrl ?: movie.posterUrl)?.let {
             AsyncImage(
                 model = it,

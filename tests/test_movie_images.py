@@ -240,6 +240,10 @@ def test_the_wall_asks_for_a_scaled_webp_instead_of_the_original(monkeypatch, tm
         assert scaled.headers["content-type"] == "image/webp"
         with PIL.open(io.BytesIO(scaled.content)) as decoded:
             assert decoded.width == 480
+            # The source here is portrait, so it is scaled and nothing else: a
+            # 480x320 answer would mean it had been cut into the wall's wide
+            # frame, which is exactly what must not happen to a tall cover.
+            assert decoded.height == 720
 
         # A nearby request snaps onto the same ladder step instead of creating a
         # distinct cache entry for every phone density on the market.
@@ -336,3 +340,82 @@ def test_every_width_is_cut_from_the_one_copy_that_was_already_fetched(monkeypat
         assert cached_derivative.headers["x-movie-image-cache"] == "hit"
         assert cached_derivative.content == other_width.content
         assert len(upstream_calls) == 1
+
+
+def _banded_cover_png(width: int, height: int) -> bytes:
+    """A 16:9-ish picture whose outer edges are a colour nothing else uses.
+
+    Marking the two edges is how the crop test proves the trim actually
+    happened: the wall frame is narrower than the shot, so those colours have
+    to be gone from what the phone receives.
+    """
+    image = PIL.new("RGB", (width, height), (0, 200, 0))
+    pixels = image.load()
+    band = max(1, width // 16)
+    for x in range(band):
+        for y in range(height):
+            pixels[x, y] = (220, 0, 0)
+            pixels[width - 1 - x, y] = (0, 0, 220)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_a_wide_cover_is_cut_to_the_wall_frame(monkeypatch, tmp_path):
+    """A 16:9 cover is trimmed to 3:2, evenly off both sides.
+
+    The wall, the library page and the detail page are one fixed 3:2 frame. A
+    16:9 cover drawn whole inside it would sit letterboxed and a couple of
+    sizes smaller than its neighbours, so the proxy cuts the middle out of it
+    instead and every cell ends up the same shape.
+    """
+    main = _load_main(monkeypatch, tmp_path)
+    cookie = f"short_session={main.session_manager.issue()}"
+    headers = {"Cookie": cookie}
+    with TestClient(main.app) as client:
+        monkeypatch.setattr(main, "prewarm_movie_wall_images", _skip_prewarm)
+        cover = _banded_cover_png(1600, 900)
+        movie, upstream = _seed_movie_with_cover(main, client, headers, cover)
+        main.movie_image_client = upstream
+
+        cut = client.get(f"/api/movies/{movie['id']}/poster?w=480", headers=headers)
+        assert cut.status_code == 200
+        assert cut.headers["content-type"] == "image/webp"
+        with PIL.open(io.BytesIO(cut.content)) as decoded:
+            assert (decoded.width, decoded.height) == (480, 320)
+            pixels = decoded.convert("RGB").load()
+            for x, y in ((0, 160), (479, 160), (240, 160)):
+                red, green, blue = pixels[x, y]
+                assert green > 150, (x, y, pixels[x, y])
+                assert red < 90 and blue < 90, (x, y, pixels[x, y])
+
+        # The full-size copy the wall's re-cut was cut from is the upstream
+        # file itself, byte for byte: every width is derived from it, and an
+        # already-trimmed original would compound the crop.
+        original = client.get(f"/api/movies/{movie['id']}/poster", headers=headers)
+        assert original.status_code == 200
+        assert original.content == cover
+
+
+def test_a_resized_cover_is_cached_under_the_shape_it_was_rendered_in(monkeypatch, tmp_path):
+    """Changing the render tag retires the old shape instead of mixing two.
+
+    The scaled copies live in a persistent disk cache keyed by upstream URL and
+    width. If the shape were not part of that key, the phone would keep reading
+    yesterday's 16:9 derivative for a URL that now promises 3:2.
+    """
+    main = _load_main(monkeypatch, tmp_path)
+    url = "https://c0.jdbstatic.com/covers/ve/veyGnb.jpg"
+
+    current = main._movie_image_request_key(url, 480)
+    assert main.COVER_RENDER_TAG in current
+    # The unused width is the pristine upstream file: it is shared by every
+    # shape, so its own key must not move when the shape changes.
+    assert main._movie_image_request_key(url, None) == url
+
+    monkeypatch.setattr(main, "COVER_RENDER_TAG", "16x9")
+    assert main._movie_image_request_key(url, 480) != current
+
+    token_before = main._artwork_token(url)
+    monkeypatch.setattr(main, "COVER_RENDER_TAG", "3x2-legacy")
+    assert main._artwork_token(url) != token_before

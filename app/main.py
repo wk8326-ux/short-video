@@ -50,7 +50,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.27"
+APP_VERSION = "1.6.0-beta.28"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -131,6 +131,20 @@ MOVIE_IMAGE_CACHE_MAX_BYTES = 2048 * 1024 * 1024
 # downscaled WebP instead of the multi-megabyte original: same picture, a
 # fraction of the bytes on a trans-Pacific mobile link.
 MOVIE_IMAGE_WIDTHS = (240, 360, 480, 720, 1080, 1440)
+# The wall cell, the library page cell and the detail page hero are one shape:
+# 3:2, which is what the majority of the catalogue's covers already are. A 16:9
+# cover in a 3:2 frame can either leave bars down both sides or have its edges
+# trimmed; the bars shrink the artwork and make every neighbouring tile look
+# misplaced, so the proxy trims instead - centred, equally off both sides, which
+# keeps the picture's own proportions and its subject. Portrait artwork is never
+# trimmed, because a tall cover cut down to a wide cell loses most of itself.
+COVER_ASPECT = 3 / 2
+# Covers within two percent of 3:2 are left as they are: the leftover sliver is
+# a couple of pixels wide and re-encoding them would only cost quality.
+COVER_ASPECT_TOLERANCE = 0.02
+# Bumping this tag re-cuts every cover and, because it rides in the client-facing
+# URL, makes every device fetch the new shape instead of its cached copy.
+COVER_RENDER_TAG = "3x2"
 # The width every wall card (movie, drama, library page) ends up asking for on a
 # 3x phone: prewarming a different size filled cache entries nothing ever read.
 # Snapping a 178dp card on a 3x screen lands on 720, and the access log of the
@@ -1296,8 +1310,13 @@ def _artwork_token(source_url: Any) -> str:
     serving the old bytes for the whole image TTL. Folding the upstream URL into
     the query turns a new cover into a new URL, while rows whose artwork did not
     change keep the cached response they already have.
+
+    The render tag is folded in for the same reason: it changes whenever the
+    proxy changes the shape it hands back, so every device drops the covers it
+    cached in the old shape instead of mixing two geometries on one wall.
     """
-    return hashlib.sha1(str(source_url or "").encode("utf-8")).hexdigest()[:8]
+    seed = f"{COVER_RENDER_TAG}:{source_url or ''}"
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:8]
 
 
 MOVIE_SORT_FIELDS = ("cover", "title", "time")
@@ -1506,29 +1525,66 @@ def _requested_image_width(value: Any) -> int | None:
     return MOVIE_IMAGE_WIDTHS[-1]
 
 
-def _resize_image_bytes(content: bytes, width: int) -> bytes | None:
-    """Downscale a cover to ``width`` and re-encode it as WebP.
+def _cover_crop_box(width: int, height: int) -> tuple[int, int, int, int] | None:
+    """The box that trims a wide cover into the wall's 3:2 frame.
 
-    Returns ``None`` when the source is already small enough or cannot be
-    decoded, in which case the caller serves the original bytes untouched.
+    ``None`` means "leave the artwork alone". That covers the two shapes the
+    frame already agrees with: a cover that is 3:2 within a couple of percent,
+    and a portrait cover. A tall poster forced into a wide cell would lose most
+    of itself - the exact failure the wall used to have - so portrait artwork
+    keeps its own proportions and simply sits inside the frame.
+
+    Everything wider than 3:2 is trimmed evenly off both sides, which keeps the
+    middle of the shot: for these covers that is where the subject is.
+    """
+    if width <= 0 or height <= 0:
+        return None
+    aspect = width / height
+    if aspect <= COVER_ASPECT:
+        return None
+    if abs(aspect - COVER_ASPECT) / COVER_ASPECT <= COVER_ASPECT_TOLERANCE:
+        return None
+    trimmed_width = max(1, round(height * COVER_ASPECT))
+    if trimmed_width >= width:
+        return None
+    left = (width - trimmed_width) // 2
+    return left, 0, left + trimmed_width, height
+
+
+def _encode_cover_webp(image: Any) -> bytes | None:
+    """Re-encode one already-cut cover as WebP."""
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGB")
+    buffer = io.BytesIO()
+    image.save(buffer, format="WEBP", quality=82, method=4)
+    return buffer.getvalue() or None
+
+
+def _render_cover_bytes(content: bytes, width: int) -> bytes | None:
+    """Cut a cover to the wall's 3:2 frame and downscale it to ``width``.
+
+    Returns ``None`` when there is nothing to do - the artwork is already the
+    right shape *and* already small enough - or when it cannot be decoded, in
+    which case the caller serves the original bytes untouched. A cover that is
+    small but the wrong shape is still re-cut: the wall's cell is one fixed
+    shape, so a small 16:9 picture handed over whole would sit letterboxed next
+    to its neighbours.
     """
     if Image is None:
         return None
     try:
         with Image.open(io.BytesIO(content)) as image:
             image.load()
-            if image.width <= width * 1.1:
+            crop = _cover_crop_box(image.width, image.height)
+            if crop is None and image.width <= width * 1.1:
                 return None
-            height = max(1, round(image.height * width / image.width))
-            resized = image.resize((width, height), Image.Resampling.LANCZOS)
-            if resized.mode not in ("RGB", "RGBA"):
-                resized = resized.convert("RGB")
-            buffer = io.BytesIO()
-            resized.save(buffer, format="WEBP", quality=82, method=4)
-            encoded = buffer.getvalue()
-            return encoded or None
+            rendered = image.crop(crop) if crop else image
+            if rendered.width > width * 1.1:
+                height = max(1, round(rendered.height * width / rendered.width))
+                rendered = rendered.resize((width, height), Image.Resampling.LANCZOS)
+            return _encode_cover_webp(rendered)
     except Exception as exc:
-        logger.info("Movie image resize failed: %s", exc)
+        logger.info("Movie image render failed: %s", exc)
         return None
 
 
@@ -1543,8 +1599,12 @@ def _movie_image_request_key(url: str, width: int | None) -> str:
     must not evict the full-size cover the detail page wants. Both the proxy and
     the warm-up funnel through here so the two can never disagree about where a
     given picture lives.
+
+    The render tag is part of a scaled entry's identity and deliberately not
+    part of the original's: the full-size copy is the upstream file, untouched
+    and shared by every shape, while a scaled copy is one particular crop of it.
     """
-    return f"{url}#w{width}" if width else url
+    return f"{url}#w{width}#{COVER_RENDER_TAG}" if width else url
 
 
 def _movie_image_failure_remaining(cache_key: str) -> float:
@@ -1726,7 +1786,7 @@ async def _proxy_movie_image(
             original = await asyncio.to_thread(_read_movie_image_cache, url)
             if original:
                 derived = await asyncio.to_thread(
-                    _resize_image_bytes, original[0], width
+                    _render_cover_bytes, original[0], width
                 )
                 if derived is not None:
                     derived_etag = hashlib.sha256(derived).hexdigest()
@@ -1809,7 +1869,7 @@ async def _proxy_movie_image(
                         raise HTTPException(status_code=502, detail="Movie image upstream returned non-image data")
                     if width:
                         resized = await asyncio.to_thread(
-                            _resize_image_bytes, content, width
+                            _render_cover_bytes, content, width
                         )
                         if resized is not None:
                             original_copy = (content, media_type)
