@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import sqlite3
 import threading
 import time
@@ -50,7 +51,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.30"
+APP_VERSION = "1.6.0-beta.31"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -122,15 +123,33 @@ MOVIE_IMAGE_CACHE_SECONDS = 7 * 24 * 60 * 60
 MOVIE_IMAGE_USER_AGENT = "deepfuck-movie-library/1"
 # Phones read these covers straight off the origin, so the cache is the whole
 # first-frame budget: a phone that has to wait for a Pacific round trip sees the
-# poster arrive half a second late every time it scrolls back. The disk beside
-# the library database is far larger than this ceiling, so it is set by what the
-# artwork hosts can hand out per hour rather than by free space.
-MOVIE_IMAGE_CACHE_MAX_BYTES = 2048 * 1024 * 1024
+# poster arrive half a second late every time it scrolls back. The box beside the
+# library database holds 45 GB with about 14 GB spare, so the ceiling is six
+# gigabytes rather than two - a whole catalogue's worth of covers at both sizes
+# the app reads - and the free-space floor under it stays the real guard: the
+# cache may never be the reason the disk fills up.
+MOVIE_IMAGE_CACHE_MAX_BYTES = 6144 * 1024 * 1024
+# Below this the cache stops growing and starts evicting, whatever the ceiling
+# says. The database, the app and Docker all live on the same 45 GB root, so the
+# ceiling alone is not enough to keep the host healthy.
+MOVIE_IMAGE_CACHE_MIN_FREE_BYTES = 4 * 1024 * 1024 * 1024
+# Re-measuring the cache costs one stat per blob, and it holds thousands, so a
+# write only pays for a measurement when the running total has reached the
+# ceiling or the last one has gone stale.
+MOVIE_IMAGE_PRUNE_INTERVAL_SECONDS = 300
 # Posters are proxied so phones never touch JavBus/DMM directly. The wall only
 # ever draws them a few hundred pixels wide, so the proxy can hand out a
 # downscaled WebP instead of the multi-megabyte original: same picture, a
 # fraction of the bytes on a trans-Pacific mobile link.
-MOVIE_IMAGE_WIDTHS = (240, 360, 480, 720, 1080, 1440)
+#
+# Three steps rather than six. A census of what the cache actually held found
+# 240 and 480 all but unused, 1080 asked for by nobody, and a stripe of 1440
+# entries that existed only because a 4x phone's hero image rounded past the top
+# of the ladder. Each extra step is a second copy of the same cover on disk, and
+# the steps nothing read were most of the entries. The catalogue's artwork is
+# mostly 800px wide, so 720 is already the wall's full quality and 1080 is the
+# most a full-bleed hero can use.
+MOVIE_IMAGE_WIDTHS = (360, 720, 1080)
 # The wall cell, the library page cell and the detail page hero are one shape:
 # 3:2, which is what the majority of the catalogue's covers already are. A 16:9
 # cover in a 3:2 frame can either leave bars down both sides or have its edges
@@ -180,12 +199,32 @@ MOVIE_LIBRARY_PREWARM_LIMIT = 12
 # Every section of the wall is warmed, but a wall with twenty libraries must not
 # start a hundred downloads on a phone's first frame.
 MOVIE_WALL_PREWARM_MAX_ROWS = 48
+# Warming answers only what a phone has already asked for, which leaves the first
+# visit to a library cold - and that visit is the one being measured. The sweeper
+# below walks the whole catalogue into the cache in batches instead, sized so a
+# one-core host still answers requests while it runs.
+MOVIE_IMAGE_WARM_BATCH = 40
+MOVIE_IMAGE_WARM_CONCURRENCY = 3
+MOVIE_IMAGE_WARM_IDLE_SECONDS = 5
+MOVIE_IMAGE_WARM_PAUSE_SECONDS = 300
+MOVIE_IMAGE_WARM_START_DELAY_SECONDS = 30
+# A blob younger than this is never called an orphan: a write that lands while
+# the sweep is listing the directory must not be deleted from under the process.
+MOVIE_IMAGE_ORPHAN_MIN_AGE_SECONDS = 3600
 # The shared catalogue is the only metadata writer this app still runs, so a row
 # stamped with anything else came from a scraper that has since been deleted.
 ACTIVE_METADATA_PROVIDER = "shared"
 movie_image_cache_dir = Path(settings.database_path).resolve().parent / "movie-images"
 movie_image_cache_locks: dict[str, asyncio.Lock] = {}
 movie_image_cache_guard = threading.RLock()
+# What the cache last measured, so a write can tell whether the ceiling is in
+# sight without walking thousands of files on every single cover.
+movie_image_usage_state: dict[str, float] = {
+    "measuredAt": 0.0,
+    "bytes": 0.0,
+    "entries": 0.0,
+}
+movie_image_usage_guard = threading.Lock()
 # cache_key -> time.monotonic() deadline. Only ever holds covers that just proved
 # unreachable, so it stays a few hundred entries and empties itself.
 movie_image_failure_cache: dict[str, float] = {}
@@ -1127,6 +1166,16 @@ async def lifespan(_: FastAPI):
             _resume_movie_metadata_passes(),
             name="movie-metadata-resume",
         )
+    # Covers are the one thing this app serves straight off its own disk, so the
+    # cache is the whole first-frame budget. Warming only what a phone already
+    # asked for leaves every first visit to a library cold, which is exactly the
+    # visit being judged, so the catalogue is walked into the cache in the
+    # background instead - paced, resumable, and standing down for anything that
+    # actually has a user waiting on it.
+    spawn_background(
+        sweep_movie_cover_cache(),
+        name="movie-cover-sweep",
+    )
     try:
         yield
     finally:
@@ -1831,15 +1880,87 @@ def _drop_movie_image_cache(url: str) -> None:
             continue
 
 
+def _movie_image_cache_usage(*, refresh: bool = False) -> tuple[int, int]:
+    """Bytes and blob count on disk, measured at most once per prune interval."""
+    now = time.monotonic()
+    if not refresh:
+        with movie_image_usage_guard:
+            measured_at = movie_image_usage_state["measuredAt"]
+            if measured_at and now - measured_at < MOVIE_IMAGE_PRUNE_INTERVAL_SECONDS:
+                return (
+                    int(movie_image_usage_state["bytes"]),
+                    int(movie_image_usage_state["entries"]),
+                )
+    total = 0
+    entries = 0
+    try:
+        paths = list(movie_image_cache_dir.glob("*.bin"))
+    except OSError:
+        return 0, 0
+    for path in paths:
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+                entries += 1
+        except OSError:
+            continue
+    with movie_image_usage_guard:
+        movie_image_usage_state.update(
+            {"measuredAt": now, "bytes": float(total), "entries": float(entries)}
+        )
+    return total, entries
+
+
+def _movie_image_cache_budget(cached: int) -> int:
+    """How many bytes the cache may hold: its ceiling, or less if the disk is tight.
+
+    The artwork cache shares a 45 GB root with the database, the container images
+    and everything else the box runs. The ceiling is the number that decides the
+    steady state; the free-space floor is what protects the host when one of
+    those other tenants grows, and it wins whenever it is the smaller of the two.
+    """
+    budget = MOVIE_IMAGE_CACHE_MAX_BYTES
+    free = _movie_image_disk_free()
+    if free is None:
+        return budget
+    allowed = free + cached - MOVIE_IMAGE_CACHE_MIN_FREE_BYTES
+    return max(0, min(budget, allowed))
+
+
+def _movie_image_disk_free() -> int | None:
+    """Free bytes on the filesystem the covers live on, or ``None`` if unknown.
+
+    The cache directory is created lazily, so on a fresh install the path does
+    not exist yet - and a guard that measured "no disk usage report" as "no
+    limit" would let the cache grow before anyone had looked at the host. The
+    nearest existing parent is the same filesystem either way.
+    """
+    for candidate in (movie_image_cache_dir, *movie_image_cache_dir.parents):
+        try:
+            return shutil.disk_usage(candidate).free
+        except OSError:
+            continue
+    return None
+
+
+def _movie_image_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _prune_movie_image_cache() -> None:
+    """Evict least-recently-read covers until the cache is back inside budget."""
     try:
         movie_image_cache_dir.mkdir(parents=True, exist_ok=True)
-        files = list(movie_image_cache_dir.glob("*.bin"))
-        total = sum(path.stat().st_size for path in files if path.is_file())
-        if total <= MOVIE_IMAGE_CACHE_MAX_BYTES:
+        total, _entries = _movie_image_cache_usage(refresh=True)
+        budget = _movie_image_cache_budget(total)
+        if total <= budget:
             return
-        for path in sorted(files, key=lambda item: item.stat().st_mtime):
-            if total <= MOVIE_IMAGE_CACHE_MAX_BYTES:
+        paths = [path for path in movie_image_cache_dir.glob("*.bin") if path.is_file()]
+        for path in sorted(paths, key=_movie_image_mtime):
+            if total <= budget:
                 break
             try:
                 size = path.stat().st_size
@@ -1848,8 +1969,91 @@ def _prune_movie_image_cache() -> None:
                 total -= size
             except OSError:
                 continue
+        _movie_image_cache_usage(refresh=True)
     except OSError:
         return
+
+
+def _collect_movie_image_orphans(*, min_age_seconds: float | None = None) -> int:
+    """Delete cached covers no catalogue row can ask for again.
+
+    Re-matching a library rewrites its artwork URLs, and the bytes fetched under
+    the old ones stay on disk under keys nothing will ever read: a census found
+    them at half the cache. The reachable set is exactly what the image endpoints
+    can serve - each catalogue URL whole, and each one at every step of the
+    ladder - so anything else is unreachable by construction.
+
+    Returns the number of bytes reclaimed.
+    """
+    age = (
+        MOVIE_IMAGE_ORPHAN_MIN_AGE_SECONDS
+        if min_age_seconds is None
+        else float(min_age_seconds)
+    )
+    try:
+        urls = database.movie_artwork_urls()
+    except Exception as exc:
+        logger.warning("Movie image orphan sweep skipped: %s", exc)
+        return 0
+    reachable: set[str] = set()
+    for url in urls:
+        reachable.add(_movie_image_cache_key(_movie_image_request_key(url, 0)))
+        for width in MOVIE_IMAGE_WIDTHS:
+            reachable.add(_movie_image_cache_key(_movie_image_request_key(url, width)))
+    try:
+        paths = [path for path in movie_image_cache_dir.glob("*.bin") if path.is_file()]
+    except OSError:
+        return 0
+    deadline = time.time() - age
+    freed = 0
+    removed = 0
+    for path in paths:
+        if path.stem in reachable:
+            continue
+        try:
+            stat = path.stat()
+            if stat.st_mtime > deadline:
+                continue
+            size = stat.st_size
+            path.unlink(missing_ok=True)
+            path.with_suffix(".json").unlink(missing_ok=True)
+        except OSError:
+            continue
+        freed += size
+        removed += 1
+    if removed:
+        with movie_image_usage_guard:
+            movie_image_usage_state["measuredAt"] = 0.0
+        _movie_image_cache_usage(refresh=True)
+    try:
+        database.purge_expired_movie_image_failures()
+    except Exception as exc:
+        logger.warning("Movie image failure ledger sweep failed: %s", exc)
+    logger.info(
+        "Movie image cache sweep: dropped %s unreachable blobs (%.0f MB); %s reachable URLs, cache now %.0f MB",
+        removed,
+        freed / 1048576,
+        len(urls),
+        _movie_image_cache_usage()[0] / 1048576,
+    )
+    return freed
+
+
+def _note_movie_image_cache_write(size: int) -> None:
+    """Account for a fresh blob and prune only when the ceiling is in sight."""
+    free = _movie_image_disk_free()
+    short_on_space = free is not None and free < MOVIE_IMAGE_CACHE_MIN_FREE_BYTES
+    with movie_image_usage_guard:
+        state = movie_image_usage_state
+        state["bytes"] += size
+        state["entries"] += 1
+        measured_at = state["measuredAt"]
+        over = state["bytes"] > MOVIE_IMAGE_CACHE_MAX_BYTES
+    stale = not measured_at or (
+        time.monotonic() - measured_at > MOVIE_IMAGE_PRUNE_INTERVAL_SECONDS
+    )
+    if over or stale or short_on_space:
+        _prune_movie_image_cache()
 
 
 def _write_movie_image_cache(url: str, content: bytes, media_type: str, etag: str) -> None:
@@ -1868,7 +2072,7 @@ def _write_movie_image_cache(url: str, content: bytes, media_type: str, etag: st
         )
         os.replace(content_tmp, content_path)
         os.replace(metadata_tmp, metadata_path)
-        _prune_movie_image_cache()
+        _note_movie_image_cache_write(len(content))
     except OSError as exc:
         logger.info("Movie image cache write failed for %s: %s", url, exc)
     finally:
@@ -2533,6 +2737,125 @@ async def prewarm_drama_posters(rows: list[dict[str, Any]], *, limit: int = 6) -
             await prewarm_movie_image_at_width(row.get("poster_url"), MOVIE_WALL_IMAGE_WIDTH)
 
     await asyncio.gather(*(warm(row) for row in rows[:limit]))
+
+
+def _movie_row_cover_url(row: dict[str, Any]) -> str:
+    """The upstream URL a wall card for this row resolves to, mirroring the API."""
+    return str(row.get("poster_url") or row.get("backdrop_url") or "").strip()
+
+
+def _movie_row_cover_cached(row: dict[str, Any]) -> bool:
+    """Whether the exact blob the wall reads for this row is already on disk."""
+    url = _movie_row_cover_url(row)
+    if not url:
+        return True
+    cache_key = _movie_image_request_key(url, MOVIE_WALL_IMAGE_WIDTH)
+    content_path, _metadata_path = _movie_image_cache_paths(cache_key)
+    try:
+        return content_path.is_file()
+    except OSError:
+        return False
+
+
+def _movie_row_cover_failed(row: dict[str, Any]) -> bool:
+    url = _movie_row_cover_url(row)
+    if not url:
+        return False
+    return _movie_image_failure_remaining(
+        _movie_image_request_key(url, MOVIE_WALL_IMAGE_WIDTH)
+    ) > 0
+
+
+async def _warm_movie_covers(rows: list[dict[str, Any]]) -> None:
+    """Fetch a batch of covers at the width the wall reads, three at a time."""
+    semaphore = asyncio.Semaphore(MOVIE_IMAGE_WARM_CONCURRENCY)
+
+    async def warm(row: dict[str, Any]) -> None:
+        async with semaphore:
+            await prewarm_movie_image_at_width(
+                _movie_row_cover_url(row), MOVIE_WALL_IMAGE_WIDTH
+            )
+
+    await asyncio.gather(*(warm(row) for row in rows))
+
+
+async def _movie_cover_sweep_stop_reason() -> str | None:
+    """Why the sweeper should stand down, or ``None`` when the box is free.
+
+    The sweep is the lowest-priority thing this process does. A scan, a metadata
+    pass or a full disk all outrank it, and none of them can be resumed by the
+    sweep coming back later - it just picks up its cursor where it left off.
+    """
+    if movie_metadata_state["running"] or drama_metadata_state["running"]:
+        return "a metadata pass is running"
+    for source, state in scan_state["sources"].items():
+        if state.get("running"):
+            return f"library {source} is scanning"
+    cached, _entries = await asyncio.to_thread(_movie_image_cache_usage)
+    free = _movie_image_disk_free()
+    if free is not None and free < MOVIE_IMAGE_CACHE_MIN_FREE_BYTES:
+        return f"only {free / 1073741824:.1f} GB free"
+    if cached > _movie_image_cache_budget(cached):
+        return "the cache is at its ceiling"
+    return None
+
+
+async def sweep_movie_cover_cache() -> None:
+    """Walk the catalogue into the cache, in batches, for as long as the app runs.
+
+    Warming on request only answers what a phone has already asked for, so the
+    first visit to a library is always cold - and the first visit is the one the
+    user measures. This walks every catalogued cover in id order at the width the
+    wall reads, paced so a single-core host still answers requests, skipping what
+    is already cached and standing down whenever anything more important wants
+    the box. A finished pass is also the natural moment to drop the artwork that
+    re-matching left behind.
+    """
+    await asyncio.sleep(MOVIE_IMAGE_WARM_START_DELAY_SECONDS)
+    cursor = 0
+    while True:
+        try:
+            reason = await _movie_cover_sweep_stop_reason()
+            if reason:
+                logger.info("Movie cover sweep paused: %s", reason)
+                await asyncio.sleep(MOVIE_IMAGE_WARM_PAUSE_SECONDS)
+                continue
+            rows = await asyncio.to_thread(
+                database.movie_artwork_batch,
+                after_id=cursor,
+                limit=MOVIE_IMAGE_WARM_BATCH,
+            )
+            if not rows:
+                cursor = 0
+                await asyncio.to_thread(_collect_movie_image_orphans)
+                await asyncio.sleep(MOVIE_IMAGE_WARM_PAUSE_SECONDS)
+                continue
+            cursor = int(rows[-1]["id"])
+            cold = [
+                row
+                for row in rows
+                if not await asyncio.to_thread(_movie_row_cover_cached, row)
+            ]
+            if cold:
+                await _warm_movie_covers(cold)
+                failed = sum(1 for row in cold if _movie_row_cover_failed(row))
+                if failed * 2 > len(cold):
+                    # The artwork host is down: every cover in that batch just
+                    # spent its whole timeout. Sitting out stops the sweep from
+                    # burning the box on pictures that are not coming back.
+                    logger.warning(
+                        "Movie cover sweep backing off: %s of %s covers failed",
+                        failed,
+                        len(cold),
+                    )
+                    await asyncio.sleep(MOVIE_IMAGE_WARM_PAUSE_SECONDS)
+                    continue
+            await asyncio.sleep(MOVIE_IMAGE_WARM_IDLE_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Movie cover sweep failed: %s", exc)
+            await asyncio.sleep(MOVIE_IMAGE_WARM_PAUSE_SECONDS)
 
 
 @app.get("/api/feed")

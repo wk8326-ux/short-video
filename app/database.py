@@ -1771,6 +1771,78 @@ class LibraryDatabase:
             ).fetchall()
         return {str(row["url"]) for row in rows}
 
+    def purge_expired_movie_image_failures(self) -> int:
+        """Drop failure rows whose backoff window has already elapsed.
+
+        The ledger exists to stop the proxy re-asking a host that just refused
+        a picture; once the window lapses the row says nothing, and a library
+        that re-matches its artwork would otherwise leave one behind per URL it
+        will never use again.
+        """
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM movie_image_failures
+                WHERE expires_at <= CAST(strftime('%s', 'now') AS INTEGER)
+                """,
+            )
+            connection.commit()
+        return int(cursor.rowcount or 0)
+
+    def movie_artwork_urls(self) -> set[str]:
+        """Every artwork URL the image endpoints can still be asked to serve.
+
+        The complement of this set is what a cache sweep is allowed to delete:
+        a blob whose key no catalogue row can produce is unreachable by
+        construction, because the only way to mint a key is to look a URL up in
+        one of these three columns. Both cover columns are listed rather than
+        just the one the wall reads, since the detail page asks for the other.
+        """
+        urls: set[str] = set()
+        with self._lock, self._connect() as connection:
+            for table, column in (
+                ("movies", "poster_url"),
+                ("movies", "backdrop_url"),
+                ("dramas", "poster_url"),
+            ):
+                rows = connection.execute(
+                    f"""
+                    SELECT DISTINCT {column} AS url FROM {table}
+                    WHERE COALESCE({column}, '') <> ''
+                    """,  # noqa: S608 - table and column are literals above
+                ).fetchall()
+                urls.update(str(row["url"]) for row in rows)
+        return urls
+
+    def movie_artwork_batch(
+        self,
+        *,
+        after_id: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """The next slice of catalogued covers, in id order, for a cache sweep.
+
+        Paged by primary key rather than by URL so a sweep can be interrupted at
+        any point and resumed exactly where it stopped, and so a catalogue that
+        gains rows while it runs is picked up on the next pass instead of
+        invalidating the cursor.
+        """
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT m.id, m.poster_url, m.backdrop_url
+                FROM movies m
+                JOIN videos v ON v.id = m.video_id
+                WHERE v.active = 1 AND m.id > ?
+                  AND (COALESCE(m.poster_url, '') <> ''
+                       OR COALESCE(m.backdrop_url, '') <> '')
+                ORDER BY m.id
+                LIMIT ?
+                """,
+                (int(after_id), max(1, int(limit))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # A title counts as watched once the player reached the very end of it. The
     # margin absorbs the trailing seconds players routinely skip, and keeps a
     # finished title from parking itself at the front of "continue watching"

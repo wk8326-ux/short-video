@@ -244,19 +244,19 @@ def test_the_wall_asks_for_a_scaled_webp_instead_of_the_original(monkeypatch, tm
         )
         main.movie_image_client = upstream
 
-        scaled = client.get(f"/api/movies/{movie['id']}/poster?w=480", headers=headers)
+        scaled = client.get(f"/api/movies/{movie['id']}/poster?w=720", headers=headers)
         assert scaled.status_code == 200
         assert scaled.headers["content-type"] == "image/webp"
         with PIL.open(io.BytesIO(scaled.content)) as decoded:
-            assert decoded.width == 480
+            assert decoded.width == 720
             # The source here is portrait, so it is scaled and nothing else: a
-            # 480x320 answer would mean it had been cut into the wall's wide
+            # 720x480 answer would mean it had been cut into the wall's wide
             # frame, which is exactly what must not happen to a tall cover.
-            assert decoded.height == 720
+            assert decoded.height == 1080
 
         # A nearby request snaps onto the same ladder step instead of creating a
         # distinct cache entry for every phone density on the market.
-        same_step = client.get(f"/api/movies/{movie['id']}/poster?w=430", headers=headers)
+        same_step = client.get(f"/api/movies/{movie['id']}/poster?w=700", headers=headers)
         assert same_step.headers["x-movie-image-cache"] == "hit"
         assert same_step.content == scaled.content
 
@@ -293,7 +293,7 @@ def test_a_small_cover_is_never_upscaled(monkeypatch, tmp_path):
 def test_every_width_is_cut_from_the_one_copy_that_was_already_fetched(monkeypatch, tmp_path):
     """Opening a film must not open a second stream to the artwork host.
 
-    The wall draws a 480px WebP the moment a library page loads; tapping a card
+    The wall draws a 360px WebP the moment a library page loads; tapping a card
     then asks for the full-size cover. Deriving that cover from the byte-for-byte
     copy the wall just cached keeps the detail page instant, and it is the only
     path that survives the artwork hosts that drop a share of connections.
@@ -318,7 +318,7 @@ def test_every_width_is_cut_from_the_one_copy_that_was_already_fetched(monkeypat
         )
         main.movie_image_client = upstream
 
-        wall = client.get(f"/api/movies/{movie['id']}/poster?w=480", headers=headers)
+        wall = client.get(f"/api/movies/{movie['id']}/poster?w=360", headers=headers)
         assert wall.headers["x-movie-image-cache"] == "miss"
         assert len(upstream_calls) == 1
 
@@ -387,13 +387,13 @@ def test_a_wide_cover_is_cut_to_the_wall_frame(monkeypatch, tmp_path):
         movie, upstream = _seed_movie_with_cover(main, client, headers, cover)
         main.movie_image_client = upstream
 
-        cut = client.get(f"/api/movies/{movie['id']}/poster?w=480", headers=headers)
+        cut = client.get(f"/api/movies/{movie['id']}/poster?w=720", headers=headers)
         assert cut.status_code == 200
         assert cut.headers["content-type"] == "image/webp"
         with PIL.open(io.BytesIO(cut.content)) as decoded:
-            assert (decoded.width, decoded.height) == (480, 320)
+            assert (decoded.width, decoded.height) == (720, 480)
             pixels = decoded.convert("RGB").load()
-            for x, y in ((0, 160), (479, 160), (240, 160)):
+            for x, y in ((0, 240), (719, 240), (360, 240)):
                 red, green, blue = pixels[x, y]
                 assert green > 150, (x, y, pixels[x, y])
                 assert red < 90 and blue < 90, (x, y, pixels[x, y])
@@ -416,14 +416,14 @@ def test_a_resized_cover_is_cached_under_the_shape_it_was_rendered_in(monkeypatc
     main = _load_main(monkeypatch, tmp_path)
     url = "https://c0.jdbstatic.com/covers/ve/veyGnb.jpg"
 
-    current = main._movie_image_request_key(url, 480)
+    current = main._movie_image_request_key(url, 720)
     assert main.COVER_RENDER_TAG in current
     # The unused width is the pristine upstream file: it is shared by every
     # shape, so its own key must not move when the shape changes.
     assert main._movie_image_request_key(url, None) == url
 
     monkeypatch.setattr(main, "COVER_RENDER_TAG", "16x9")
-    assert main._movie_image_request_key(url, 480) != current
+    assert main._movie_image_request_key(url, 720) != current
 
     token_before = main._artwork_token(url)
     monkeypatch.setattr(main, "COVER_RENDER_TAG", "3x2-legacy")
@@ -462,7 +462,7 @@ async def test_a_cover_that_is_junk_under_an_image_header_is_never_served(
     )
 
     with pytest.raises(main.HTTPException) as failure:
-        await main._proxy_movie_image(poster_url, width=480)
+        await main._proxy_movie_image(poster_url, width=720)
     assert failure.value.status_code == 502
     assert calls == [poster_url]
     assert not list((tmp_path / "movie-images").glob("*.bin"))
@@ -482,7 +482,7 @@ async def test_a_cover_that_is_junk_under_an_image_header_is_never_served(
 
     # And the next scroll is answered from the memo, without the host.
     with pytest.raises(main.HTTPException) as repeat:
-        await main._proxy_movie_image(poster_url, width=480)
+        await main._proxy_movie_image(poster_url, width=720)
     assert repeat.value.status_code == 502
     assert calls == [poster_url]
     await main.movie_image_client.aclose()
@@ -513,13 +513,13 @@ def test_a_cover_cached_before_this_check_is_dropped_and_re_fetched(monkeypatch,
         )
         main.movie_image_client = upstream
 
-        poisoned = main._movie_image_request_key(movie["poster_url"], 480)
+        poisoned = main._movie_image_request_key(movie["poster_url"], 720)
         main._write_movie_image_cache(poisoned, junk, "image/jpeg", "poison")
 
-        cover = client.get(f"/api/movies/{movie['id']}/poster?w=480", headers=headers)
+        cover = client.get(f"/api/movies/{movie['id']}/poster?w=720", headers=headers)
         assert cover.status_code == 200
         assert cover.headers["content-type"] == "image/webp"
         assert cover.headers["x-movie-image-cache"] == "miss"
         assert len(calls) == 1
         with PIL.open(io.BytesIO(cover.content)) as decoded:
-            assert decoded.width == 480
+            assert decoded.width == 720

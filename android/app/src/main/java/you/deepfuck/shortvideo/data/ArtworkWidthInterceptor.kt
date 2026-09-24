@@ -35,8 +35,17 @@ internal class ArtworkWidthInterceptor : Interceptor {
     }
 }
 
-/** The widths the proxy is willing to cache, mirrored from its own ladder. */
-private val ARTWORK_WIDTH_STEPS = intArrayOf(240, 360, 480, 720, 1080, 1440)
+/**
+ * The widths the proxy is willing to cache, mirrored from its own ladder.
+ *
+ * Three steps, not six. A census of the proxy's cache found nothing reading the
+ * narrow entries and nothing at all asking for 1080, while each rung of the
+ * ladder is another full copy of the same picture kept on the server. The
+ * catalogue's artwork is mostly 800px wide, so 720 already fills a wall cell
+ * and 1080 covers a full-bleed hero; asking for 480 no longer fetches a
+ * smaller picture, it just snaps back up to the 720 entry.
+ */
+private val ARTWORK_WIDTH_STEPS = intArrayOf(360, 720, 1080)
 
 internal fun artworkWidthStep(width: Int): Int {
     for (step in ARTWORK_WIDTH_STEPS) {
