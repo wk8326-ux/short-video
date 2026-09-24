@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import threading
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -51,7 +52,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.32"
+APP_VERSION = "1.6.0-beta.33"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -214,6 +215,13 @@ MOVIE_IMAGE_WARM_CONCURRENCY = 3
 # one file onto a poster, so a handful of dead URLs can look like a dead host.
 # Backing off is therefore decided on the distinct pictures asked for, and only
 # once there are enough of them for the ratio to mean anything.
+#
+# The two ways a picture can fail are not the same news, and only one of them is
+# about the host. A 404 is the catalogue answering for itself - this artwork was
+# never there - and waiting will not conjure it, so a stretch of a library with
+# no backdrop behind it must not stall the pass five minutes at a time. A
+# timeout, a refused connection or a 5xx is the host saying "not now", and that
+# is what the backoff is for.
 MOVIE_IMAGE_WARM_MIN_SAMPLE = 6
 MOVIE_IMAGE_WARM_IDLE_SECONDS = 5
 MOVIE_IMAGE_WARM_PAUSE_SECONDS = 300
@@ -2782,23 +2790,42 @@ def _movie_url_cover_failed(url: str) -> bool:
     )
 
 
-async def _warm_movie_covers(rows: list[dict[str, Any]]) -> None:
+async def _warm_movie_cover(url: str) -> str:
+    """Fetch one cover and name how it went.
+
+    The caller has to be able to tell "this picture is not there" from "the host
+    will not answer", because only the second one is worth standing down for.
+    Reading that back out of the failure ledger afterwards cannot work: both
+    verdicts are filed the same way, so the ledger knows a cover failed without
+    knowing what that says about the host.
+    """
+    try:
+        await _proxy_movie_image(url, width=MOVIE_WALL_IMAGE_WIDTH)
+    except HTTPException as exc:
+        return "missing" if exc.status_code == 404 else "unavailable"
+    except Exception:  # noqa: BLE001 - anything else is the host's problem
+        return "unavailable"
+    return "warmed"
+
+
+async def _warm_movie_covers(rows: list[dict[str, Any]]) -> Counter[str]:
     """Fetch a batch of covers at the width the wall reads, three at a time.
 
     A batch of rows is not a batch of pictures - the shared index maps more than
     one file onto the same poster - so the work is collapsed to the distinct
     URLs first. The per-key lock would have deduplicated the downloads anyway,
-    but not the waiting.
+    but not the waiting. What comes back is the tally of how those pictures
+    went, which is the only honest basis for calling the host unwell.
     """
     semaphore = asyncio.Semaphore(MOVIE_IMAGE_WARM_CONCURRENCY)
     urls = {_movie_row_cover_url(row) for row in rows}
     urls.discard("")
 
-    async def warm(url: str) -> None:
+    async def warm(url: str) -> str:
         async with semaphore:
-            await prewarm_movie_image_at_width(url, MOVIE_WALL_IMAGE_WIDTH)
+            return await _warm_movie_cover(url)
 
-    await asyncio.gather(*(warm(url) for url in urls))
+    return Counter(await asyncio.gather(*(warm(url) for url in urls)))
 
 
 async def _movie_cover_sweep_stop_reason() -> str | None:
@@ -2864,20 +2891,23 @@ async def sweep_movie_cover_cache() -> None:
             # URLs used to look like an outage.
             retryable = [row for row in cold if not _movie_row_cover_failed(row)]
             if retryable:
-                await _warm_movie_covers(retryable)
-                attempted = {_movie_row_cover_url(row) for row in retryable}
-                failed = sum(1 for url in attempted if _movie_url_cover_failed(url))
+                outcomes = await _warm_movie_covers(retryable)
+                attempted = sum(outcomes.values())
+                unavailable = outcomes["unavailable"]
                 if (
-                    len(attempted) >= MOVIE_IMAGE_WARM_MIN_SAMPLE
-                    and failed * 2 > len(attempted)
+                    attempted >= MOVIE_IMAGE_WARM_MIN_SAMPLE
+                    and unavailable * 2 > attempted
                 ):
                     # The artwork host is down: these pictures each just spent
                     # their whole timeout. Sitting out stops the sweep from
-                    # burning the box on covers that are not coming back.
+                    # burning the box on covers that are not coming back. A
+                    # picture the catalogue does not have is not counted here -
+                    # it would otherwise let one library without backdrops
+                    # masquerade as an outage.
                     logger.warning(
-                        "Movie cover sweep backing off: %s of %s covers failed",
-                        failed,
-                        len(attempted),
+                        "Movie cover sweep backing off: %s of %s covers unavailable",
+                        unavailable,
+                        attempted,
                     )
                     await asyncio.sleep(MOVIE_IMAGE_WARM_PAUSE_SECONDS)
                     continue

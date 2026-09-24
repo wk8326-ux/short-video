@@ -16,6 +16,7 @@ import os
 import time
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from test_movie_groups import add_movie_source, index_movies
@@ -200,10 +201,10 @@ async def test_a_cover_already_on_disk_is_not_fetched_a_second_time(
 
     fetched: list[tuple[str, int]] = []
 
-    async def record(source_url, width):
+    async def record(source_url, width=None, if_none_match=None):
         fetched.append((source_url, width))
 
-    monkeypatch.setattr(main, "prewarm_movie_image_at_width", record)
+    monkeypatch.setattr(main, "_proxy_movie_image", record)
 
     batch = main.database.movie_artwork_batch(after_id=0, limit=50)
     cold = [row for row in batch if not main._movie_row_cover_cached(row)]
@@ -303,7 +304,7 @@ async def test_a_finished_pass_warms_every_cover_and_only_then_sweeps(
 
     fetched: list[tuple[str, int]] = []
 
-    async def record(source_url, width):
+    async def record(source_url, width=None, if_none_match=None):
         fetched.append((source_url, width))
 
     swept = {"count": 0}
@@ -312,7 +313,7 @@ async def test_a_finished_pass_warms_every_cover_and_only_then_sweeps(
         swept["count"] += 1
         return 0
 
-    monkeypatch.setattr(main, "prewarm_movie_image_at_width", record)
+    monkeypatch.setattr(main, "_proxy_movie_image", record)
     monkeypatch.setattr(main, "_collect_movie_image_orphans", sweep)
 
     task = asyncio.create_task(main.sweep_movie_cover_cache())
@@ -377,12 +378,18 @@ async def test_the_reachable_set_covers_both_cover_columns(monkeypatch, tmp_path
     assert main.database.movie_artwork_urls() == {COVER_A, COVER_B}
 
 
-async def drive_one_pass(main, monkeypatch, rows, *, refuses: set[str] = frozenset()):
+async def drive_one_pass(main, monkeypatch, rows, *, refuses: dict[str, int] | None = None):
     """Run the sweeper over exactly one batch and report what it asked for.
 
     Returns the URLs the sweeper fetched, plus whether it reached the end of the
     pass - which is the moment the backoff decision has already been taken.
+
+    ``refuses`` maps a URL to the status the proxy would answer for it, so a
+    test can say whether it is staging a host that is down (5xx) or a catalogue
+    that simply has no such picture (404). The stub files the failure the same
+    way the real proxy does, so the retry filter sees what production sees.
     """
+    refuses = refuses or {}
     monkeypatch.setattr(main, "MOVIE_IMAGE_WARM_START_DELAY_SECONDS", 0)
     monkeypatch.setattr(main, "MOVIE_IMAGE_WARM_IDLE_SECONDS", 0.01)
     monkeypatch.setattr(main, "MOVIE_IMAGE_WARM_PAUSE_SECONDS", 0.01)
@@ -400,14 +407,17 @@ async def drive_one_pass(main, monkeypatch, rows, *, refuses: set[str] = frozens
 
     asked: list[str] = []
 
-    async def record(source_url, width):
+    async def record(source_url, width=None, if_none_match=None):
         asked.append(source_url)
-        if source_url in refuses:
+        status = refuses.get(source_url)
+        if status:
             main._remember_movie_image_failure(
                 main._movie_image_request_key(source_url, width), source_url
             )
+            raise HTTPException(status_code=status, detail="stub upstream")
+        return None
 
-    monkeypatch.setattr(main, "prewarm_movie_image_at_width", record)
+    monkeypatch.setattr(main, "_proxy_movie_image", record)
 
     task = asyncio.create_task(main.sweep_movie_cover_cache())
     try:
@@ -436,10 +446,10 @@ async def test_a_batch_of_rows_is_collapsed_to_the_pictures_they_share(
     main = await boot(monkeypatch, tmp_path)
     asked: list[str] = []
 
-    async def record(source_url, width):
+    async def record(source_url, width=None, if_none_match=None):
         asked.append(source_url)
 
-    monkeypatch.setattr(main, "prewarm_movie_image_at_width", record)
+    monkeypatch.setattr(main, "_proxy_movie_image", record)
 
     rows = [
         {"id": index, "poster_url": COVER_A, "backdrop_url": ""} for index in range(3)
@@ -475,7 +485,7 @@ async def test_one_dead_picture_behind_many_rows_is_not_an_outage(
         for index, url in enumerate(alive, start=1)
     ]
 
-    asked = await drive_one_pass(main, monkeypatch, rows, refuses={dead})
+    asked = await drive_one_pass(main, monkeypatch, rows, refuses={dead: 502})
 
     assert set(asked) == {dead, *alive}
     assert "backing off" not in caplog.text
@@ -499,7 +509,7 @@ async def test_a_batch_of_pictures_that_all_refuse_does_pause_the_sweep(
         for index, url in enumerate(dead, start=1)
     ]
 
-    await drive_one_pass(main, monkeypatch, rows, refuses=set(dead))
+    await drive_one_pass(main, monkeypatch, rows, refuses={url: 502 for url in dead})
 
     assert "backing off" in caplog.text
 
@@ -518,9 +528,72 @@ async def test_a_handful_of_dead_pictures_is_not_yet_a_trend(
         for index, url in enumerate(dead, start=1)
     ]
 
-    await drive_one_pass(main, monkeypatch, rows, refuses=set(dead))
+    await drive_one_pass(main, monkeypatch, rows, refuses={url: 502 for url in dead})
 
     assert "backing off" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_picture_the_catalogue_does_not_have_is_not_an_outage(
+    monkeypatch, tmp_path, caplog
+):
+    """A 404 is the catalogue answering for itself; the host is fine.
+
+    Watched on the real box, the sweep kept pausing five minutes at a time over
+    a stretch of the library whose backdrops the shared index had never held:
+    every one of those pictures answered 404, which says nothing about whether
+    the host is up. Read as an outage, a library without backdrops behind part
+    of it stopped the warm for everything else too.
+    """
+    caplog.set_level("WARNING")
+    main = await boot(monkeypatch, tmp_path)
+    absent = [f"https://images.example/absent-{index}.jpg" for index in range(8)]
+    rows = [
+        {"id": index, "poster_url": url, "backdrop_url": ""}
+        for index, url in enumerate(absent, start=1)
+    ]
+    rows.append({"id": 99, "poster_url": COVER_A, "backdrop_url": ""})
+
+    await drive_one_pass(
+        main, monkeypatch, rows, refuses={url: 404 for url in absent}
+    )
+
+    assert "backing off" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_picture_the_proxy_already_ruled_on_is_not_asked_for_again(
+    monkeypatch, tmp_path
+):
+    """A cover with a live verdict is not evidence about the host right now.
+
+    Re-asking would spend its whole timeout a second time and then be counted as
+    a fresh failure, which is how a handful of dead URLs used to keep feeding
+    the outage ratio they were already part of.
+    """
+    main = await boot(monkeypatch, tmp_path)
+    ruled_on = "https://images.example/ruled-on.jpg"
+    rows = [
+        {"id": 1, "poster_url": ruled_on, "backdrop_url": ""},
+        {"id": 2, "poster_url": COVER_A, "backdrop_url": ""},
+    ]
+    main._remember_movie_image_failure(
+        main._movie_image_request_key(ruled_on, main.MOVIE_WALL_IMAGE_WIDTH),
+        ruled_on,
+    )
+    asked: list[str] = []
+
+    async def record(source_url, width=None, if_none_match=None):
+        asked.append(source_url)
+        return None
+
+    monkeypatch.setattr(main, "_proxy_movie_image", record)
+
+    await main._warm_movie_covers(
+        [row for row in rows if not main._movie_row_cover_failed(row)]
+    )
+
+    assert asked == [COVER_A]
 
 
 @pytest.mark.asyncio
