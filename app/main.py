@@ -51,7 +51,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.31"
+APP_VERSION = "1.6.0-beta.32"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -123,12 +123,17 @@ MOVIE_IMAGE_CACHE_SECONDS = 7 * 24 * 60 * 60
 MOVIE_IMAGE_USER_AGENT = "deepfuck-movie-library/1"
 # Phones read these covers straight off the origin, so the cache is the whole
 # first-frame budget: a phone that has to wait for a Pacific round trip sees the
-# poster arrive half a second late every time it scrolls back. The box beside the
-# library database holds 45 GB with about 14 GB spare, so the ceiling is six
-# gigabytes rather than two - a whole catalogue's worth of covers at both sizes
-# the app reads - and the free-space floor under it stays the real guard: the
-# cache may never be the reason the disk fills up.
-MOVIE_IMAGE_CACHE_MAX_BYTES = 6144 * 1024 * 1024
+# poster arrive half a second late every time it scrolls back.
+#
+# The ceiling is set by the working set, and the working set was measured rather
+# than guessed: each of the catalogue's 35308 distinct artwork URLs costs an
+# untouched original (mean 155 KB) plus the wall's scaled copy (mean 85 KB), so
+# covering all of them is 8.07 GB. A ceiling under that does not make the cache
+# smaller, it makes it churn - the pass evicts the covers it warmed first and
+# re-fetches them next time round. The ceiling therefore sits above the working
+# set, and the free-space floor below stays the real guard: the cache may never
+# be the reason the disk fills up.
+MOVIE_IMAGE_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024
 # Below this the cache stops growing and starts evicting, whatever the ceiling
 # says. The database, the app and Docker all live on the same 45 GB root, so the
 # ceiling alone is not enough to keep the host healthy.
@@ -205,6 +210,11 @@ MOVIE_WALL_PREWARM_MAX_ROWS = 48
 # one-core host still answers requests while it runs.
 MOVIE_IMAGE_WARM_BATCH = 40
 MOVIE_IMAGE_WARM_CONCURRENCY = 3
+# A batch of forty rows is not forty pictures: the shared index maps more than
+# one file onto a poster, so a handful of dead URLs can look like a dead host.
+# Backing off is therefore decided on the distinct pictures asked for, and only
+# once there are enough of them for the ratio to mean anything.
+MOVIE_IMAGE_WARM_MIN_SAMPLE = 6
 MOVIE_IMAGE_WARM_IDLE_SECONDS = 5
 MOVIE_IMAGE_WARM_PAUSE_SECONDS = 300
 MOVIE_IMAGE_WARM_START_DELAY_SECONDS = 30
@@ -2759,24 +2769,36 @@ def _movie_row_cover_cached(row: dict[str, Any]) -> bool:
 
 def _movie_row_cover_failed(row: dict[str, Any]) -> bool:
     url = _movie_row_cover_url(row)
-    if not url:
-        return False
-    return _movie_image_failure_remaining(
-        _movie_image_request_key(url, MOVIE_WALL_IMAGE_WIDTH)
-    ) > 0
+    return bool(url) and _movie_url_cover_failed(url)
+
+
+def _movie_url_cover_failed(url: str) -> bool:
+    """Whether the proxy already has a live verdict against this picture."""
+    return (
+        _movie_image_failure_remaining(
+            _movie_image_request_key(url, MOVIE_WALL_IMAGE_WIDTH)
+        )
+        > 0
+    )
 
 
 async def _warm_movie_covers(rows: list[dict[str, Any]]) -> None:
-    """Fetch a batch of covers at the width the wall reads, three at a time."""
+    """Fetch a batch of covers at the width the wall reads, three at a time.
+
+    A batch of rows is not a batch of pictures - the shared index maps more than
+    one file onto the same poster - so the work is collapsed to the distinct
+    URLs first. The per-key lock would have deduplicated the downloads anyway,
+    but not the waiting.
+    """
     semaphore = asyncio.Semaphore(MOVIE_IMAGE_WARM_CONCURRENCY)
+    urls = {_movie_row_cover_url(row) for row in rows}
+    urls.discard("")
 
-    async def warm(row: dict[str, Any]) -> None:
+    async def warm(url: str) -> None:
         async with semaphore:
-            await prewarm_movie_image_at_width(
-                _movie_row_cover_url(row), MOVIE_WALL_IMAGE_WIDTH
-            )
+            await prewarm_movie_image_at_width(url, MOVIE_WALL_IMAGE_WIDTH)
 
-    await asyncio.gather(*(warm(row) for row in rows))
+    await asyncio.gather(*(warm(url) for url in urls))
 
 
 async def _movie_cover_sweep_stop_reason() -> str | None:
@@ -2836,17 +2858,26 @@ async def sweep_movie_cover_cache() -> None:
                 for row in rows
                 if not await asyncio.to_thread(_movie_row_cover_cached, row)
             ]
-            if cold:
-                await _warm_movie_covers(cold)
-                failed = sum(1 for row in cold if _movie_row_cover_failed(row))
-                if failed * 2 > len(cold):
-                    # The artwork host is down: every cover in that batch just
-                    # spent its whole timeout. Sitting out stops the sweep from
-                    # burning the box on pictures that are not coming back.
+            # A cover the proxy has already ruled on is not evidence about the
+            # host now: it would spend its whole timeout a second time and then
+            # be counted as a fresh failure, which is how a handful of dead
+            # URLs used to look like an outage.
+            retryable = [row for row in cold if not _movie_row_cover_failed(row)]
+            if retryable:
+                await _warm_movie_covers(retryable)
+                attempted = {_movie_row_cover_url(row) for row in retryable}
+                failed = sum(1 for url in attempted if _movie_url_cover_failed(url))
+                if (
+                    len(attempted) >= MOVIE_IMAGE_WARM_MIN_SAMPLE
+                    and failed * 2 > len(attempted)
+                ):
+                    # The artwork host is down: these pictures each just spent
+                    # their whole timeout. Sitting out stops the sweep from
+                    # burning the box on covers that are not coming back.
                     logger.warning(
                         "Movie cover sweep backing off: %s of %s covers failed",
                         failed,
-                        len(cold),
+                        len(attempted),
                     )
                     await asyncio.sleep(MOVIE_IMAGE_WARM_PAUSE_SECONDS)
                     continue

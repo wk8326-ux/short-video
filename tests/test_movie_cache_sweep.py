@@ -377,6 +377,152 @@ async def test_the_reachable_set_covers_both_cover_columns(monkeypatch, tmp_path
     assert main.database.movie_artwork_urls() == {COVER_A, COVER_B}
 
 
+async def drive_one_pass(main, monkeypatch, rows, *, refuses: set[str] = frozenset()):
+    """Run the sweeper over exactly one batch and report what it asked for.
+
+    Returns the URLs the sweeper fetched, plus whether it reached the end of the
+    pass - which is the moment the backoff decision has already been taken.
+    """
+    monkeypatch.setattr(main, "MOVIE_IMAGE_WARM_START_DELAY_SECONDS", 0)
+    monkeypatch.setattr(main, "MOVIE_IMAGE_WARM_IDLE_SECONDS", 0.01)
+    monkeypatch.setattr(main, "MOVIE_IMAGE_WARM_PAUSE_SECONDS", 0.01)
+    monkeypatch.setattr(main, "MOVIE_IMAGE_WARM_BATCH", max(1, len(rows)))
+    monkeypatch.setattr(main, "MOVIE_IMAGE_CACHE_MIN_FREE_BYTES", 0)
+
+    def batch(*, after_id, limit):
+        return rows if not after_id else []
+
+    finished: list[int] = []
+    monkeypatch.setattr(main.database, "movie_artwork_batch", batch)
+    monkeypatch.setattr(
+        main, "_collect_movie_image_orphans", lambda **kwargs: finished.append(1) or 0
+    )
+
+    asked: list[str] = []
+
+    async def record(source_url, width):
+        asked.append(source_url)
+        if source_url in refuses:
+            main._remember_movie_image_failure(
+                main._movie_image_request_key(source_url, width), source_url
+            )
+
+    monkeypatch.setattr(main, "prewarm_movie_image_at_width", record)
+
+    task = asyncio.create_task(main.sweep_movie_cover_cache())
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not finished:
+            await asyncio.sleep(0.02)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert finished, "the sweeper never reached the end of its pass"
+    return asked
+
+
+@pytest.mark.asyncio
+async def test_a_batch_of_rows_is_collapsed_to_the_pictures_they_share(
+    monkeypatch, tmp_path
+):
+    """Five catalogue rows can point at one poster; that is one download.
+
+    The shared index maps more than one file onto a poster, so a batch of forty
+    rows is routinely a dozen pictures. Warming row by row would fetch the same
+    picture repeatedly - and, worse, count it as several verdicts when the host
+    refuses that one picture.
+    """
+    main = await boot(monkeypatch, tmp_path)
+    asked: list[str] = []
+
+    async def record(source_url, width):
+        asked.append(source_url)
+
+    monkeypatch.setattr(main, "prewarm_movie_image_at_width", record)
+
+    rows = [
+        {"id": index, "poster_url": COVER_A, "backdrop_url": ""} for index in range(3)
+    ]
+    rows.append({"id": 9, "poster_url": "", "backdrop_url": COVER_B})
+    # A row with neither column has nothing to warm, and must not be asked for.
+    rows.append({"id": 10, "poster_url": "", "backdrop_url": ""})
+
+    await main._warm_movie_covers(rows)
+
+    assert sorted(asked) == sorted([COVER_A, COVER_B])
+
+
+@pytest.mark.asyncio
+async def test_one_dead_picture_behind_many_rows_is_not_an_outage(
+    monkeypatch, tmp_path, caplog
+):
+    """A refused picture is one verdict, however many rows point at it.
+
+    Counting rows is how a working sweep used to pause itself: six rows sharing
+    one dead poster is 86% of a batch and 20% of its pictures, and only the
+    second number says anything about the artwork host.
+    """
+    caplog.set_level("WARNING")
+    main = await boot(monkeypatch, tmp_path)
+    dead = "https://images.example/dead.jpg"
+    alive = [f"https://images.example/alive-{index}.jpg" for index in range(4)]
+    rows = [
+        {"id": index, "poster_url": dead, "backdrop_url": ""} for index in range(1, 7)
+    ]
+    rows += [
+        {"id": 6 + index, "poster_url": url, "backdrop_url": ""}
+        for index, url in enumerate(alive, start=1)
+    ]
+
+    asked = await drive_one_pass(main, monkeypatch, rows, refuses={dead})
+
+    assert set(asked) == {dead, *alive}
+    assert "backing off" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_batch_of_pictures_that_all_refuse_does_pause_the_sweep(
+    monkeypatch, tmp_path, caplog
+):
+    """The one case the backoff is for: the host is refusing everything.
+
+    Every URL in the batch being its own dead picture is the signal a dead
+    artwork host actually looks like, and it has to be enough of a sample to
+    mean something - three rows is a batch, not a trend.
+    """
+    caplog.set_level("WARNING")
+    main = await boot(monkeypatch, tmp_path)
+    dead = [f"https://images.example/dead-{index}.jpg" for index in range(6)]
+    rows = [
+        {"id": index, "poster_url": url, "backdrop_url": ""}
+        for index, url in enumerate(dead, start=1)
+    ]
+
+    await drive_one_pass(main, monkeypatch, rows, refuses=set(dead))
+
+    assert "backing off" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_handful_of_dead_pictures_is_not_yet_a_trend(
+    monkeypatch, tmp_path, caplog
+):
+    """Below the sample floor, a total failure is still not called an outage."""
+    caplog.set_level("WARNING")
+    main = await boot(monkeypatch, tmp_path)
+    assert main.MOVIE_IMAGE_WARM_MIN_SAMPLE > 3
+    dead = [f"https://images.example/dead-{index}.jpg" for index in range(3)]
+    rows = [
+        {"id": index, "poster_url": url, "backdrop_url": ""}
+        for index, url in enumerate(dead, start=1)
+    ]
+
+    await drive_one_pass(main, monkeypatch, rows, refuses=set(dead))
+
+    assert "backing off" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_the_sweeper_is_started_by_the_app_itself(monkeypatch, tmp_path):
     """Nothing else asks for a warm pass, so the lifespan has to start one."""
