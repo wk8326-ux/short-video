@@ -8,14 +8,21 @@ services:
       - "127.0.0.1:18083:8080"
     volumes:
       - ./data:/data
-    cpus: 0.35
+    # The host is one core and stays idle (load ~0.15) while the app is capped
+    # at 0.35 of it, so the quota bound the app rather than the box: a play
+    # request arriving while the artwork sweep was mid-decode had no CPU left
+    # to run on, which is where the first-frame regression came from. 0.6 still
+    # leaves the host half a core for nginx, sub2api and the agent.
+    cpus: 0.6
     # The catalogue itself now lives in a SQLite mirror on disk, so a movie
     # pass no longer grows with the library: the walk holds one page and the
     # mirror is read a key at a time. What remains is the scanner, the artwork
     # downscaler and the ASMR indexes, which is why the cap is a bound on those
     # rather than on the catalogue. 256m is what the old in-memory folding
-    # needed for the catalogue alone.
-    mem_limit: 384m
+    # needed for the catalogue alone. 384m left the artwork downscaler within
+    # a decode of its ceiling (313m of 384m in steady state); the host has
+    # 3.9G available, so the doubling costs nothing.
+    mem_limit: 768m
     pids_limit: 100
     read_only: true
     tmpfs:
