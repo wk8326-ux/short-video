@@ -108,6 +108,7 @@ internal fun DramaScreen(
     onRetry: () -> Unit,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
+    onVolume: (Float) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
@@ -128,6 +129,7 @@ internal fun DramaScreen(
             fullscreen = fullscreen,
             onTogglePlayback = onTogglePlayback,
             onMuted = onMuted,
+            onVolume = onVolume,
             onSeek = onSeek,
             onSeekBy = onSeekBy,
             onFullscreen = onFullscreen,
@@ -236,13 +238,7 @@ private fun DramaWall(
     onOpenGroup: (String) -> Unit,
     onRetry: () -> Unit,
 ) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Canvas)
-            .statusBarsPadding()
-            .padding(top = 62.dp),
-    ) {
+    AppScreenScaffold {
         when {
             state.dramaGroups.isEmpty() && state.dramaError != null -> DramaWallState(
                 title = state.dramaError,
@@ -309,39 +305,12 @@ private fun DramaGroupSection(
     onOpenGroup: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 12.dp)) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(ControlShape)
-                .clickable(onClick = onOpenGroup)
-                .padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                Modifier
-                    .width(3.dp)
-                    .height(15.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Accent),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                group.name,
-                color = TextPrimary,
-                fontWeight = FontWeight.SemiBold,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                "${group.items.size}/${group.total}",
-                color = TextFaint,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-            )
-        }
+        SectionHeader(
+            title = group.name,
+            trailing = "${group.items.size}/${group.total}",
+            modifier = Modifier.padding(bottom = 4.dp),
+            onClick = onOpenGroup,
+        )
         // Rows are laid out by hand: a nested lazy grid inside this lazy column
         // would fight the parent for scroll ownership.
         group.items.chunked(3).forEach { row ->
@@ -420,13 +389,7 @@ private fun DramaLibraryPage(
         hasMore = hasMore,
         onLoadMore = onLoadMore,
     )
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Canvas)
-            .statusBarsPadding()
-            .padding(top = 62.dp),
-    ) {
+    AppScreenScaffold {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -468,7 +431,7 @@ private fun DramaLibraryPage(
                 onAction = {},
             )
             else -> LazyVerticalGrid(
-                columns = GridCells.Adaptive(112.dp),
+                columns = GridCells.Adaptive(UiDimens.DramaGridMin),
                 state = gridState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 34.dp),
@@ -525,33 +488,11 @@ private fun DramaRecentStrip(
     onResume: (DramaItem) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 12.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                Modifier
-                    .width(3.dp)
-                    .height(15.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Accent),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                "最近播放",
-                color = TextPrimary,
-                fontWeight = FontWeight.SemiBold,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                "${items.size} 部",
-                color = TextFaint,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-            )
-        }
+        SectionHeader(
+            title = "最近播放",
+            trailing = "${items.size} 部",
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
         LazyRow(
             contentPadding = PaddingValues(horizontal = 13.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -564,14 +505,14 @@ private fun DramaRecentStrip(
                         .semantics { contentDescription = "继续观看 ${drama.title}" },
                     color = Color.Transparent,
                     contentColor = TextPrimary,
-                    shape = RoundedCornerShape(12.dp),
+                    shape = MediaCardShape,
                 ) {
                     Column {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .aspectRatio(2f / 3f)
-                                .clip(RoundedCornerShape(12.dp))
+                                .clip(MediaCardShape)
                                 .background(Raised),
                             contentAlignment = Alignment.Center,
                         ) {
@@ -635,14 +576,14 @@ private fun DramaCard(drama: DramaItem, imageLoader: ImageLoader, onClick: () ->
             .semantics { contentDescription = "${drama.title}，共 ${drama.episodeCount} 集" },
         color = Color.Transparent,
         contentColor = TextPrimary,
-        shape = RoundedCornerShape(12.dp),
+        shape = MediaCardShape,
     ) {
         Column {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(2f / 3f)
-                    .clip(RoundedCornerShape(12.dp))
+                    .clip(MediaCardShape)
                     .background(Raised),
                 contentAlignment = Alignment.Center,
             ) {
@@ -701,7 +642,7 @@ private fun DramaCard(drama: DramaItem, imageLoader: ImageLoader, onClick: () ->
 @Composable
 private fun DramaSkeletonGrid() {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(112.dp),
+        columns = GridCells.Adaptive(UiDimens.DramaGridMin),
         modifier = Modifier.fillMaxSize(),
         userScrollEnabled = false,
         contentPadding = PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 34.dp),
@@ -710,7 +651,7 @@ private fun DramaSkeletonGrid() {
     ) {
         items(12) {
             Column {
-                Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(12.dp)).background(Raised))
+                Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(MediaCardShape).background(Raised))
                 Spacer(Modifier.height(8.dp))
                 Box(Modifier.fillMaxWidth(0.8f).height(12.dp).clip(RoundedCornerShape(3.dp)).background(RaisedStrong))
                 Spacer(Modifier.height(6.dp))
@@ -872,15 +813,7 @@ private fun DramaDetailPage(
 
 @Composable
 private fun DramaMetaChip(label: String) {
-    Text(
-        label,
-        color = TextSecondary,
-        style = MaterialTheme.typography.labelSmall,
-        maxLines = 1,
-        modifier = Modifier
-            .glassSurface(shape = RoundedCornerShape(999.dp), fill = GlassFillSoft)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-    )
+    MetadataChip(label = label)
 }
 
 @Composable
@@ -902,7 +835,7 @@ private fun EpisodePicker(
                             .semantics { contentDescription = "第 ${episode.position} 集" },
                         color = if (active) Accent.copy(alpha = 0.86f) else GlassFillSoft,
                         contentColor = if (active) Color.White else TextSecondary,
-                        shape = RoundedCornerShape(10.dp),
+                        shape = ControlShape,
                         border = androidx.compose.foundation.BorderStroke(
                             1.dp,
                             if (active) Color.Transparent else GlassLine,

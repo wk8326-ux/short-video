@@ -160,6 +160,15 @@ async def test_each_series_returns_once_with_the_episode_to_resume(
 
     with TestClient(main.app) as client:
         headers = headers_for(main)
+        connection = sqlite3.connect(main.database.path)
+        try:
+            connection.execute(
+                "UPDATE videos SET thumb = ? WHERE id = ?",
+                ("https://alist.example/thumbs/swap-third.jpg", swap_third),
+            )
+            connection.commit()
+        finally:
+            connection.close()
         client.post(
             "/api/progress",
             json={"videoId": swap_second, "positionMs": 60_000, "durationMs": 600_000},
@@ -192,6 +201,7 @@ async def test_each_series_returns_once_with_the_episode_to_resume(
     assert body["items"][0]["resumePositionMs"] == 30_000
     assert body["items"][1]["episodeId"] == desert_first
     assert body["items"][0]["episodeCount"] == 3
+    assert body["items"][0]["posterUrl"] == f"/api/videos/{swap_third}/poster"
 
 
 @pytest.mark.asyncio

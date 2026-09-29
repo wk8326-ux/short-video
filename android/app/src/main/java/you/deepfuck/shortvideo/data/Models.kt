@@ -1,6 +1,14 @@
 package you.deepfuck.shortvideo.data
 
+import java.time.LocalDate
 import org.json.JSONObject
+
+internal fun normalizeMovieReleaseDate(value: String?): String? {
+    val text = value?.trim().orEmpty()
+    if (text.isEmpty()) return null
+    val datePart = text.take(10)
+    return runCatching { LocalDate.parse(datePart).toString() }.getOrElse { text }
+}
 
 enum class MediaSurface(val apiValue: String, val label: String) {
     SHORT("short", "短视频"),
@@ -161,9 +169,10 @@ data class MovieItem(
     val format: String? = null,
     val metadataProvider: String? = null,
     val releaseDate: String? = null,
-    val genres: List<String> = emptyList(),
-    val performers: List<String> = emptyList(),
-    val studio: String? = null,
+    val yearEntity: MovieMetadataEntity? = null,
+    val studioEntity: MovieMetadataEntity? = null,
+    val genreEntities: List<MovieMetadataEntity> = emptyList(),
+    val performerEntities: List<MovieMetadataEntity> = emptyList(),
     val resumePositionMs: Long = 0L,
     /** Whether this title sits in the account's favourites list. */
     val favorite: Boolean = false,
@@ -211,16 +220,53 @@ data class MovieItem(
             size = value.optLong("size"),
             format = value.optNullableString("format"),
             metadataProvider = value.optNullableString("metadataProvider"),
-            releaseDate = value.optNullableString("releaseDate"),
-            genres = value.optStringList("genres"),
-            performers = value.optStringList("performers"),
-            studio = value.optNullableString("studio"),
+            releaseDate = normalizeMovieReleaseDate(value.optNullableString("releaseDate")),
+            yearEntity = value.optJSONObject("yearEntity")?.let(MovieMetadataEntity::fromJson),
+            studioEntity = value.optJSONObject("studioEntity")?.let(MovieMetadataEntity::fromJson),
+            genreEntities = value.optObjectList("genreEntities", MovieMetadataEntity::fromJson),
+            performerEntities = value.optObjectList("performerEntities", MovieMetadataEntity::fromJson),
             // "Continue watching" is answered by the server, so the resume
             // point has to survive the trip; the local store is merged on top.
             resumePositionMs = value.optLong("resumePositionMs"),
             // Only the detail response carries this; every other list leaves it
             // false, which is exactly what the wall needs to draw no heart.
             favorite = value.optBoolean("favorite"),
+        )
+    }
+}
+
+data class MovieMetadataEntity(
+    val id: Long,
+    val type: String,
+    val name: String,
+    val movieCount: Int,
+) {
+    companion object {
+        fun fromJson(value: JSONObject): MovieMetadataEntity = MovieMetadataEntity(
+            id = value.getLong("id"),
+            type = value.optString("type"),
+            name = value.optString("name"),
+            movieCount = value.optInt("movieCount"),
+        )
+    }
+}
+
+data class MovieMetadataPage(
+    val entity: MovieMetadataEntity,
+    val items: List<MovieItem>,
+    val total: Int,
+    val nextOffset: Int?,
+) {
+    companion object {
+        fun fromJson(value: JSONObject): MovieMetadataPage = MovieMetadataPage(
+            entity = MovieMetadataEntity.fromJson(value.getJSONObject("entity")),
+            items = value.optObjectList("items", MovieItem::fromJson),
+            total = value.optInt("total"),
+            nextOffset = if (value.has("nextOffset") && !value.isNull("nextOffset")) {
+                value.optInt("nextOffset")
+            } else {
+                null
+            },
         )
     }
 }
@@ -317,7 +363,7 @@ data class DramaItem(
     val categoryLabel: String
         get() = category?.trim()?.takeIf { it.isNotEmpty() } ?: "短剧"
 
-    val hasPoster: Boolean get() = posterUrl != null
+    val hasPoster: Boolean get() = posterUrl?.isNotBlank() == true
 
     companion object {
         fun fromJson(value: JSONObject): DramaItem = DramaItem(
@@ -336,6 +382,22 @@ data class DramaItem(
            resumeEpisodeId = value.optNullableLong("episodeId"),
        )
     }
+}
+
+/** Keep matched recent-watch items connected to the server poster proxy. */
+internal fun DramaItem.normalizedPosterPath(): String? {
+    val supplied = posterUrl?.trim()?.takeIf { it.isNotEmpty() }
+    if (id.isBlank()) return supplied
+    if (matchStatus.equals("matched", ignoreCase = true)) {
+        // Metadata artwork must go through the server proxy. A legacy payload
+        // may contain the upstream CDN URL, which is not reachable from the
+        // phone and may still be encrypted. Keep the episode thumbnail only
+        // when it is the explicit no-metadata fallback route.
+        if (supplied == null || !supplied.startsWith("/api/videos/")) {
+            return "/api/dramas/$id/poster"
+        }
+    }
+    return supplied
 }
 
 /**

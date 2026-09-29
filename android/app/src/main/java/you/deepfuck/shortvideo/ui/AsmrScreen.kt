@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -120,6 +121,7 @@ internal fun AsmrScreen(
     onClose: () -> Unit,
     onToggle: () -> Unit,
     onMuted: (Boolean) -> Unit,
+    onVolume: (Float) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onVideoBackgroundPlayback: (Boolean) -> Unit,
@@ -136,7 +138,7 @@ internal fun AsmrScreen(
                 .statusBarsPadding()
                 .navigationBarsPadding(),
         ) {
-            Spacer(Modifier.height(52.dp))
+            AppTopContentInset()
             Box(Modifier.weight(1f)) {
                 val selectedAuthor = state.selectedAuthor
                 if (selectedAuthor == null) {
@@ -196,6 +198,7 @@ internal fun AsmrScreen(
                 onClose = onClose,
                 onToggle = onToggle,
                 onMuted = onMuted,
+                onVolume = onVolume,
                 onSeek = onSeek,
                 onSeekBy = onSeekBy,
                 onBackgroundPlayback = onVideoBackgroundPlayback,
@@ -239,7 +242,7 @@ private fun AuthorLibrary(
         if (safe != current) listState.scrollToItem(safe.index, safe.offset)
     }
     Column(Modifier.fillMaxSize()) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 18.dp)) {
+        Column(Modifier.padding(horizontal = UiDimens.ScreenHorizontal, vertical = 18.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -303,8 +306,9 @@ private fun AuthorLibrary(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .heightIn(min = UiDimens.TouchTarget)
                             .clickable { onAuthor(author.name) }
-                            .padding(vertical = 14.dp),
+                            .padding(vertical = 10.dp),
                     ) {
                         Text(
                             author.name,
@@ -426,7 +430,7 @@ private fun AuthorMedia(
     }
     Column(Modifier.fillMaxSize()) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 10.dp),
+            Modifier.fillMaxWidth().padding(horizontal = UiDimens.CompactHorizontal, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             GlassIconButton(
@@ -491,7 +495,11 @@ private fun AuthorMedia(
                 items(filtered, key = MediaEntry::id) { entry ->
                     val active = state.nowPlaying?.id == entry.id && player.mediaId == entry.id
                     Row(
-                        modifier = Modifier.fillMaxWidth().clickable { onPlay(entry) }.padding(vertical = 14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = UiDimens.TouchTarget)
+                            .clickable { onPlay(entry) }
+                            .padding(vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(
@@ -666,6 +674,7 @@ private fun ExpandedAsmrPlayer(
     onClose: () -> Unit,
     onToggle: () -> Unit,
     onMuted: (Boolean) -> Unit,
+    onVolume: (Float) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onBackgroundPlayback: (Boolean) -> Unit,
@@ -722,7 +731,12 @@ private fun ExpandedAsmrPlayer(
         PlayerHost(exoPlayer, Modifier.fillMaxSize())
         BufferSpinner(player.isBuffering)
 
-        if (controlsVisible) {
+        if (!pipMode) {
+            PlayerSideControls(
+                volume = player.volume,
+                onVolumeChanged = onVolume,
+                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -773,14 +787,18 @@ private fun ExpandedAsmrPlayer(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (!fullscreen) {
-                        GlassIconButton(
-                            label = if (player.playWhenReady) "暂停" else "播放",
-                            onClick = onToggle,
-                        ) {
-                            Icon(
-                                if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                                contentDescription = null,
-                            )
+                        if (player.isBuffering) {
+                            Spacer(Modifier.size(48.dp))
+                        } else {
+                            GlassIconButton(
+                                label = if (player.playWhenReady) "暂停" else "播放",
+                                onClick = onToggle,
+                            ) {
+                                Icon(
+                                    if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                    contentDescription = null,
+                                )
+                            }
                         }
                     }
                     FineProgressBar(
@@ -841,7 +859,7 @@ private fun ExpandedAsmrPlayer(
             }
         }
 
-        if (fullscreen && controlsVisible) {
+        if (fullscreen && controlsVisible && !player.isBuffering) {
             Row(
                 modifier = Modifier.align(Alignment.Center),
                 horizontalArrangement = Arrangement.spacedBy(36.dp),

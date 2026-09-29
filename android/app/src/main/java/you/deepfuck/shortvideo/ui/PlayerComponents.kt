@@ -4,6 +4,9 @@
 
 package you.deepfuck.shortvideo.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Color as AndroidColor
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -14,17 +17,31 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.VolumeUp
+import androidx.compose.material.icons.outlined.Brightness6
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -33,17 +50,20 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import you.deepfuck.shortvideo.media.PlayerSnapshot
 
@@ -111,6 +131,143 @@ internal fun DelayedSpinner(visible: Boolean, modifier: Modifier = Modifier) {
         )
     }
 }
+
+@Composable
+internal fun PlayerSideControls(
+    volume: Float,
+    onVolumeChanged: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val window = remember(context) { findActivityWindow(context) }
+    var brightness by remember(window) { mutableFloatStateOf(windowBrightness(window)) }
+    var feedback by remember { mutableStateOf<SideControlFeedback?>(null) }
+
+    LaunchedEffect(feedback) {
+        if (feedback != null) {
+            delay(900)
+            feedback = null
+        }
+    }
+
+    Box(modifier) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            VerticalPlayerControl(
+                label = "亮度",
+                value = brightness,
+                onValueChanged = { value ->
+                    brightness = value
+                    window?.let { target ->
+                        target.attributes = target.attributes.apply { screenBrightness = value }
+                    }
+                    feedback = SideControlFeedback(SideControl.BRIGHTNESS, value)
+                },
+            )
+            VerticalPlayerControl(
+                label = "音量",
+                value = volume,
+                onValueChanged = { value ->
+                    onVolumeChanged(value)
+                    feedback = SideControlFeedback(SideControl.VOLUME, value)
+                },
+            )
+        }
+        feedback?.let { current ->
+            val alignment = if (current.side == SideControl.BRIGHTNESS) {
+                Alignment.CenterStart
+            } else {
+                Alignment.CenterEnd
+            }
+            Column(
+                modifier = Modifier
+                    .align(alignment)
+                    .padding(horizontal = 14.dp)
+                    .width(44.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Icon(
+                    if (current.side == SideControl.BRIGHTNESS) {
+                        androidx.compose.material.icons.Icons.Outlined.Brightness6
+                    } else {
+                        androidx.compose.material.icons.Icons.AutoMirrored.Outlined.VolumeUp
+                    },
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp),
+                )
+                Text(
+                    "${(current.value * 100).roundToInt()}%",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.width(44.dp),
+                )
+            }
+        }
+    }
+}
+
+private enum class SideControl {
+    BRIGHTNESS,
+    VOLUME,
+}
+
+private data class SideControlFeedback(
+    val side: SideControl,
+    val value: Float,
+)
+
+@Composable
+private fun VerticalPlayerControl(
+    label: String,
+    value: Float,
+    onValueChanged: (Float) -> Unit,
+) {
+    val latestValue = rememberUpdatedState(value.coerceIn(0f, 1f))
+    val latestOnValueChanged = rememberUpdatedState(onValueChanged)
+    var gestureValue by remember { mutableFloatStateOf(value.coerceIn(0f, 1f)) }
+    LaunchedEffect(value) {
+        gestureValue = value.coerceIn(0f, 1f)
+    }
+    Box(
+        modifier = Modifier
+            .width(88.dp)
+            .fillMaxHeight()
+            .semantics {
+                contentDescription = label
+                progressBarRangeInfo = ProgressBarRangeInfo(value.coerceIn(0f, 1f), 0f..1f)
+            }
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onDragStart = { gestureValue = latestValue.value },
+                    onVerticalDrag = { change, amount ->
+                        change.consume()
+                        val next = (gestureValue - amount / size.height).coerceIn(0f, 1f)
+                        gestureValue = next
+                        latestOnValueChanged.value(next)
+                    },
+                )
+            },
+    )
+}
+
+private fun findActivityWindow(context: Context): android.view.Window? {
+    var current = context
+    while (current is ContextWrapper) {
+        if (current is Activity) return current.window
+        val next = current.baseContext
+        if (next === current) break
+        current = next
+    }
+    return null
+}
+
+private fun windowBrightness(window: android.view.Window?): Float =
+    window?.attributes?.screenBrightness?.takeIf { it in 0f..1f } ?: 0.5f
 
 @Composable
 internal fun FineProgressBar(

@@ -21,6 +21,8 @@ SAMPLE = SharedMetadataMatch(
     backdrop_url="http://shared.test/api/shared-metadata/poster?path=CEMD-822%2Fx.jpg",
     website="https://javdb.com/v/veyGnb",
     confidence=0.98,
+    genres=("剧情", "制服"),
+    release_date="2024-07-19",
 )
 
 
@@ -118,13 +120,28 @@ async def test_shared_metadata_is_used_without_any_local_scraper(monkeypatch, tm
     assert movie["original_title"] == "CEMD-822 Original"
     assert movie["year"] == 2024
     assert movie["overview"] == "来自共享元数据服务的简介"
-    assert movie["studio"] == "片商"
     assert movie["poster_url"] == "https://c0.jdbstatic.com/covers/ve/veyGnb.jpg"
     assert movie["match_confidence"] == pytest.approx(0.98)
 
-    payload = main.public_movie(movie, detail=True)
+    detail = main.database.get_movie(int(movie["id"]), sources=("movies",))
+    assert detail is not None
+    payload = main.public_movie(detail, detail=True)
     assert payload["metadataProvider"] == "shared"
     assert payload["posterUrl"].startswith(f"/api/movies/{movie['id']}/poster?v=")
+    assert payload["releaseDate"] == "2024-07-19"
+    assert [item["name"] for item in payload["genreEntities"]] == ["剧情", "制服"]
+    assert [item["name"] for item in payload["performerEntities"]] == ["演员甲", "演员乙"]
+    assert payload["studioEntity"]["name"] == "片商"
+    assert payload["yearEntity"]["name"] == "2024"
+
+    monkeypatch.setattr(main.source_registry, "ids", lambda section: ["movies"])
+    monkeypatch.setattr(main, "spawn_background", lambda coroutine, **_kwargs: coroutine.close())
+    performer_id = payload["performerEntities"][0]["id"]
+    page = await main.movie_metadata_movies(performer_id, limit=24, offset=0)
+    assert page["entity"]["name"] == "演员甲"
+    assert page["total"] == 1
+    assert page["items"][0]["id"] == movie["id"]
+    assert page["nextOffset"] is None
 
 
 @pytest.mark.asyncio

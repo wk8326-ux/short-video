@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 import logging
 import re
 import sqlite3
@@ -25,6 +26,18 @@ from app.metadata_index_db import (
 )
 
 logger = logging.getLogger("short-video")
+
+
+def normalize_release_date(value: Any) -> str:
+    """Return a metadata release value as a stable ISO calendar date."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    candidate = text[:10]
+    try:
+        return date.fromisoformat(candidate).isoformat()
+    except ValueError:
+        return text
 
 # One index fetch covers a whole scrape run. The remote side walks its sidecar
 # tree on every /index call, so keep the page size large and the TTL generous.
@@ -88,6 +101,8 @@ INDEX_ENTRY_KEYS = (
     "studio",
     "actors",
     "genres",
+    "premiered",
+    "release_date",
     "website",
 )
 
@@ -135,6 +150,8 @@ class SharedMetadataMatch:
     backdrop_url: str
     website: str
     confidence: float
+    genres: tuple[str, ...] = ()
+    release_date: str = ""
 
 
 def fold_key(value: Any) -> str:
@@ -732,7 +749,14 @@ class SharedMetadataClient:
         performers = tuple(
             str(item).strip() for item in actors if str(item).strip()
         ) if isinstance(actors, list) else ()
-        year = str(payload.get("year") or "").strip()
+        raw_genres = payload.get("genres")
+        genres = tuple(
+            str(item).strip() for item in raw_genres if str(item).strip()
+        ) if isinstance(raw_genres, list) else ()
+        release_date = normalize_release_date(
+            payload.get("premiered") or payload.get("release_date")
+        )
+        year = str(payload.get("year") or release_date[:4] or "").strip()
         poster = self.absolute_url(str(payload.get("poster_url") or ""))
         cover = str(payload.get("cover_url") or "").strip()
         return SharedMetadataMatch(
@@ -750,6 +774,8 @@ class SharedMetadataClient:
             backdrop_url=poster or cover,
             website=str(payload.get("website") or "").strip(),
             confidence=0.98,
+            genres=genres,
+            release_date=release_date,
         )
 
     async def metadata_by_code(self, code: str) -> SharedMetadataMatch | None:

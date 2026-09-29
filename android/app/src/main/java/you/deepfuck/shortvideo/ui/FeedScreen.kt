@@ -80,6 +80,7 @@ internal fun FeedScreen(
     onRetry: () -> Unit,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
+    onVolume: (Float) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
@@ -137,6 +138,7 @@ internal fun FeedScreen(
                 pipMode = pipMode,
                 onTogglePlayback = onTogglePlayback,
                 onMuted = onMuted,
+                onVolume = onVolume,
                 onSeek = onSeek,
                 onSeekBy = onSeekBy,
                 onFullscreen = onFullscreen,
@@ -175,6 +177,7 @@ private fun FeedPage(
     pipMode: Boolean,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
+    onVolume: (Float) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
@@ -254,6 +257,13 @@ private fun FeedPage(
         BufferSpinner(active && player.isBuffering && player.mediaId == entry.id)
 
         val controlsVisible = !pipMode && (!fullscreen || chromeVisible)
+        if (!pipMode) {
+            PlayerSideControls(
+                volume = player.volume,
+                onVolumeChanged = onVolume,
+                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+            )
+        }
         if (controlsVisible) {
             Box(
                 Modifier
@@ -319,7 +329,7 @@ private fun FeedPage(
             )
         }
 
-        val showPortraitPlay = !fullscreen && !pipMode && !player.playWhenReady
+        val showPortraitPlay = !fullscreen && !pipMode && !player.playWhenReady && !player.isBuffering
         if (active && showPortraitPlay && player.mediaId == entry.id) {
             OverlayIconControl(
                 label = "播放",
@@ -335,7 +345,7 @@ private fun FeedPage(
             }
         }
 
-        if (active && fullscreen && !pipMode && chromeVisible && player.mediaId == entry.id) {
+        if (active && fullscreen && !pipMode && chromeVisible && player.mediaId == entry.id && !player.isBuffering) {
             Row(
                 modifier = Modifier.align(Alignment.Center),
                 horizontalArrangement = Arrangement.spacedBy(36.dp),

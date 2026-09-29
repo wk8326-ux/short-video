@@ -2,8 +2,12 @@ package you.deepfuck.shortvideo
 
 import android.Manifest
 import android.app.PictureInPictureParams
+import android.app.PendingIntent
+import android.app.RemoteAction
 import android.content.ClipData
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -11,6 +15,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.graphics.drawable.Icon
 import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -34,6 +39,11 @@ import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import java.io.File
 import you.deepfuck.shortvideo.ui.ShortVideoApp
 import you.deepfuck.shortvideo.ui.ShortVideoTheme
@@ -42,6 +52,11 @@ import you.deepfuck.shortvideo.ui.TextPrimary
 import you.deepfuck.shortvideo.logging.AppLogStore
 
 class MainActivity : ComponentActivity() {
+    private companion object {
+        const val ACTION_PIP_TOGGLE = "you.deepfuck.shortvideo.action.PIP_TOGGLE"
+        const val PIP_REQUEST_CODE = 1901
+    }
+
     private val viewModel by viewModels<MainViewModel>()
     /**
      * Compose needs to know about the floating window so it can drop the
@@ -57,6 +72,13 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission(),
     ) { }
     private var pendingUpdateApk: File? = null
+    private val pipActionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: Intent?) {
+            if (intent?.action != ACTION_PIP_TOGGLE) return
+            viewModel.togglePlayback()
+            updatePictureInPictureActions()
+        }
+    }
     private val installPermission = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) {
@@ -70,6 +92,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        registerPipActionReceiver()
+        lifecycleScope.launch {
+            viewModel.playback.snapshot
+                .map { it.playWhenReady }
+                .distinctUntilChanged()
+                .collect { updatePictureInPictureActions() }
+        }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
@@ -117,6 +146,11 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onDestroy() {
+        unregisterReceiver(pipActionReceiver)
+        super.onDestroy()
+    }
+
     /**
      * Playback is only torn down once the activity is truly hidden. A floating
      * window keeps the activity visible, so shrinking the video no longer
@@ -134,6 +168,7 @@ class MainActivity : ComponentActivity() {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         pipRequested = false
         pipMode.value = isInPictureInPictureMode
+        updatePictureInPictureActions()
     }
 
     private fun setPlayerFullscreen(fullscreen: Boolean) {
@@ -165,12 +200,49 @@ class MainActivity : ComponentActivity() {
         pipRequested = true
         val entered = runCatching {
             enterPictureInPictureMode(
-                PictureInPictureParams.Builder()
-                    .setAspectRatio(currentPlayerAspectRatio())
-                    .build(),
+                buildPictureInPictureParams(),
             )
         }.getOrDefault(false)
         if (!entered) pipRequested = false
+    }
+
+    private fun registerPipActionReceiver() {
+        val filter = IntentFilter(ACTION_PIP_TOGGLE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(pipActionReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(pipActionReceiver, filter)
+        }
+    }
+
+    private fun updatePictureInPictureActions() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        if (!isInPictureInPictureMode && !pipRequested) return
+        runCatching { setPictureInPictureParams(buildPictureInPictureParams()) }
+    }
+
+    private fun buildPictureInPictureParams(): PictureInPictureParams {
+        val isPlaying = viewModel.playback.snapshot.value.playWhenReady
+        val actionIntent = PendingIntent.getBroadcast(
+            this,
+            PIP_REQUEST_CODE,
+            Intent(ACTION_PIP_TOGGLE).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val action = RemoteAction(
+            Icon.createWithResource(
+                this,
+                if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+            ),
+            if (isPlaying) "暂停" else "播放",
+            if (isPlaying) "暂停播放" else "继续播放",
+            actionIntent,
+        )
+        return PictureInPictureParams.Builder()
+            .setAspectRatio(currentPlayerAspectRatio())
+            .setActions(listOf(action))
+            .build()
     }
 
     private fun currentPlayerAspectRatio(): Rational {

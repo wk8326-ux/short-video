@@ -1,8 +1,8 @@
 {
-  "versionCode": 185,
-  "versionName": "1.6.0-beta.28",
-  "apkFile": "deepfuck-android-v1.6.0-beta.28.apk",
-  "sha256": "8ef4ccb221b793dc3966e420173e7211d30ca7e48bd8b0a97ebbd69fd9308524",
-  "size": 4292952,
-  "notes": "电影墙、媒体库子页面、详情页统一为固定 3:2 圆角框体；3:2 封面原样铺满，16:9 封面居中裁掉左右超出部分，竖版封面不裁、按原比例放进框内；裁切在服务端完成，缩略图和详情页头图仍是同一张缓存图。换形状后 App 会重取一次封面，之后照旧走本地缓存。"
+  "versionCode": 195,
+  "versionName": "1.6.0-beta.38",
+  "apkFile": "deepfuck-android-v1.6.0-beta.38.apk",
+  "sha256": "ef57738fee3d330d26abb8ec69387b8a8bbdc2d97db1a00a647203a2a2394045",
+  "size": 4325720,
+  "notes": "统一前端页面布局、媒体卡片、元数据标签和图标按钮触控区域；包含最近播放封面和播放器反馈优化。"
 }

@@ -38,10 +38,15 @@ import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.data.MediaSourceDraft
 import you.deepfuck.shortvideo.data.MovieGroup
+import you.deepfuck.shortvideo.data.MovieBrowseDestination
+import you.deepfuck.shortvideo.data.MovieBrowseNavigation
 import you.deepfuck.shortvideo.data.MovieItem
+import you.deepfuck.shortvideo.data.MovieMetadataEntity
+import you.deepfuck.shortvideo.data.MovieMetadataPage
 import you.deepfuck.shortvideo.data.MovieWallView
 import you.deepfuck.shortvideo.data.MOVIE_SORT_DEFAULT
 import you.deepfuck.shortvideo.data.PlaybackPreferences
+import you.deepfuck.shortvideo.data.normalizedPosterPath
 import you.deepfuck.shortvideo.media.PlaybackEngine
 import you.deepfuck.shortvideo.media.PlaybackEndedEvent
 import you.deepfuck.shortvideo.media.PlaybackEngineProvider
@@ -107,6 +112,13 @@ data class AppUiState(
     val movieFavoritesError: String? = null,
     val movieDetailLoading: Boolean = false,
     val selectedMovie: MovieItem? = null,
+    val movieNavigation: MovieBrowseNavigation = MovieBrowseNavigation(),
+    val movieMetadataEntity: MovieMetadataEntity? = null,
+    val movieMetadataItems: List<MovieItem> = emptyList(),
+    val movieMetadataTotal: Int = 0,
+    val movieMetadataNextOffset: Int? = 0,
+    val movieMetadataLoading: Boolean = false,
+    val movieMetadataError: String? = null,
     val dramaItems: List<DramaItem> = emptyList(),
     val dramaTotal: Int = 0,
     val dramaNextOffset: Int? = 0,
@@ -201,6 +213,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var movieJob: Job? = null
     private var movieSearchJob: Job? = null
     private var movieDetailJob: Job? = null
+    private var movieMetadataJob: Job? = null
+    private var movieMetadataGeneration = 0L
+    private val movieDetailCache = mutableMapOf<Long, MovieItem>()
+    private val movieMetadataCache = mutableMapOf<Long, MovieMetadataPage>()
+    private val movieMetadataPositions = mutableMapOf<Long, ListPosition>()
     private var movieGroupPageJob: Job? = null
     private var movieGroupPageGeneration = 0L
     private var movieFavoritesJob: Job? = null
@@ -314,11 +331,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieJob?.cancel()
             movieSearchJob?.cancel()
             movieDetailJob?.cancel()
+            movieMetadataJob?.cancel()
             cancelMovieGroupPageLoad()
             cancelMovieFavoritesLoad()
             movieGroupPageGeneration += 1L
             movieFavoritesGeneration += 1L
             movieRequestGeneration += 1L
+            movieMetadataGeneration += 1L
         }
         if (previousSurface == MediaSurface.DRAMA) {
             dramaJob?.cancel()
@@ -344,6 +363,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             nowPlaying = null,
             selectedMovie = null,
             movieDetailLoading = false,
+            movieNavigation = MovieBrowseNavigation(),
+            movieMetadataEntity = null,
+            movieMetadataItems = emptyList(),
+            movieMetadataTotal = 0,
+            movieMetadataNextOffset = 0,
+            movieMetadataLoading = false,
+            movieMetadataError = null,
             openMovieGroupId = null,
             openMovieGroupName = "",
             openMovieGroupItems = emptyList(),
@@ -402,6 +428,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.setMuted(mutableState.value.surface, muted)
         playback.setMuted(muted)
         mutableState.value = mutableState.value.copy(muted = muted)
+    }
+
+    fun setVolume(volume: Float) {
+        playback.setVolume(volume.coerceIn(0f, 1f))
     }
 
     fun togglePlayback() {
@@ -689,6 +719,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openMovieFavorites = false,
             movieFavoritesLoading = false,
             movieFavoritesError = null,
+            movieNavigation = state.movieNavigation.root(MovieBrowseDestination.Library(sourceId)),
         )
         loadMovieGroupPage(reset = true)
     }
@@ -705,6 +736,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openMovieGroupNextOffset = 0,
             openMovieGroupLoading = false,
             openMovieGroupError = null,
+            movieNavigation = mutableState.value.movieNavigation.root(MovieBrowseDestination.Catalog),
         )
     }
 
@@ -843,6 +875,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openMovieFavorites = true,
             movieFavoritesLoading = true,
             movieFavoritesError = null,
+            movieNavigation = mutableState.value.movieNavigation.root(MovieBrowseDestination.Favorites),
         )
         loadMovieFavorites(reset = true)
     }
@@ -855,6 +888,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openMovieFavorites = false,
             movieFavoritesLoading = false,
             movieFavoritesError = null,
+            movieNavigation = mutableState.value.movieNavigation.root(MovieBrowseDestination.Catalog),
         )
     }
 
@@ -1009,13 +1043,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectMovie(movie: MovieItem) {
-        if (mutableState.value.surface != MediaSurface.MOVIE) return
+        val state = mutableState.value
+        if (state.surface != MediaSurface.MOVIE) return
         val localMovie = movie.withResumePosition()
+        movieDetailCache[localMovie.id] = localMovie
+        val navigation = if (state.movieNavigation.current == MovieBrowseDestination.Detail(localMovie.id)) {
+            state.movieNavigation
+        } else {
+            state.movieNavigation.push(MovieBrowseDestination.Detail(localMovie.id))
+        }
         mutableState.value = mutableState.value.copy(
             selectedMovie = localMovie,
             movieDetailLoading = true,
             movieError = null,
             nowPlaying = null,
+            movieNavigation = navigation,
         )
         playback.prefetch(MediaSurface.MOVIE, listOf(localMovie.asMediaEntry()))
         movieDetailJob?.cancel()
@@ -1025,6 +1067,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val state = mutableState.value
                     if (state.surface != MediaSurface.MOVIE || state.selectedMovie?.id != movie.id) return@onSuccess
                     val resolved = detail.withResumePosition()
+                    movieDetailCache[resolved.id] = resolved
                     mutableState.value = state.copy(
                         selectedMovie = resolved,
                         movieItems = state.movieItems.map { if (it.id == resolved.id) resolved else it },
@@ -1044,19 +1087,124 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeMovieDetail() {
-        if (mutableState.value.surface != MediaSurface.MOVIE) return
+        val state = mutableState.value
+        if (state.surface != MediaSurface.MOVIE || state.selectedMovie == null) return
         val report = saveCurrentPosition(forceReport = true)
         movieDetailJob?.cancel()
         playback.stop()
         playback.prefetch(MediaSurface.MOVIE, emptyList())
-        mutableState.value = mutableState.value.copy(
+        val previous = state.movieNavigation.back()
+        val destination = previous.current
+        val restoredMovie = (destination as? MovieBrowseDestination.Detail)?.movieId
+            ?.let(movieDetailCache::get)
+        val restoredMetadata = (destination as? MovieBrowseDestination.Metadata)?.entity
+        mutableState.value = state.copy(
             selectedMovie = null,
             movieDetailLoading = false,
             nowPlaying = null,
+            movieNavigation = previous,
+            movieMetadataEntity = restoredMetadata,
+            movieMetadataItems = restoredMetadata
+                ?.let { movieMetadataCache[it.id]?.items?.map { item -> item.withResumePosition() } }
+                ?: emptyList(),
+            movieMetadataTotal = restoredMetadata?.let { movieMetadataCache[it.id]?.total } ?: 0,
+            movieMetadataNextOffset = restoredMetadata?.let { movieMetadataCache[it.id]?.nextOffset } ?: 0,
+            movieMetadataLoading = false,
+            movieMetadataError = null,
         )
+        if (restoredMovie != null) {
+            mutableState.value = mutableState.value.copy(
+                selectedMovie = restoredMovie,
+                movieDetailLoading = false,
+            )
+        }
         // The playhead was just pushed, so the wall behind this page is holding
         // a stale "继续观看" strip: refetch it once that write has landed.
         refreshRecentAfter(report, dramas = false)
+    }
+
+    fun openMovieMetadata(entity: MovieMetadataEntity) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.MOVIE) return
+        movieMetadataJob?.cancel()
+        val cached = movieMetadataCache[entity.id]
+        mutableState.value = state.copy(
+            selectedMovie = null,
+            movieDetailLoading = false,
+            movieMetadataEntity = entity,
+            movieMetadataItems = cached?.items?.map { it.withResumePosition() } ?: emptyList(),
+            movieMetadataTotal = cached?.total ?: entity.movieCount,
+            movieMetadataNextOffset = cached?.nextOffset ?: 0,
+            movieMetadataLoading = true,
+            movieMetadataError = null,
+            movieNavigation = state.movieNavigation.push(MovieBrowseDestination.Metadata(entity)),
+        )
+        loadMovieMetadataPage(reset = true)
+    }
+
+    fun closeMovieMetadata() {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.MOVIE || state.movieMetadataEntity == null) return
+        movieMetadataJob?.cancel()
+        movieMetadataGeneration += 1L
+        val previous = state.movieNavigation.back()
+        val restoredMovie = (previous.current as? MovieBrowseDestination.Detail)?.movieId
+            ?.let(movieDetailCache::get)
+        mutableState.value = state.copy(
+            selectedMovie = restoredMovie,
+            movieMetadataEntity = null,
+            movieMetadataItems = emptyList(),
+            movieMetadataTotal = 0,
+            movieMetadataNextOffset = 0,
+            movieMetadataLoading = false,
+            movieMetadataError = null,
+            movieNavigation = previous,
+        )
+    }
+
+    fun loadMoreMovieMetadata() {
+        val state = mutableState.value
+        if (state.movieMetadataEntity != null && !state.movieMetadataLoading && state.movieMetadataNextOffset != null) {
+            loadMovieMetadataPage(reset = false)
+        }
+    }
+
+    private fun loadMovieMetadataPage(reset: Boolean) {
+        val state = mutableState.value
+        val entity = state.movieMetadataEntity ?: return
+        val offset = if (reset) 0 else state.movieMetadataNextOffset ?: return
+        val generation = ++movieMetadataGeneration
+        movieMetadataJob?.cancel()
+        mutableState.value = state.copy(movieMetadataLoading = true, movieMetadataError = null)
+        movieMetadataJob = viewModelScope.launch {
+            runApi { api.movieMetadataMovies(entity.id, offset = offset) }
+                .onSuccess { page ->
+                    val current = mutableState.value
+                    if (generation != movieMetadataGeneration || current.movieMetadataEntity?.id != entity.id) return@onSuccess
+                    // Keep the cached page in the same normalized form as the
+                    // visible list. Returning from detail reads this cache
+                    // directly, so relative artwork paths must not leak into it.
+                    val incoming = page.items.map { it.withResumePosition() }
+                    val items = if (reset) incoming else mergeMoviePages(current.movieMetadataItems, incoming, false, "cover")
+                    val stored = page.copy(items = items)
+                    movieMetadataCache[entity.id] = stored
+                    mutableState.value = current.copy(
+                        movieMetadataEntity = page.entity,
+                        movieMetadataItems = items.map { it.withResumePosition() },
+                        movieMetadataTotal = maxOf(page.total, items.size),
+                        movieMetadataNextOffset = page.nextOffset,
+                        movieMetadataLoading = false,
+                        movieMetadataError = null,
+                    )
+                }
+                .onFailure { error ->
+                    val current = mutableState.value
+                    if (generation != movieMetadataGeneration || current.movieMetadataEntity?.id != entity.id) return@onFailure
+                    if (!handleUnauthorized(error)) {
+                        mutableState.value = current.copy(movieMetadataLoading = false, movieMetadataError = "这个元数据合集暂时载入不了，稍后再试")
+                    }
+                }
+        }
     }
 
     fun playMovie(movie: MovieItem) {
@@ -1896,6 +2044,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.saveMovieFavoritesListPosition(position)
     }
 
+    internal fun movieMetadataListPosition(entityId: Long): ListPosition =
+        movieMetadataPositions[entityId] ?: ListPosition()
+
+    internal fun saveMovieMetadataListPosition(entityId: Long, position: ListPosition) {
+        movieMetadataPositions[entityId] = position
+    }
+
     internal fun dramaListPosition(): ListPosition = preferences.dramaListPosition()
 
     internal fun saveDramaListPosition(position: ListPosition) {
@@ -2144,7 +2299,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun DramaItem.withAbsolutePoster(): DramaItem =
-        copy(posterUrl = posterUrl?.let(api::absoluteUrl))
+        copy(posterUrl = normalizedPosterPath()?.let(api::absoluteUrl))
 
     private fun loadMovies(reset: Boolean) {
         val state = mutableState.value

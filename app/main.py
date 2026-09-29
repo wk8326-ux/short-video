@@ -40,7 +40,11 @@ from app.media_metadata import mp4_duration_seconds
 from app.media_sources import MediaSourceRegistry
 from app.scanner import ResumableScanner, initial_steps
 from app.movie_metadata import parse_movie_filename
-from app.shared_metadata import INDEX_DB_FILENAME, SharedMetadataClient
+from app.shared_metadata import (
+    INDEX_DB_FILENAME,
+    SharedMetadataClient,
+    normalize_release_date,
+)
 
 try:  # Pillow is a hard dependency of the image; the guard keeps imports working
     from PIL import Image  # in a bare interpreter used by tooling.
@@ -52,7 +56,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.33"
+APP_VERSION = "1.6.0-beta.38"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -786,8 +790,8 @@ async def _mark_movie_unmatched(
         overview=None,
         poster_url=None,
         backdrop_url=None,
-        performers="[]",
-        studio=None,
+        release_date=None,
+        metadata_entities={},
         metadata_provider=None,
         match_status="unmatched",
         match_confidence=0.0,
@@ -1122,10 +1126,13 @@ async def scrape_movie_metadata(
                             backdrop_url=shared_match.backdrop_url or None,
                             tmdb_id=None,
                             metadata_provider=ACTIVE_METADATA_PROVIDER,
-                            release_date=str(shared_match.year) if shared_match.year else None,
-                            genres="[]",
-                            performers=json.dumps(shared_match.performers, ensure_ascii=False),
-                            studio=shared_match.studio or None,
+                            release_date=shared_match.release_date or None,
+                            metadata_entities={
+                                "performer": shared_match.performers,
+                                "studio": (shared_match.studio,) if shared_match.studio else (),
+                                "genre": shared_match.genres,
+                                "year": (str(shared_match.year),) if shared_match.year else (),
+                            },
                             match_status="matched",
                             match_confidence=shared_match.confidence,
                         )
@@ -1520,16 +1527,44 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         payload["size"] = row.get("size")
         payload["format"] = row.get("media_format")
         payload["metadataProvider"] = row.get("metadata_provider")
-        payload["releaseDate"] = row.get("release_date")
-        payload["genres"] = _metadata_list(row.get("genres"))
-        payload["performers"] = _metadata_list(row.get("performers"))
-        payload["studio"] = row.get("studio")
+        payload["releaseDate"] = normalize_release_date(row.get("release_date")) or None
+        entities = row.get("metadata_entities") or {}
+
+        def public_entity(entity: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": int(entity["id"]),
+                "type": str(entity["type"]),
+                "name": str(entity["name"]),
+                "movieCount": int(entity.get("movie_count") or 0),
+            }
+
+        years = [public_entity(item) for item in entities.get("year", [])]
+        studios = [public_entity(item) for item in entities.get("studio", [])]
+        payload["yearEntity"] = years[0] if years else None
+        payload["studioEntity"] = studios[0] if studios else None
+        payload["genreEntities"] = [
+            public_entity(item) for item in entities.get("genre", [])
+        ]
+        payload["performerEntities"] = [
+            public_entity(item) for item in entities.get("performer", [])
+        ]
     return payload
 
 
 def public_drama(row: dict[str, Any]) -> dict[str, Any]:
     drama_id = str(row["id"])
     has_poster = bool(str(row.get("poster_url") or "").strip())
+    resume_video_id = row.get("resume_video_id")
+    has_resume_thumb = bool(str(row.get("resume_thumb") or "").strip())
+    poster_url = (
+        f"/api/dramas/{drama_id}/poster"
+        if has_poster
+        else (
+            f"/api/videos/{int(resume_video_id)}/poster"
+            if has_resume_thumb and resume_video_id
+            else None
+        )
+    )
     return {
         "id": drama_id,
         "title": str(row.get("title") or row.get("folder_title") or ""),
@@ -1540,7 +1575,7 @@ def public_drama(row: dict[str, Any]) -> dict[str, Any]:
         "episodeCount": int(row.get("episode_count") or 0),
         # Third-party artwork stays server-side: the picture CDN is not
         # reachable from many phones, and the payload is encrypted anyway.
-        "posterUrl": f"/api/dramas/{drama_id}/poster" if has_poster else None,
+        "posterUrl": poster_url,
         "matchStatus": row.get("metadata_status") or "pending",
         "source": row.get("source"),
         "path": row.get("folder"),
@@ -3359,6 +3394,50 @@ async def movie_favorites(
             name="prewarm-movie-favorites",
         )
     return {
+        "items": [public_movie(row) for row in rows],
+        "total": total,
+        "nextOffset": offset + len(rows) if offset + len(rows) < total else None,
+    }
+
+
+@app.get("/api/movie-metadata/{entity_id}/movies")
+async def movie_metadata_movies(
+    entity_id: int,
+    limit: int = Query(default=24, ge=1, le=60),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Browse every active movie linked to one metadata entity across libraries."""
+    sources = source_registry.ids("movie")
+    entity, rows, total = await asyncio.gather(
+        asyncio.to_thread(database.movie_metadata_entity, entity_id, sources=sources),
+        asyncio.to_thread(
+            database.movies,
+            sources=sources,
+            metadata_entity_id=entity_id,
+            limit=limit,
+            offset=offset,
+            sort="cover",
+        ),
+        asyncio.to_thread(
+            database.movie_count,
+            sources=sources,
+            metadata_entity_id=entity_id,
+        ),
+    )
+    if not entity:
+        raise HTTPException(status_code=404, detail="Movie metadata entity not found")
+    if offset == 0 and rows:
+        spawn_background(
+            prewarm_movie_wall_images(rows, limit=MOVIE_LIBRARY_PREWARM_LIMIT),
+            name=f"prewarm-movie-metadata-{entity_id}",
+        )
+    return {
+        "entity": {
+            "id": int(entity["id"]),
+            "type": str(entity["type"]),
+            "name": str(entity["name"]),
+            "movieCount": total,
+        },
         "items": [public_movie(row) for row in rows],
         "total": total,
         "nextOffset": offset + len(rows) if offset + len(rows) < total else None,

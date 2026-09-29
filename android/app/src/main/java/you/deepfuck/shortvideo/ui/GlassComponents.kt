@@ -27,8 +27,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-internal val GlassPanelShape = RoundedCornerShape(8.dp)
-internal val ControlShape = RoundedCornerShape(6.dp)
+internal val GlassPanelShape = RoundedCornerShape(UiDimens.CardRadius)
+internal val ControlShape = RoundedCornerShape(UiDimens.ControlRadius)
 
 internal fun Modifier.glassSurface(
     shape: Shape = GlassPanelShape,
@@ -70,6 +70,7 @@ internal fun GlassIconButton(
     tint: Color = Color.White,
     content: @Composable () -> Unit,
 ) {
+    val resolvedSize = size.coerceAtLeast(UiDimens.TouchTarget)
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
@@ -80,7 +81,7 @@ internal fun GlassIconButton(
     IconButton(
         onClick = onClick,
         modifier = modifier
-            .size(size)
+            .size(resolvedSize)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale

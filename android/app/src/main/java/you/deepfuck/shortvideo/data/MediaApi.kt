@@ -202,6 +202,18 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     fun movieDetail(movieId: Long): MovieItem =
         MovieItem.fromJson(getJson("/api/movies/$movieId"))
 
+    fun movieMetadataMovies(
+        entityId: Long,
+        offset: Int = 0,
+        limit: Int = MOVIE_LIBRARY_PAGE_SIZE,
+    ): MovieMetadataPage {
+        val target = url("/api/movie-metadata/$entityId/movies").newBuilder()
+            .addQueryParameter("limit", limit.toString())
+            .addQueryParameter("offset", offset.toString())
+            .build()
+        return MovieMetadataPage.fromJson(getJson(target.toString()))
+    }
+
     /**
      * The grouped wall: one section per media source, each previewing [perGroup]
      * titles plus its own cursor.

@@ -11,6 +11,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -106,6 +108,7 @@ import kotlinx.coroutines.launch
 import you.deepfuck.shortvideo.AppUiState
 import you.deepfuck.shortvideo.ListPosition
 import you.deepfuck.shortvideo.data.MovieItem
+import you.deepfuck.shortvideo.data.MovieMetadataEntity
 import you.deepfuck.shortvideo.data.MovieGroup
 import you.deepfuck.shortvideo.data.MovieWallView
 import you.deepfuck.shortvideo.data.movieSortOnSelect
@@ -124,6 +127,7 @@ internal fun MovieScreen(
     listPosition: ListPosition,
     groupListPosition: ListPosition,
     favoritesListPosition: ListPosition,
+    metadataListPosition: (Long) -> ListPosition,
     onSelect: (MovieItem) -> Unit,
     onBack: () -> Unit,
     onPlay: (MovieItem) -> Unit,
@@ -136,11 +140,16 @@ internal fun MovieScreen(
     onCloseFavorites: () -> Unit,
     onLoadMoreFavorites: () -> Unit,
     onFavoritesListPosition: (ListPosition) -> Unit,
+    onOpenMetadata: (MovieMetadataEntity) -> Unit,
+    onCloseMetadata: () -> Unit,
+    onLoadMoreMetadata: () -> Unit,
+    onMetadataListPosition: (Long, ListPosition) -> Unit,
     onToggleFavorite: (MovieItem) -> Unit,
     onWallView: (MovieWallView) -> Unit,
     onRetry: () -> Unit,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
+    onVolume: (Float) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
@@ -188,11 +197,30 @@ internal fun MovieScreen(
             onPlay = { onPlay(movie) },
             onTogglePlayback = onTogglePlayback,
             onMuted = onMuted,
+            onVolume = onVolume,
             onSeek = onSeek,
             onSeekBy = onSeekBy,
             onFullscreen = onFullscreen,
             onPip = onPip,
             onToggleFavorite = { onToggleFavorite(movie) },
+            onOpenMetadata = onOpenMetadata,
+        )
+        return
+    }
+
+    state.movieMetadataEntity?.let { entity ->
+        MovieMetadataPage(
+            entity = entity,
+            items = state.movieMetadataItems,
+            total = state.movieMetadataTotal,
+            loading = state.movieMetadataLoading,
+            error = state.movieMetadataError,
+            imageLoader = imageLoader,
+            onBack = onCloseMetadata,
+            onSelect = onSelect,
+            onLoadMore = onLoadMoreMetadata,
+            initialPosition = metadataListPosition(entity.id),
+            onListPosition = { onMetadataListPosition(entity.id, it) },
         )
         return
     }
@@ -307,13 +335,7 @@ private fun MovieCatalog(
     val scope = rememberCoroutineScope()
     var jumpMenuOpen by remember { mutableStateOf(false) }
     var viewMenuOpen by remember { mutableStateOf(false) }
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Canvas)
-            .statusBarsPadding()
-            .padding(top = 62.dp),
-    ) {
+    AppScreenScaffold {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -501,38 +523,12 @@ private fun MovieSectionHeader(
     trailing: String,
     onClick: (() -> Unit)? = null,
 ) {
-    val base = Modifier
-        .fillMaxWidth()
-        .padding(start = 14.dp, end = 14.dp, bottom = 10.dp)
-    Row(
-        modifier = if (onClick == null) base else base.clip(ControlShape).clickable(onClick = onClick),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            Modifier
-                .width(3.dp)
-                .height(15.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(Accent),
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            title,
-            color = TextPrimary,
-            fontWeight = FontWeight.SemiBold,
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            trailing,
-            color = TextFaint,
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 1,
-        )
-    }
+    SectionHeader(
+        title = title,
+        trailing = trailing,
+        modifier = Modifier.padding(bottom = 4.dp),
+        onClick = onClick,
+    )
 }
 
 /**
@@ -580,14 +576,14 @@ private fun RecentMovieCard(
             },
         color = Color.Transparent,
         contentColor = TextPrimary,
-        shape = RoundedCornerShape(10.dp),
+        shape = MediaCardShape,
     ) {
         Column {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(3f / 2f)
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(MediaCardShape)
                     .background(Raised),
                 contentAlignment = Alignment.Center,
             ) {
@@ -672,13 +668,13 @@ private fun MovieLibraryTile(
             .semantics { contentDescription = "${group.name}，共 ${group.total} 部" },
         color = Color.Transparent,
         contentColor = TextPrimary,
-        shape = RoundedCornerShape(12.dp),
+        shape = MediaCardShape,
     ) {
         Column {
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
+                    .clip(MediaCardShape)
                     .background(Raised),
             ) {
                 repeat(MOSAIC_TILES / MOSAIC_COLUMNS) { rowIndex ->
@@ -772,7 +768,7 @@ private fun MovieRowMoreCard(remaining: Int, onClick: () -> Unit) {
             .heightIn(min = 96.dp),
         color = GlassFillSoft,
         contentColor = TextSecondary,
-        shape = RoundedCornerShape(10.dp),
+        shape = MediaCardShape,
     ) {
         Column(
             Modifier.fillMaxWidth().heightIn(min = 96.dp),
@@ -927,13 +923,7 @@ private fun MovieLibraryPage(
         }
     }
     var sortMenuOpen by remember { mutableStateOf(false) }
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Canvas)
-            .statusBarsPadding()
-            .padding(top = 62.dp),
-    ) {
+    AppScreenScaffold {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1048,13 +1038,7 @@ private fun MovieFavoritesPage(
             )
         }
     }
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Canvas)
-            .statusBarsPadding()
-            .padding(top = 62.dp),
-    ) {
+    AppScreenScaffold {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1089,6 +1073,56 @@ private fun MovieFavoritesPage(
             loading = loading,
             error = error,
             emptyTitle = "还没有收藏，点影片详情页的心形就能收藏",
+            gridState = gridState,
+            imageLoader = imageLoader,
+            onSelect = onSelect,
+            onLoadMore = onLoadMore,
+        )
+    }
+}
+
+@Composable
+private fun MovieMetadataPage(
+    entity: MovieMetadataEntity,
+    items: List<MovieItem>,
+    total: Int,
+    loading: Boolean,
+    error: String?,
+    imageLoader: ImageLoader,
+    onBack: () -> Unit,
+    onSelect: (MovieItem) -> Unit,
+    onLoadMore: () -> Unit,
+    initialPosition: ListPosition,
+    onListPosition: (ListPosition) -> Unit,
+) {
+    val gridState = rememberLazyGridState(
+        initialFirstVisibleItemIndex = initialPosition.index.coerceAtLeast(0),
+        initialFirstVisibleItemScrollOffset = initialPosition.offset.coerceAtLeast(0),
+    )
+    DisposableEffect(gridState) {
+        onDispose {
+            onListPosition(ListPosition(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset))
+        }
+    }
+    AppScreenScaffold {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            GlassIconButton(label = "返回元数据", onClick = onBack) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
+            }
+            Column(Modifier.padding(start = 8.dp)) {
+                Text(entity.name, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                Text("${entity.movieCount} 部影片", color = TextFaint, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        MoviePosterGrid(
+            items = items,
+            total = total,
+            loading = loading,
+            error = error,
+            emptyTitle = "这个元数据下还没有影片",
             gridState = gridState,
             imageLoader = imageLoader,
             onSelect = onSelect,
@@ -1139,7 +1173,7 @@ private fun MoviePosterGrid(
             onAction = {},
         )
         else -> LazyVerticalGrid(
-            columns = GridCells.Adaptive(148.dp),
+            columns = GridCells.Adaptive(UiDimens.MovieGridMin),
             state = gridState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 34.dp),
@@ -1182,14 +1216,14 @@ private fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () 
             },
         color = Color.Transparent,
         contentColor = TextPrimary,
-        shape = RoundedCornerShape(10.dp),
+        shape = MediaCardShape,
     ) {
         Column {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(3f / 2f)
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(MediaCardShape)
                     .background(Raised),
                 contentAlignment = Alignment.Center,
             ) {
@@ -1247,7 +1281,7 @@ private fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () 
 @Composable
 private fun MovieSkeletonGrid() {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(148.dp),
+        columns = GridCells.Adaptive(UiDimens.MovieGridMin),
         modifier = Modifier.fillMaxSize(),
         userScrollEnabled = false,
         contentPadding = PaddingValues(start = 10.dp, top = 8.dp, end = 10.dp, bottom = 34.dp),
@@ -1284,6 +1318,7 @@ private fun MovieCatalogState(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MovieDetail(
     movie: MovieItem,
@@ -1300,11 +1335,13 @@ private fun MovieDetail(
     onPlay: () -> Unit,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
+    onVolume: (Float) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
     onPip: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onOpenMetadata: (MovieMetadataEntity) -> Unit,
 ) {
     // A started film takes the whole surface. The portrait case used to pin a
     // sixteen by nine strip under the top edge, leave the rest of the page to the
@@ -1319,6 +1356,7 @@ private fun MovieDetail(
             fullscreen = fullscreen,
             onTogglePlayback = onTogglePlayback,
             onMuted = onMuted,
+            onVolume = onVolume,
             onSeek = onSeek,
             onSeekBy = onSeekBy,
             onFullscreen = onFullscreen,
@@ -1430,20 +1468,22 @@ private fun MovieDetail(
                     Spacer(Modifier.height(4.dp))
                     Text(it, color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
                 }
-                val hasExtendedMetadata = movie.releaseDate != null || movie.studio != null ||
-                    movie.genres.isNotEmpty() || movie.performers.isNotEmpty() ||
+                val hasExtendedMetadata = movie.releaseDate != null || movie.studioEntity != null ||
+                    movie.genreEntities.isNotEmpty() || movie.performerEntities.isNotEmpty() ||
+                    movie.yearEntity != null ||
                     movie.metadataProvider != null
                 if (hasExtendedMetadata) {
                     Spacer(Modifier.height(24.dp))
                     Text("资料", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                     movie.releaseDate?.let { MovieMetadataLine("发行", it) }
-                    movie.studio?.let { MovieMetadataLine("制作", it) }
-                    movie.genres.takeIf { it.isNotEmpty() }?.let {
-                        MovieMetadataLine("类型", it.joinToString(" · "))
+                    movie.yearEntity?.let { entity ->
+                        MovieMetadataLine("年份", entity.name) { onOpenMetadata(entity) }
                     }
-                    movie.performers.takeIf { it.isNotEmpty() }?.let {
-                        MovieMetadataLine("演员", it.joinToString(" · "))
+                    movie.studioEntity?.let { entity ->
+                        MovieMetadataLine("制作", entity.name) { onOpenMetadata(entity) }
                     }
+                    MovieMetadataChipRow("类型", movie.genreEntities, onOpenMetadata)
+                    MovieMetadataChipRow("演员", movie.performerEntities, onOpenMetadata)
                     movie.metadataProvider?.let { provider ->
                         MovieMetadataLine("资料来源", metadataProviderLabel(provider))
                     }
@@ -1454,6 +1494,40 @@ private fun MovieDetail(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MovieMetadataChipRow(
+    label: String,
+    entities: List<MovieMetadataEntity>,
+    onOpenMetadata: (MovieMetadataEntity) -> Unit,
+) {
+    if (entities.isEmpty()) return
+    Spacer(Modifier.height(10.dp))
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            label,
+            modifier = Modifier.width(64.dp).heightIn(min = 48.dp).padding(top = 14.dp),
+            color = TextFaint,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        FlowRow(
+            modifier = Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            entities.forEach { entity ->
+                MetadataChip(
+                    label = entity.name,
+                    onClick = { onOpenMetadata(entity) },
+                )
+            }
+        }
+    }
+}
+
 /** Raw provider ids come straight from the API, so keep the UI labels here. */
 private fun metadataProviderLabel(provider: String): String = when (provider.lowercase()) {
     "shared" -> "共享元数据"
@@ -1461,9 +1535,15 @@ private fun metadataProviderLabel(provider: String): String = when (provider.low
 }
 
 @Composable
-private fun MovieMetadataLine(label: String, value: String) {
+private fun MovieMetadataLine(label: String, value: String, onClick: (() -> Unit)? = null) {
     Spacer(Modifier.height(10.dp))
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = UiDimens.TouchTarget)
+            .then(if (onClick == null) Modifier else Modifier.clickable(onClick = onClick)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Text(
             label,
             modifier = Modifier.width(64.dp),
@@ -1513,6 +1593,7 @@ internal fun MoviePlayer(
     fullscreen: Boolean,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
+    onVolume: (Float) -> Unit,
     onSeek: (Long) -> Unit,
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
@@ -1599,6 +1680,13 @@ internal fun MoviePlayer(
         // Chrome follows the tap in both orientations. Inside the floating window
         // it never draws at all: the system already frames that surface.
         val controlsVisible = !pipMode && chromeVisible
+        if (!pipMode) {
+            PlayerSideControls(
+                volume = player.volume,
+                onVolumeChanged = onVolume,
+                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+            )
+        }
         if (controlsVisible) {
             onBack?.let { back ->
                 GlassIconButton(
@@ -1609,30 +1697,32 @@ internal fun MoviePlayer(
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
                 }
             }
-            Row(
-                modifier = Modifier.align(Alignment.Center),
-                horizontalArrangement = Arrangement.spacedBy(if (fullscreen) 34.dp else 18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (fullscreen) {
-                    OverlayIconControl(label = "后退 10 秒", onClick = { onSeekBy(-10_000L) }) {
-                        Icon(Icons.Outlined.Replay10, contentDescription = null)
-                    }
-                }
-                OverlayIconControl(
-                    label = if (player.playWhenReady) "暂停" else "播放",
-                    size = 64,
-                    onClick = onTogglePlayback,
+            if (!player.isBuffering) {
+                Row(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalArrangement = Arrangement.spacedBy(if (fullscreen) 34.dp else 18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(32.dp),
-                    )
-                }
-                if (fullscreen) {
-                    OverlayIconControl(label = "快进 10 秒", onClick = { onSeekBy(10_000L) }) {
-                        Icon(Icons.Outlined.Forward10, contentDescription = null)
+                    if (fullscreen) {
+                        OverlayIconControl(label = "后退 10 秒", onClick = { onSeekBy(-10_000L) }) {
+                            Icon(Icons.Outlined.Replay10, contentDescription = null)
+                        }
+                    }
+                    OverlayIconControl(
+                        label = if (player.playWhenReady) "暂停" else "播放",
+                        size = 64,
+                        onClick = onTogglePlayback,
+                    ) {
+                        Icon(
+                            if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = null,
+                            modifier = Modifier.size(32.dp),
+                        )
+                    }
+                    if (fullscreen) {
+                        OverlayIconControl(label = "快进 10 秒", onClick = { onSeekBy(10_000L) }) {
+                            Icon(Icons.Outlined.Forward10, contentDescription = null)
+                        }
                     }
                 }
             }
@@ -1653,15 +1743,19 @@ internal fun MoviePlayer(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (!fullscreen) {
-                        IconButton(
-                            onClick = onTogglePlayback,
-                            modifier = Modifier.size(48.dp),
-                            colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
-                        ) {
-                            Icon(
-                                if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                                contentDescription = if (player.playWhenReady) "暂停" else "播放",
-                            )
+                        if (player.isBuffering) {
+                            Spacer(Modifier.size(48.dp))
+                        } else {
+                            IconButton(
+                                onClick = onTogglePlayback,
+                                modifier = Modifier.size(48.dp),
+                                colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White),
+                            ) {
+                                Icon(
+                                    if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                    contentDescription = if (player.playWhenReady) "暂停" else "播放",
+                                )
+                            }
                         }
                     }
                     Text(

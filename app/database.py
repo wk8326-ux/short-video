@@ -17,6 +17,11 @@ from typing import Any
 # is retried on later manual scans, but only this many times. Past that budget it
 # is skipped for good so one bad directory can never stall an entire library.
 SCAN_STEP_MAX_ATTEMPTS = 3
+MOVIE_METADATA_ENTITY_TYPES = ("performer", "studio", "genre", "year")
+
+
+def normalize_metadata_entity_name(value: Any) -> str:
+    return " ".join(str(value or "").strip().split()).casefold()
 
 # A series' category is the first folder under the scan root ("短剧", "漫剧",
 # "真人剧", …). Rows indexed before the column existed, or folders the
@@ -235,9 +240,6 @@ class LibraryDatabase:
                     tmdb_id INTEGER,
                     metadata_provider TEXT,
                     release_date TEXT,
-                    genres TEXT,
-                    performers TEXT,
-                    studio TEXT,
                     match_status TEXT NOT NULL DEFAULT 'pending',
                     match_confidence REAL,
                     scraped_at TEXT,
@@ -248,6 +250,25 @@ class LibraryDatabase:
                     ON movies(source, display_title COLLATE NOCASE);
                 CREATE INDEX IF NOT EXISTS idx_movies_match_status
                     ON movies(source, match_status, updated_at);
+                CREATE TABLE IF NOT EXISTS movie_metadata_entities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    type TEXT NOT NULL CHECK(type IN ('performer', 'studio', 'genre', 'year')),
+                    name TEXT NOT NULL,
+                    normalized_name TEXT NOT NULL,
+                    UNIQUE(type, normalized_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_movie_metadata_entities_type_name
+                    ON movie_metadata_entities(type, name COLLATE NOCASE);
+                CREATE TABLE IF NOT EXISTS movie_metadata_links (
+                    movie_id INTEGER NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(movie_id, entity_id),
+                    FOREIGN KEY(movie_id) REFERENCES movies(id) ON DELETE CASCADE,
+                    FOREIGN KEY(entity_id) REFERENCES movie_metadata_entities(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_movie_metadata_links_entity
+                    ON movie_metadata_links(entity_id, movie_id);
                 CREATE INDEX IF NOT EXISTS idx_videos_series
                     ON videos(series_id, active, id);
                 CREATE TABLE IF NOT EXISTS dramas (
@@ -321,12 +342,16 @@ class LibraryDatabase:
             for name, definition in (
                 ("metadata_provider", "TEXT"),
                 ("release_date", "TEXT"),
-                ("genres", "TEXT"),
-                ("performers", "TEXT"),
-                ("studio", "TEXT"),
             ):
                 if name not in movie_columns:
                     connection.execute(f"ALTER TABLE movies ADD COLUMN {name} {definition}")
+            # The relationship tables are the new source of truth. SQLite can
+            # drop these retired columns in place, so an upgraded database does
+            # not keep two competing metadata contracts around.
+            for name in ("genres", "performers", "studio"):
+                if name in movie_columns:
+                    connection.execute(f"ALTER TABLE movies DROP COLUMN {name}")
+            connection.commit()
 
     @staticmethod
     def _migrate_media_source_roots(connection: sqlite3.Connection) -> None:
@@ -508,6 +533,7 @@ class LibraryDatabase:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10, check_same_thread=False)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
     def replace_scan(self, videos: Iterable[dict[str, Any]], *, source: str = "guangya") -> int:
@@ -1488,6 +1514,7 @@ class LibraryDatabase:
         sources: Sequence[str] = (),
         sort: str = "cover",
         direction: str = "",
+        metadata_entity_id: int | None = None,
     ) -> list[dict[str, Any]]:
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "m.source IN")
@@ -1499,6 +1526,12 @@ class LibraryDatabase:
                 "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\')"
             )
             params.extend([f"%{escaped}%", f"%{escaped}%"])
+        if metadata_entity_id is not None:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM movie_metadata_links mml "
+                "WHERE mml.movie_id = m.id AND mml.entity_id = ?)"
+            )
+            params.append(int(metadata_entity_id))
         has_poster = "(LOWER(COALESCE(m.poster_url, '')) <> '')"
         has_thumb = "(LOWER(COALESCE(v.thumb, '')) <> '')"
         has_backdrop = "(LOWER(COALESCE(m.backdrop_url, '')) <> '')"
@@ -1568,7 +1601,13 @@ class LibraryDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def movie_count(self, *, search: str = "", sources: Sequence[str] = ()) -> int:
+    def movie_count(
+        self,
+        *,
+        search: str = "",
+        sources: Sequence[str] = (),
+        metadata_entity_id: int | None = None,
+    ) -> int:
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "m.source IN")
         conditions = ["v.active = 1", source_clause]
@@ -1579,6 +1618,12 @@ class LibraryDatabase:
                 "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\')"
             )
             params.extend([f"%{escaped}%", f"%{escaped}%"])
+        if metadata_entity_id is not None:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM movie_metadata_links mml "
+                "WHERE mml.movie_id = m.id AND mml.entity_id = ?)"
+            )
+            params.append(int(metadata_entity_id))
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 f"""
@@ -1640,7 +1685,76 @@ class LibraryDatabase:
                 """,
                 [movie_id, *source_params],
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        movie = dict(row)
+        movie["metadata_entities"] = self.movie_metadata_entities(movie_id)
+        return movie
+
+    def movie_metadata_entities(self, movie_id: int) -> dict[str, list[dict[str, Any]]]:
+        """Return clickable metadata attached to one movie, in provider order."""
+        grouped = {entity_type: [] for entity_type in MOVIE_METADATA_ENTITY_TYPES}
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT e.id, e.type, e.name, l.position,
+                       COUNT(DISTINCT CASE WHEN linked_video.id IS NOT NULL THEN linked.movie_id END)
+                           AS movie_count
+                FROM movie_metadata_links l
+                JOIN movie_metadata_entities e ON e.id = l.entity_id
+                LEFT JOIN movie_metadata_links linked ON linked.entity_id = e.id
+                LEFT JOIN movies linked_movie ON linked_movie.id = linked.movie_id
+                LEFT JOIN videos linked_video
+                    ON linked_video.id = linked_movie.video_id AND linked_video.active = 1
+                WHERE l.movie_id = ?
+                GROUP BY e.id, e.type, e.name, l.position
+                ORDER BY CASE e.type
+                    WHEN 'year' THEN 0 WHEN 'studio' THEN 1
+                    WHEN 'genre' THEN 2 ELSE 3 END,
+                    l.position, e.id
+                """,
+                (int(movie_id),),
+            ).fetchall()
+        for row in rows:
+            grouped[str(row["type"])].append(
+                {
+                    "id": int(row["id"]),
+                    "type": str(row["type"]),
+                    "name": str(row["name"]),
+                    "movie_count": int(row["movie_count"] or 0),
+                }
+            )
+        return grouped
+
+    def movie_metadata_entity(
+        self,
+        entity_id: int,
+        *,
+        sources: Sequence[str] = (),
+    ) -> dict[str, Any] | None:
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT e.id, e.type, e.name, COUNT(DISTINCT m.id) AS movie_count
+                FROM movie_metadata_entities e
+                LEFT JOIN movie_metadata_links l ON l.entity_id = e.id
+                LEFT JOIN movies m ON m.id = l.movie_id
+                LEFT JOIN videos v ON v.id = m.video_id AND v.active = 1
+                WHERE e.id = ? AND (m.id IS NULL OR ({source_clause} AND v.id IS NOT NULL))
+                GROUP BY e.id, e.type, e.name
+                """,
+                [int(entity_id), *source_params],
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": int(row["id"]),
+            "type": str(row["type"]),
+            "name": str(row["name"]),
+            "movie_count": int(row["movie_count"] or 0),
+        }
 
     def set_movie_favorite(self, video_id: int, favorite: bool) -> bool:
         """Add or drop one title from the account-wide favourites list.
@@ -1965,11 +2079,13 @@ class LibraryDatabase:
                       AND {source_clause}
                 )
                 SELECT d.*, ranked.video_id AS resume_video_id,
+                       resume_video.thumb AS resume_thumb,
                        ranked.resume_position_ms, ranked.watched_duration_ms,
                        ranked.completed AS resume_completed,
                        ranked.watched_at
                 FROM ranked
                 JOIN dramas d ON d.id = ranked.series_id
+                JOIN videos resume_video ON resume_video.id = ranked.video_id
                 WHERE ranked.recency = 1 AND d.episode_count > 0
                 ORDER BY ranked.watched_at DESC, ranked.video_id DESC
                 LIMIT ?
@@ -2080,28 +2196,74 @@ class LibraryDatabase:
             ).fetchall()
         return [str(row["source"]) for row in rows]
 
-    def update_movie_metadata(self, movie_id: int, **values: Any) -> None:
+    def update_movie_metadata(
+        self,
+        movie_id: int,
+        *,
+        metadata_entities: dict[str, Sequence[Any]] | None = None,
+        **values: Any,
+    ) -> None:
         allowed = {
             "display_title", "normalized_title", "original_title", "year", "overview",
             "poster_url", "backdrop_url", "rating", "runtime_minutes", "tmdb_id",
-            "metadata_provider", "release_date",
-            "genres", "performers", "studio", "match_status", "match_confidence",
+            "metadata_provider", "release_date", "match_status", "match_confidence",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
-        if not updates:
+        if not updates and metadata_entities is None:
             return
-        updates["scraped_at"] = "CURRENT_TIMESTAMP"
-        assignments = ", ".join(
-            f"{key} = {value}" if value == "CURRENT_TIMESTAMP" else f"{key} = ?"
-            for key, value in updates.items()
-        )
-        params = [value for value in updates.values() if value != "CURRENT_TIMESTAMP"]
-        params.append(movie_id)
         with self._lock, self._connect() as connection:
-            connection.execute(
-                f"UPDATE movies SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                params,
-            )
+            if updates:
+                updates["scraped_at"] = "CURRENT_TIMESTAMP"
+                assignments = ", ".join(
+                    f"{key} = {value}" if value == "CURRENT_TIMESTAMP" else f"{key} = ?"
+                    for key, value in updates.items()
+                )
+                params = [value for value in updates.values() if value != "CURRENT_TIMESTAMP"]
+                params.append(movie_id)
+                connection.execute(
+                    f"UPDATE movies SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    params,
+                )
+            if metadata_entities is not None:
+                connection.execute(
+                    "DELETE FROM movie_metadata_links WHERE movie_id = ?",
+                    (int(movie_id),),
+                )
+                for entity_type in MOVIE_METADATA_ENTITY_TYPES:
+                    seen: set[str] = set()
+                    position = 0
+                    for raw_name in metadata_entities.get(entity_type, ()):
+                        name = " ".join(str(raw_name or "").strip().split())
+                        normalized = normalize_metadata_entity_name(name)
+                        if not normalized or normalized in seen:
+                            continue
+                        seen.add(normalized)
+                        connection.execute(
+                            """
+                            INSERT INTO movie_metadata_entities(type, name, normalized_name)
+                            VALUES(?, ?, ?)
+                            ON CONFLICT(type, normalized_name) DO UPDATE SET name = excluded.name
+                            """,
+                            (entity_type, name, normalized),
+                        )
+                        entity_row = connection.execute(
+                            "SELECT id FROM movie_metadata_entities WHERE type = ? AND normalized_name = ?",
+                            (entity_type, normalized),
+                        ).fetchone()
+                        connection.execute(
+                            "INSERT INTO movie_metadata_links(movie_id, entity_id, position) VALUES(?, ?, ?)",
+                            (int(movie_id), int(entity_row["id"]), position),
+                        )
+                        position += 1
+                connection.execute(
+                    """
+                    DELETE FROM movie_metadata_entities
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM movie_metadata_links l
+                        WHERE l.entity_id = movie_metadata_entities.id
+                    )
+                    """
+                )
 
     def seed_media_sources(self, sources: Iterable[dict[str, Any]]) -> None:
         records = list(sources)

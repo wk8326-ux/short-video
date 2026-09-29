@@ -5,6 +5,7 @@
 package you.deepfuck.shortvideo.media
 
 import android.content.Context
+import android.media.AudioManager
 import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.AudioAttributes
@@ -32,6 +33,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
@@ -44,6 +46,7 @@ data class PlayerSnapshot(
     val isPlaying: Boolean = false,
     val playWhenReady: Boolean = false,
     val isBuffering: Boolean = false,
+    val volume: Float = 0f,
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
     val bufferedMs: Long = 0L,
@@ -54,6 +57,14 @@ data class PlaybackEndedEvent(
     val mediaId: Long,
     val generation: Long,
 )
+
+internal fun volumeIndexForFraction(fraction: Float, maxVolume: Int): Int {
+    if (maxVolume <= 0) return 0
+    return (fraction.coerceIn(0f, 1f) * maxVolume).roundToInt().coerceIn(0, maxVolume)
+}
+
+internal fun volumeFractionForIndex(index: Int, maxVolume: Int): Float =
+    if (maxVolume <= 0) 0f else index.coerceIn(0, maxVolume).toFloat() / maxVolume
 
 internal class PlaybackIdentity {
     private var mediaId: Long? = null
@@ -77,6 +88,7 @@ internal class PlaybackIdentity {
 }
 
 class PlaybackEngine(context: Context, private val api: MediaApi) {
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val logs = AppLogStore.get(context)
     private val cache = MediaCacheStore.get(context)
@@ -161,6 +173,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
                 }
             },
         )
+        publish()
     }
 
     fun play(
@@ -259,6 +272,13 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun setMuted(muted: Boolean) {
         player.volume = if (muted) 0f else 1f
+        publish()
+    }
+
+    fun setVolume(volume: Float) {
+        val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val index = volumeIndexForFraction(volume, maxVolume)
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, index, 0)
         publish()
     }
 
@@ -428,6 +448,10 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             isPlaying = player.isPlaying,
             playWhenReady = player.playWhenReady,
             isBuffering = player.playbackState == Player.STATE_BUFFERING,
+            volume = volumeFractionForIndex(
+                audioManager.getStreamVolume(AudioManager.STREAM_MUSIC),
+                audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+            ),
             positionMs = player.currentPosition.coerceAtLeast(0L),
             durationMs = duration,
             bufferedMs = player.bufferedPosition.coerceAtLeast(0L),

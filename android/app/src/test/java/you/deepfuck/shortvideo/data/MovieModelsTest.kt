@@ -39,6 +39,11 @@ class MovieModelsTest {
                   "path": "/Arrival.2016.mkv",
                   "size": 1234,
                   "format": "mkv"
+                  ,"releaseDate": "2016-09-02"
+                  ,"yearEntity": {"id":1,"type":"year","name":"2016","movieCount":8}
+                  ,"studioEntity": {"id":2,"type":"studio","name":"Paramount","movieCount":12}
+                  ,"genreEntities": [{"id":3,"type":"genre","name":"科幻","movieCount":25}]
+                  ,"performerEntities": [{"id":4,"type":"performer","name":"Amy Adams","movieCount":6}]
                 }
                 """.trimIndent(),
             ),
@@ -50,6 +55,11 @@ class MovieModelsTest {
         assertEquals(7.6, movie.rating ?: 0.0, 0.001)
         assertEquals("mkv", movie.format)
         assertEquals("/api/movies/7/poster", movie.wallUrl)
+        assertEquals("2016-09-02", movie.releaseDate)
+        assertEquals("2016", movie.yearEntity?.name)
+        assertEquals("Paramount", movie.studioEntity?.name)
+        assertEquals("科幻", movie.genreEntities.single().name)
+        assertEquals(6, movie.performerEntities.single().movieCount)
         assertEquals(42L, movie.asMediaEntry().id)
         assertFalse(movie.asMediaEntry().isAudio)
     }
@@ -66,6 +76,39 @@ class MovieModelsTest {
         assertNull(movie.rating)
         assertNull(movie.durationSeconds)
         assertEquals(0f, movie.resumeFraction)
+    }
+
+    @Test
+    fun matchedDramaWithoutPosterUsesTheDramaPosterProxyPath() {
+        val drama = DramaItem.fromJson(
+            JSONObject(
+                """{"id":"drama-7","title":"Series","matchStatus":"matched","posterUrl":null}""",
+            ),
+        )
+
+        assertEquals("/api/dramas/drama-7/poster", drama.normalizedPosterPath())
+    }
+
+    @Test
+    fun dramaPosterPathTrimsTheServerValue() {
+        val drama = DramaItem.fromJson(
+            JSONObject(
+                """{"id":"drama-8","title":"Series","matchStatus":"matched","posterUrl":"  /api/dramas/drama-8/poster  "}""",
+            ),
+        )
+
+        assertEquals("/api/dramas/drama-8/poster", drama.normalizedPosterPath())
+    }
+
+    @Test
+    fun matchedDramaConvertsLegacyUpstreamPosterToTheProxyPath() {
+        val drama = DramaItem.fromJson(
+            JSONObject(
+                """{"id":"drama-9","title":"Series","matchStatus":"matched","posterUrl":"https://cdn.example/poster.jpg"}""",
+            ),
+        )
+
+        assertEquals("/api/dramas/drama-9/poster", drama.normalizedPosterPath())
     }
 
     @Test

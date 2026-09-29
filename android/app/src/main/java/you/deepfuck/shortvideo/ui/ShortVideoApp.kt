@@ -143,6 +143,13 @@ fun ShortVideoApp(
     BackHandler(
         enabled = !fullscreen && !state.showManagement &&
             state.surface == MediaSurface.MOVIE && state.selectedMovie == null &&
+            state.movieMetadataEntity != null,
+    ) {
+        viewModel.closeMovieMetadata()
+    }
+    BackHandler(
+        enabled = !fullscreen && !state.showManagement &&
+            state.surface == MediaSurface.MOVIE && state.selectedMovie == null &&
             state.openMovieGroupId != null,
     ) {
         viewModel.closeMovieGroup()
@@ -224,9 +231,10 @@ fun ShortVideoApp(
                             onExpand = viewModel::expandNowPlaying,
                             onCollapse = viewModel::collapsePlayer,
                             onClose = viewModel::closeAsmrPlayer,
-                            onToggle = viewModel::togglePlayback,
-                            onMuted = viewModel::setMuted,
-                            onSeek = viewModel.playback::seekTo,
+                             onToggle = viewModel::togglePlayback,
+                             onMuted = viewModel::setMuted,
+                             onVolume = viewModel::setVolume,
+                             onSeek = viewModel.playback::seekTo,
                             onSeekBy = viewModel.playback::seekBy,
                             onVideoBackgroundPlayback = { enabled ->
                                 if (enabled) onBackgroundPlaybackRequested()
@@ -254,6 +262,7 @@ fun ShortVideoApp(
                                     ?.let(viewModel::movieGroupListPosition)
                                     ?: you.deepfuck.shortvideo.ListPosition(),
                                 favoritesListPosition = viewModel.movieFavoritesListPosition(),
+                                metadataListPosition = viewModel::movieMetadataListPosition,
                                 onSelect = viewModel::selectMovie,
                                 onBack = viewModel::closeMovieDetail,
                                 onPlay = viewModel::playMovie,
@@ -266,12 +275,17 @@ fun ShortVideoApp(
                                 onCloseFavorites = viewModel::closeMovieFavorites,
                                 onLoadMoreFavorites = viewModel::loadMoreMovieFavorites,
                                 onFavoritesListPosition = viewModel::saveMovieFavoritesListPosition,
+                                onOpenMetadata = viewModel::openMovieMetadata,
+                                onCloseMetadata = viewModel::closeMovieMetadata,
+                                onLoadMoreMetadata = viewModel::loadMoreMovieMetadata,
+                                onMetadataListPosition = viewModel::saveMovieMetadataListPosition,
                                 onToggleFavorite = viewModel::toggleMovieFavorite,
                                 onWallView = viewModel::setMovieWallView,
                                 onRetry = viewModel::retryMovies,
-                                onTogglePlayback = viewModel::togglePlayback,
-                                onMuted = viewModel::setMuted,
-                                onSeek = viewModel.playback::seekTo,
+                                 onTogglePlayback = viewModel::togglePlayback,
+                                 onMuted = viewModel::setMuted,
+                                 onVolume = viewModel::setVolume,
+                                 onSeek = viewModel.playback::seekTo,
                                 onSeekBy = viewModel.playback::seekBy,
                                 onFullscreen = {
                                     fullscreen = it
@@ -300,9 +314,10 @@ fun ShortVideoApp(
                                 onCloseGroup = viewModel::closeDramaGroup,
                                 onLoadMoreGroup = viewModel::loadMoreDramaGroup,
                                 onRetry = viewModel::retryDramas,
-                                onTogglePlayback = viewModel::togglePlayback,
-                                onMuted = viewModel::setMuted,
-                                onSeek = viewModel.playback::seekTo,
+                                 onTogglePlayback = viewModel::togglePlayback,
+                                 onMuted = viewModel::setMuted,
+                                 onVolume = viewModel::setVolume,
+                                 onSeek = viewModel.playback::seekTo,
                                 onSeekBy = viewModel.playback::seekBy,
                                 onFullscreen = {
                                     fullscreen = it
@@ -326,6 +341,7 @@ fun ShortVideoApp(
                             onRetry = viewModel::retryFeed,
                             onTogglePlayback = viewModel::togglePlayback,
                             onMuted = viewModel::setMuted,
+                            onVolume = viewModel::setVolume,
                             onSeek = viewModel.playback::seekTo,
                             onSeekBy = viewModel.playback::seekBy,
                             onFullscreen = {
@@ -485,7 +501,7 @@ internal fun AppNavigation(
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .height(52.dp)
+            .height(UiDimens.NavigationHeight)
             .padding(horizontal = if (compact) 8.dp else 12.dp),
     ) {
         // 分栏数量会随板块增加，这里按两侧各留一个 48dp 圆钮的空间来分配宽度，
@@ -501,7 +517,7 @@ internal fun AppNavigation(
             modifier = Modifier
                 .align(Alignment.Center)
                 .width(tabWidth * MediaSurface.entries.size + 16.dp)
-                .height(52.dp),
+                .height(UiDimens.NavigationHeight),
             fill = GlassFillSoft,
             line = Line,
         ) {

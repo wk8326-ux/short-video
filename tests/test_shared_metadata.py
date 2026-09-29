@@ -115,6 +115,41 @@ async def test_lookup_uses_the_complete_media_path_before_code_fallback():
 
 
 @pytest.mark.asyncio
+async def test_lookup_keeps_genres_and_the_real_release_date_from_the_index():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/index")
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "total": 1,
+                "items": [
+                    _entry(
+                        "ABP-485",
+                        "ABP-485",
+                        actors=["演员甲", "演员乙"],
+                        genres=["剧情", "制服"],
+                        studio="片商",
+                        premiered="2024-07-19",
+                    )
+                ],
+            },
+        )
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(base_url=BASE, token="t", client=http_client)
+
+    match = await client.lookup("ABP-485.mp4", "/光鸭/ABP-485/ABP-485.mp4")
+    await http_client.aclose()
+
+    assert match is not None
+    assert match.performers == ("演员甲", "演员乙")
+    assert match.genres == ("剧情", "制服")
+    assert match.studio == "片商"
+    assert match.release_date == "2024-07-19"
+
+
+@pytest.mark.asyncio
 async def test_path_index_normalizes_mount_encoding_slashes_and_case():
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("/index")

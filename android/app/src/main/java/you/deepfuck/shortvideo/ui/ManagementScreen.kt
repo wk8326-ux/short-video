@@ -620,17 +620,14 @@ private fun OrderStepButton(
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
-    Icon(
-        icon,
-        contentDescription = label,
+    GlassIconButton(
+        label = label,
+        onClick = onClick,
+        enabled = enabled,
         tint = if (enabled) TextSecondary else Line,
-        modifier = Modifier
-            .size(32.dp)
-            .clip(ControlShape)
-            .clickable(enabled = enabled, onClick = onClick)
-            .semantics { contentDescription = label }
-            .padding(4.dp),
-    )
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
+    }
 }
 
 @Composable
@@ -683,12 +680,9 @@ private fun MediaSourceRow(
             val roots = source.effectiveRootPaths
             Box(
                 modifier = Modifier
-                    // A full 48dp target would push the card 28dp taller on every
-                    // row, which undoes the compaction the list was built for. A
-                    // 32dp chip over a 44dp wide target keeps it tappable, and a
-                    // minimum rather than a fixed width lets a two-digit count
-                    // grow instead of clipping.
-                    .defaultMinSize(minWidth = 44.dp, minHeight = 32.dp)
+                    // Keep the visual chip compact while giving the whole control
+                    // the same 48dp touch target as every other action.
+                    .defaultMinSize(minWidth = UiDimens.TouchTarget, minHeight = UiDimens.TouchTarget)
                     .clip(ControlShape)
                     .clickable { rootsExpanded = !rootsExpanded }
                     .semantics {
