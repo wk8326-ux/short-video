@@ -1966,14 +1966,22 @@ select:focus-visible {
 }
 
 .source-dialog input:not([type="checkbox"]),
-.source-dialog select {
+.source-dialog select,
+.source-dialog textarea {
   width: 100%;
   min-height: 46px;
-  padding: 0 var(--space-3);
+  padding: var(--space-3);
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: var(--radius-control);
   color: var(--text);
   background: var(--canvas);
+}
+
+.source-dialog textarea {
+  min-height: 92px;
+  resize: vertical;
+  font: inherit;
+  line-height: 1.5;
 }
 
 .source-form-pair {

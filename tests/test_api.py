@@ -251,6 +251,7 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     assert update_head.status_code == 200
     assert update_head.content == b""
     assert update_head.headers["content-length"] == str(apk.stat().st_size)
+    assert update_head.headers["cache-control"] == "private, no-store, no-transform"
     assert update_apk.content == b"signed-apk"
     assert update_apk.headers["content-type"] == "application/vnd.android.package-archive"
     assert update_apk.headers["x-apk-sha256"] == sha256

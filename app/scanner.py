@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from app.alist import AListClient, AListError
-from app.database import LibraryDatabase
+from app.database import LibraryDatabase, path_is_excluded
 
 STEP_DIRECTORY = "directory"
 STEP_AUTHORS = "authors"
@@ -26,14 +26,16 @@ MAX_ERROR_LENGTH = 400
 
 
 class StepPlan:
-    __slots__ = ("records", "steps")
+    __slots__ = ("records", "authors", "steps")
 
     def __init__(
         self,
         records: list[dict[str, Any]] | None = None,
+        authors: list[dict[str, str]] | None = None,
         steps: list[tuple[str, str]] | None = None,
     ) -> None:
         self.records = records or []
+        self.authors = authors or []
         self.steps = steps or []
 
 
@@ -67,7 +69,7 @@ def initial_steps(
         elif scan_mode == "authors_recursive":
             add(STEP_AUTHORS, root)
             for path in search_paths or (root,):
-                add(STEP_SEARCH, "/" + str(path).strip("/"))
+                add(STEP_AUTHORS, "/" + str(path).strip("/"))
         else:
             add(STEP_DIRECTORY, root)
     return steps
@@ -90,6 +92,8 @@ class ResumableScanner:
         source: str,
         marker: str,
         author_group_paths: frozenset[str] = frozenset(),
+        excluded_paths: Sequence[str] = (),
+        recursive_authors: bool = False,
         search_result_limit: int = 100_000,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
@@ -99,6 +103,8 @@ class ResumableScanner:
         self.source = source
         self.marker = marker
         self.author_group_paths = author_group_paths
+        self.excluded_paths = tuple(excluded_paths)
+        self.recursive_authors = recursive_authors
         self.search_result_limit = search_result_limit
         self.on_progress = on_progress
 
@@ -133,6 +139,7 @@ class ResumableScanner:
                 kind=kind,
                 path=path,
                 videos=plan.records,
+                authors=plan.authors,
                 steps=plan.steps,
             )
             if self.on_progress:
@@ -150,25 +157,45 @@ class ResumableScanner:
         )
 
     async def _handle(self, kind: str, path: str) -> StepPlan:
+        if path_is_excluded(path, self.excluded_paths):
+            return StepPlan()
         if kind == STEP_DIRECTORY:
             children, videos = await self.client.scan_directory(path)
             return StepPlan(
-                videos,
-                [(STEP_DIRECTORY, child) for child in children],
+                records=[
+                    video for video in videos
+                    if not path_is_excluded(str(video.get("path") or ""), self.excluded_paths)
+                ],
+                steps=[
+                    (STEP_DIRECTORY, child) for child in children
+                    if not path_is_excluded(child, self.excluded_paths)
+                ],
             )
         if kind == STEP_AUTHORS:
             entries = await self.client.list_directory(path)
-            return StepPlan(
-                steps=[
-                    (STEP_AUTHOR, posixpath.join(path, str(entry.get("name") or "")))
-                    for entry in entries
-                    if bool(entry.get("is_dir"))
-                    and str(entry.get("name") or "")
-                    and "/" not in str(entry.get("name") or "")
-                ]
-            )
+            authors: list[dict[str, str]] = []
+            steps: list[tuple[str, str]] = []
+            groups = {"/" + group.strip("/") for group in self.author_group_paths}
+            for entry in entries:
+                name = str(entry.get("name") or "")
+                if not bool(entry.get("is_dir")) or not name or "/" in name:
+                    continue
+                child = posixpath.join(path, name)
+                if path_is_excluded(child, self.excluded_paths):
+                    continue
+                if child in groups:
+                    steps.append((STEP_AUTHORS, child))
+                else:
+                    authors.append({"path": child, "author": name})
+                    steps.append((STEP_AUTHOR, child))
+            return StepPlan(authors=authors, steps=steps)
         if kind == STEP_AUTHOR:
-            author = posixpath.basename(path)
+            author = await asyncio.to_thread(
+                self.database.asmr_author_for_path,
+                source=self.source,
+                path=path,
+            )
+            author = author or posixpath.basename(path)
             if not author:
                 return StepPlan()
             entries = await self.client.list_directory(path)
@@ -177,8 +204,21 @@ class ResumableScanner:
                 for entry in entries
                 if (record := self.client.build_author_record(path, author, entry))
                 is not None
+                and not path_is_excluded(str(record.get("path") or ""), self.excluded_paths)
             ]
-            return StepPlan(records)
+            steps = [
+                (STEP_AUTHOR, posixpath.join(path, str(entry.get("name") or "")))
+                for entry in entries
+                if self.recursive_authors
+                and bool(entry.get("is_dir"))
+                and str(entry.get("name") or "")
+                and "/" not in str(entry.get("name") or "")
+                and not path_is_excluded(
+                    posixpath.join(path, str(entry.get("name") or "")),
+                    self.excluded_paths,
+                )
+            ]
+            return StepPlan(records=records, steps=steps)
         if kind == STEP_SEARCH:
             return await self._search(path)
         raise AListError(f"Unknown scan step {kind}")
@@ -193,6 +233,8 @@ class ResumableScanner:
                     author_group_paths=self.author_group_paths,
                 )
                 if record is None or record["path"] in seen:
+                    continue
+                if path_is_excluded(str(record["path"]), self.excluded_paths):
                     continue
                 seen.add(str(record["path"]))
                 records.append(record)

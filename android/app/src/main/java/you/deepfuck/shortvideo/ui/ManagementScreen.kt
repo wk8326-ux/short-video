@@ -945,6 +945,9 @@ private fun MediaSourceDialog(
     var rootPaths by remember(source?.id) {
         mutableStateOf(source?.effectiveRootPaths?.ifEmpty { listOf("/") } ?: listOf("/"))
     }
+    var excludedPaths by remember(source?.id) {
+        mutableStateOf(source?.excludedPaths.orEmpty())
+    }
     var section by remember(source?.id) { mutableStateOf(source?.section ?: LibrarySection.FEED) }
     var scanMode by remember(source?.id) {
         mutableStateOf(source?.scanMode ?: if (source?.section == LibrarySection.ASMR) "authors_recursive" else "tree")
@@ -1049,6 +1052,17 @@ private fun MediaSourceDialog(
                         onRoots = { rootPaths = it },
                         knownRoots = knownRoots,
                     )
+                    OutlinedTextField(
+                        value = excludedPaths.joinToString("\n"),
+                        onValueChange = { value ->
+                            excludedPaths = value.lines().map(String::trim).filter(String::isNotBlank).distinct()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("排除路径（每行一条）") },
+                        placeholder = { Text("/asmr/中文音声/小元") },
+                        minLines = 2,
+                        maxLines = 5,
+                    )
                 }
                 FieldGroup("鉴权", Icons.Outlined.Key) {
                     ToggleRow("匿名访问", anonymous) { anonymous = it }
@@ -1103,6 +1117,7 @@ private fun MediaSourceDialog(
                                     .map { it.trim() }
                                     .filter { it.isNotBlank() }
                                     .distinct(),
+                                excludedPaths = excludedPaths,
                                 section = section,
                                 scanMode = if (section.usesTreeScan) "tree" else scanMode,
                                 anonymous = anonymous,

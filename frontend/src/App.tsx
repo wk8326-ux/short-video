@@ -84,6 +84,7 @@ type MediaLibrarySource = {
   provider: "alist" | "openlist";
   baseUrl: string;
   rootPath: string;
+  excludedPaths: string[];
   section: LibrarySection;
   scanMode: "tree" | "authors" | "authors_recursive";
   anonymous: boolean;
@@ -1154,6 +1155,7 @@ function MediaSourceDialog({ source, saving, returnFocus, onClose, onSave }: Med
   const [provider, setProvider] = useState<"alist" | "openlist">(source?.provider ?? "alist");
   const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
   const [rootPath, setRootPath] = useState(source?.rootPath ?? "/");
+  const [excludedPaths, setExcludedPaths] = useState(source?.excludedPaths ?? []);
   const [section, setSection] = useState<LibrarySection>(source?.section ?? "feed");
   const [scanMode, setScanMode] = useState<"tree" | "authors" | "authors_recursive">(
     source?.scanMode ?? "tree",
@@ -1208,6 +1210,7 @@ function MediaSourceDialog({ source, saving, returnFocus, onClose, onSave }: Med
               provider,
               baseUrl: baseUrl.trim(),
               rootPath: rootPath.trim(),
+              excludedPaths: excludedPaths.map((path) => path.trim()).filter(Boolean),
               section,
               scanMode: section === "feed" ? "tree" : scanMode === "tree" ? "authors_recursive" : scanMode,
               anonymous,
@@ -1253,6 +1256,15 @@ function MediaSourceDialog({ source, saving, returnFocus, onClose, onSave }: Med
           <label>
             <span>根目录</span>
             <input value={rootPath} onChange={(event) => setRootPath(event.target.value)} placeholder="/media" required />
+          </label>
+          <label>
+            <span>排除路径（每行一条）</span>
+            <textarea
+              value={excludedPaths.join("\n")}
+              onChange={(event) => setExcludedPaths(event.target.value.split("\n"))}
+              placeholder="/asmr/中文音声/小元"
+              rows={3}
+            />
           </label>
           {section === "asmr" && (
             <label>

@@ -34,6 +34,7 @@ def source_payload(**overrides):
         "baseUrl": BASE_URL,
         "rootPath": "",
         "rootPaths": [ROOT, ARCHIVE_ROOT],
+        "excludedPaths": [ARCHIVE_ROOT + "/旧资源"],
         "section": "feed",
         "anonymous": True,
         "token": "",
@@ -69,6 +70,7 @@ async def test_a_source_scans_every_folder_it_was_given(monkeypatch, tmp_path):
         # The single-path field keeps naming the first folder, so an app built
         # before this change still shows something sensible.
         assert body["rootPath"] == ROOT
+        assert body["excludedPaths"] == [ARCHIVE_ROOT + "/旧资源"]
         source = body["id"]
 
     # Leaving the TestClient closes the registry, as a shutdown would.
@@ -104,6 +106,20 @@ async def test_a_source_without_any_folder_is_rejected(monkeypatch, tmp_path):
             headers=headers_for(main),
         )
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_excluded_source_path_must_be_inside_a_configured_root(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/admin/sources",
+            json=source_payload(excludedPaths=["/outside/小元"]),
+            headers=headers_for(main),
+        )
+    assert response.status_code == 422
+    assert "媒体源根目录之下" in response.json()["detail"]
+    await main.source_registry.close()
 
 
 @pytest.mark.asyncio

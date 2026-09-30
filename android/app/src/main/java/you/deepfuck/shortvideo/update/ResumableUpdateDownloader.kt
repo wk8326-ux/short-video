@@ -11,6 +11,8 @@ import okhttp3.Request
 internal class UpdateDownloadHttpException(val statusCode: Int) :
     IOException("Update download returned HTTP $statusCode")
 
+internal class UpdateIntegrityException(message: String) : IOException(message)
+
 internal class ResumableUpdateDownloader(
     private val client: OkHttpClient,
 ) {
@@ -40,6 +42,7 @@ internal class ResumableUpdateDownloader(
             val request = Request.Builder()
                 .url(url)
                 .get()
+                .header("Accept-Encoding", "identity")
                 .apply { if (resumeFrom > 0L) header("Range", "bytes=$resumeFrom-") }
                 .build()
 
@@ -108,7 +111,7 @@ internal class ResumableUpdateDownloader(
             }
             if (!sha256Matches(partial, expectedSha256)) {
                 deleteCorruptPartial(partial)
-                throw IOException("Downloaded APK failed SHA-256 verification")
+                throw UpdateIntegrityException("Downloaded APK failed SHA-256 verification")
             }
             finalizeDownload(partial, target)
             onProgress(expectedSize, expectedSize)

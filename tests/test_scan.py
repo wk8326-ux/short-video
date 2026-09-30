@@ -533,6 +533,94 @@ async def test_scanning_one_source_leaves_other_sources_untouched(
     await main.source_registry.close()
 
 
+@pytest.mark.asyncio
+async def test_excluded_author_is_not_listed_indexed_or_kept_active(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    excluded = ASMR_ROOT + "/小元"
+    main.database.replace_scan(
+        [
+            {
+                "path": excluded + "/old.mp3",
+                "name": "old.mp3",
+                "size": 10,
+                "author": "小元",
+                "media_format": "mp3",
+                "media_kind": "audio",
+            },
+            {
+                "path": ASMR_ROOT + "/小元2/kept.mp3",
+                "name": "kept.mp3",
+                "size": 10,
+                "author": "小元2",
+                "media_format": "mp3",
+                "media_kind": "audio",
+            },
+        ],
+        source="asmr6",
+    )
+    main.database.update_media_source("asmr6", {"excluded_paths": [excluded]})
+    await main.source_registry.reload_source("asmr6")
+
+    fake = FakeAList(
+        build_tree(
+            {
+                ASMR_ROOT: [],
+                excluded: ["new.mp3"],
+                ASMR_ROOT + "/小元2": ["kept.mp3"],
+                ASMR_ROOT + "/空作者": [],
+            }
+        )
+    )
+    await serve(main, "asmr6", fake)
+
+    assert await main.scan_source("asmr6") is True
+
+    authors = main.database.asmr_authors(sources=("asmr6",))
+    assert [row["author"] for row in authors] == ["小元2", "空作者"]
+    assert authors[0]["item_count"] == 1
+    assert authors[1]["item_count"] == 0
+    assert main.database.asmr_items(author="小元", sources=("asmr6",)) == []
+    assert excluded not in fake.listed
+    assert stored_rows(main, "asmr6")[excluded + "/old.mp3"]["active"] == 0
+    assert active_paths(main, "asmr6") == [ASMR_ROOT + "/小元2/kept.mp3"]
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_recursive_author_scan_skips_excluded_subtree(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    excluded = "/asmr/中文音声/小元"
+    main.database.update_media_source("asmr", {"excluded_paths": [excluded]})
+    await main.source_registry.reload_source("asmr")
+    fake = FakeAList(
+        build_tree(
+                {
+                    "/asmr": [],
+                    "/asmr/中文音声": [],
+                    excluded: ["not-read.mp3"],
+                    "/asmr/中文音声/小元2": [],
+                    "/asmr/中文音声/小元2/专辑": ["kept.mp3"],
+                }
+            )
+    )
+    await serve(main, "asmr", fake)
+
+    assert await main.scan_source("asmr") is True
+    assert fake.listed == [
+        "/asmr",
+        "/asmr/中文音声",
+        "/asmr/中文音声/小元2",
+        "/asmr/中文音声/小元2/专辑",
+    ]
+
+    authors = main.database.asmr_authors(sources=("asmr",))
+    assert [row["author"] for row in authors] == ["小元2"]
+    assert authors[0]["item_count"] == 1
+    assert active_paths(main, "asmr") == ["/asmr/中文音声/小元2/专辑/kept.mp3"]
+    assert excluded not in fake.listed
+    await main.source_registry.close()
+
+
 MOVIE_ROOT = "/movies"
 
 

@@ -15,6 +15,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import you.deepfuck.shortvideo.update.ResumableUpdateDownloader
+import you.deepfuck.shortvideo.update.UpdateIntegrityException
 import you.deepfuck.shortvideo.update.UpdateDownloadHttpException
 
 class ApiException(val statusCode: Int, message: String) : IOException(message)
@@ -444,6 +445,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .put("rootPaths", JSONArray(roots))
             // Kept for older servers that only know the single-folder field.
             .put("rootPath", roots.firstOrNull() ?: "/")
+            .put("excludedPaths", JSONArray(draft.excludedPaths.map(String::trim).filter(String::isNotBlank).distinct()))
             .put("section", draft.section.apiValue)
             .put("scanMode", draft.scanMode)
             .put("anonymous", draft.anonymous)
@@ -506,7 +508,10 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         }
 
         try {
-            ResumableUpdateDownloader(client).download(
+            // APKs are much larger than the JSON calls and may pause while a
+            // mobile connection changes networks. Give the body stream its own
+            // longer read timeout without weakening normal API timeouts.
+            ResumableUpdateDownloader(client.newBuilder().readTimeout(2, TimeUnit.MINUTES).build()).download(
                 url = targetUrl,
                 target = target,
                 expectedSize = update.size,
@@ -515,6 +520,8 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             )
         } catch (error: UpdateDownloadHttpException) {
             throw ApiException(error.statusCode, "HTTP ${error.statusCode}")
+        } catch (error: UpdateIntegrityException) {
+            throw ApiException(422, error.message ?: "Downloaded APK failed integrity verification")
         }
     }
 

@@ -206,6 +206,7 @@ internal class AppUpdateDownloadWorker(
             val message = when (error.statusCode) {
                 401, 403 -> "登录状态已失效，请重新登录后继续下载"
                 409 -> "服务器版本已变化，请重新检查更新"
+                422 -> "安装包完整性校验失败，已清除损坏文件，请重新下载"
                 else -> "更新服务返回 HTTP ${error.statusCode}"
             }
             logs.warning("app_update_download_http_error", "version=${update.versionCode} status=${error.statusCode}")
@@ -218,7 +219,18 @@ internal class AppUpdateDownloadWorker(
                 error,
             )
             if (runAttemptCount < MAX_RETRIES) Result.retry()
-            else Result.failure(workDataOf(AppUpdateWork.KEY_ERROR to "下载暂时中断，已保留进度，可稍后继续"))
+            else {
+                val retained = AppUpdateWork.partialFile(applicationContext, update).length()
+                val cause = error.message?.takeIf(String::isNotBlank)
+                val message = buildString {
+                    append("下载中断，已保留 ")
+                    append(retained)
+                    append(" 字节")
+                    if (cause != null) append("；原因：").append(cause)
+                    append("。请检查网络后继续下载")
+                }
+                Result.failure(workDataOf(AppUpdateWork.KEY_ERROR to message))
+            }
         } catch (error: Throwable) {
             logs.error("app_update_download_failed", "version=${update.versionCode}", error)
             Result.failure(workDataOf(AppUpdateWork.KEY_ERROR to "更新下载失败，已保留当前进度"))

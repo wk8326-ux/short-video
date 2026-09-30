@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import posixpath
 import random
 import secrets
 import sqlite3
@@ -71,6 +72,54 @@ def normalize_root_paths(value: Any, *, fallback: str = "/") -> list[str]:
     if not roots:
         roots.append("/" + str(fallback).strip().strip("/"))
     return roots
+
+
+def normalize_excluded_paths(
+    value: Any, *, roots: Sequence[str] = ()
+) -> list[str]:
+    """Normalize source-scoped blacklist paths without inventing a root."""
+    candidates: list[Any]
+    if isinstance(value, str):
+        text = value.strip()
+        parsed: Any = None
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+        candidates = parsed if isinstance(parsed, list) else text.splitlines()
+    elif isinstance(value, (list, tuple, set)):
+        candidates = list(value)
+    else:
+        candidates = []
+
+    normalized_roots = normalize_root_paths(roots) if roots else []
+    excluded: list[str] = []
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        raw_parts = candidate.strip().replace("\\", "/").split("/")
+        if ".." in raw_parts:
+            raise ValueError("排除路径不能包含 ..")
+        path = "/" + "/".join(part for part in raw_parts if part and part != ".")
+        if len(path) > 500:
+            raise ValueError("排除路径不能超过 500 个字符")
+        if normalized_roots and not any(
+            path.startswith(root.rstrip("/") + "/") for root in normalized_roots
+        ):
+            raise ValueError("排除路径必须位于媒体源根目录之下")
+        if path not in excluded:
+            excluded.append(path)
+    return excluded
+
+
+def path_is_excluded(path: str, excluded_paths: Sequence[str]) -> bool:
+    normalized = "/" + str(path).strip("/")
+    return any(
+        normalized == excluded.rstrip("/")
+        or normalized.startswith(excluded.rstrip("/") + "/")
+        for excluded in excluded_paths
+    )
 
 
 class LibraryDatabase:
@@ -163,6 +212,7 @@ class LibraryDatabase:
                     source TEXT NOT NULL,
                     marker TEXT NOT NULL,
                     root_path TEXT NOT NULL,
+                    excluded_paths TEXT NOT NULL DEFAULT '[]',
                     base_url TEXT NOT NULL,
                     scan_mode TEXT NOT NULL,
                     section TEXT NOT NULL,
@@ -199,6 +249,7 @@ class LibraryDatabase:
                     provider TEXT NOT NULL DEFAULT 'alist',
                     base_url TEXT NOT NULL,
                     root_path TEXT NOT NULL,
+                    excluded_paths TEXT NOT NULL DEFAULT '[]',
                     section TEXT NOT NULL,
                     scan_mode TEXT NOT NULL DEFAULT 'tree',
                     anonymous INTEGER NOT NULL DEFAULT 1,
@@ -216,6 +267,15 @@ class LibraryDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_media_sources_section
                     ON media_sources(section, enabled, name);
+                CREATE TABLE IF NOT EXISTS asmr_author_directories (
+                    source TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    author TEXT NOT NULL,
+                    scan_id TEXT,
+                    PRIMARY KEY(source, path)
+                );
+                CREATE INDEX IF NOT EXISTS idx_asmr_author_directories_author
+                    ON asmr_author_directories(source, author COLLATE NOCASE);
                 CREATE INDEX IF NOT EXISTS idx_videos_active ON videos(active, id);
                 CREATE INDEX IF NOT EXISTS idx_videos_modified ON videos(active, modified);
                 CREATE INDEX IF NOT EXISTS idx_videos_source_active
@@ -335,6 +395,8 @@ class LibraryDatabase:
             )
             self._migrate_media_source_roots(connection)
             self._migrate_media_source_order(connection)
+            self._migrate_excluded_paths(connection)
+            self._backfill_asmr_author_directories(connection)
             movie_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(movies)").fetchall()
@@ -471,6 +533,44 @@ class LibraryDatabase:
         connection.commit()
 
     @staticmethod
+    def _migrate_excluded_paths(connection: sqlite3.Connection) -> None:
+        for table in ("media_sources", "media_scan_jobs"):
+            columns = {
+                str(row["name"])
+                for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if columns and "excluded_paths" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN excluded_paths TEXT NOT NULL DEFAULT '[]'"
+                )
+        connection.commit()
+
+    @staticmethod
+    def _backfill_asmr_author_directories(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT v.source, v.path, v.author
+            FROM videos v
+            JOIN media_sources s ON s.id = v.source AND s.section = 'asmr'
+            WHERE v.author IS NOT NULL AND TRIM(v.author) != ''
+            """
+        ).fetchall()
+        records: set[tuple[str, str, str]] = set()
+        for row in rows:
+            source = str(row["source"])
+            author = str(row["author"])
+            parent = posixpath.dirname(str(row["path"])) or "/"
+            parts = parent.strip("/").split("/")
+            matching = [index for index, part in enumerate(parts) if part == author]
+            author_path = "/" + "/".join(parts[: matching[-1] + 1]) if matching else parent
+            records.add((source, author_path, author))
+        connection.executemany(
+            "INSERT OR IGNORE INTO asmr_author_directories(source, path, author) VALUES(?, ?, ?)",
+            sorted(records),
+        )
+        connection.commit()
+
+    @staticmethod
     def _migrate_video_path_uniqueness(connection: sqlite3.Connection) -> None:
         has_path_only_unique = False
         for index in connection.execute("PRAGMA index_list(videos)").fetchall():
@@ -584,6 +684,10 @@ class LibraryDatabase:
             """,
             (source, marker),
         )
+        connection.execute(
+            "DELETE FROM asmr_author_directories WHERE source = ? AND scan_id IS NOT ?",
+            (source, marker),
+        )
         return int(cursor.rowcount)
 
     def abort_scan(self, *, source: str, marker: str) -> None:
@@ -605,6 +709,7 @@ class LibraryDatabase:
         *,
         source: str,
         root_path: str,
+        excluded_paths: str = "[]",
         base_url: str,
         scan_mode: str,
         section: str,
@@ -634,11 +739,15 @@ class LibraryDatabase:
             connection.execute(
                 """
                 INSERT INTO media_scan_jobs(
-                    id, source, marker, root_path, base_url, scan_mode, section, status
+                    id, source, marker, root_path, excluded_paths,
+                    base_url, scan_mode, section, status
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, 'queued')
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'queued')
                 """,
-                (job_id, source, marker, root_path, base_url, scan_mode, section),
+                (
+                    job_id, source, marker, root_path, excluded_paths,
+                    base_url, scan_mode, section,
+                ),
             )
             connection.commit()
         return self.get_scan_job(job_id)
@@ -811,6 +920,14 @@ class LibraryDatabase:
                     (marker, source, prefix, f"{escaped}/%"),
                 )
                 carried += int(cursor.rowcount)
+                connection.execute(
+                    """
+                    UPDATE asmr_author_directories
+                    SET scan_id = ?
+                    WHERE source = ? AND (path = ? OR path LIKE ? ESCAPE '\\')
+                    """,
+                    (marker, source, prefix, f"{escaped}/%"),
+                )
             connection.commit()
         return carried
 
@@ -871,6 +988,7 @@ class LibraryDatabase:
         kind: str,
         path: str,
         videos: Iterable[dict[str, Any]] = (),
+        authors: Sequence[dict[str, str]] = (),
         steps: Sequence[tuple[str, str]] = (),
     ) -> int:
         """Persist one finished directory atomically.
@@ -934,6 +1052,20 @@ class LibraryDatabase:
                     rows,
                 )
                 self._set_scan_id(connection, source=source, marker=marker)
+            if authors:
+                connection.executemany(
+                    """
+                    INSERT INTO asmr_author_directories(source, path, author, scan_id)
+                    VALUES(?, ?, ?, ?)
+                    ON CONFLICT(source, path) DO UPDATE SET
+                        author = excluded.author,
+                        scan_id = excluded.scan_id
+                    """,
+                    [
+                        (source, item["path"], item["author"], marker)
+                        for item in authors
+                    ],
+                )
             connection.executemany(
                 """
                 INSERT INTO media_scan_directories(job_id, kind, path, status)
@@ -1082,6 +1214,7 @@ class LibraryDatabase:
 
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            rows = list(records())
             connection.executemany(
                 """
                 INSERT INTO videos(
@@ -1108,8 +1241,33 @@ class LibraryDatabase:
                     active = CASE WHEN videos.hidden = 1 THEN 0 ELSE 1 END,
                     last_seen = excluded.last_seen
                 """,
-                records(),
+                rows,
             )
+            is_asmr = source in {"asmr", "asmr6"} or connection.execute(
+                "SELECT 1 FROM media_sources WHERE id = ? AND section = 'asmr'",
+                (source,),
+            ).fetchone()
+            if is_asmr:
+                authors: set[tuple[str, str, str, str]] = set()
+                for row in rows:
+                    author = str(row.get("author") or "").strip()
+                    if not author:
+                        continue
+                    parent = posixpath.dirname(str(row["path"])) or "/"
+                    parts = parent.strip("/").split("/")
+                    matching = [index for index, part in enumerate(parts) if part == author]
+                    author_path = "/" + "/".join(parts[: matching[-1] + 1]) if matching else parent
+                    authors.add((source, author_path, author, scan_marker))
+                connection.executemany(
+                    """
+                    INSERT INTO asmr_author_directories(source, path, author, scan_id)
+                    VALUES(?, ?, ?, ?)
+                    ON CONFLICT(source, path) DO UPDATE SET
+                        author = excluded.author,
+                        scan_id = excluded.scan_id
+                    """,
+                    sorted(authors),
+                )
             if finalize:
                 self._finalize_locked(connection, source=source, marker=scan_marker)
             else:
@@ -2275,11 +2433,12 @@ class LibraryDatabase:
             connection.executemany(
                 """
                 INSERT INTO media_sources(
-                    id, name, provider, base_url, root_path, root_paths, section,
+                    id, name, provider, base_url, root_path, root_paths, excluded_paths, section,
                     scan_mode, anonymous, token, username, password, enabled
                 )
                 VALUES(
-                    :id, :name, :provider, :base_url, :root_path, :root_paths, :section,
+                    :id, :name, :provider, :base_url, :root_path, :root_paths,
+                    :excluded_paths, :section,
                     :scan_mode, :anonymous, :token, :username, :password, :enabled
                 )
                 ON CONFLICT(id) DO NOTHING
@@ -2314,12 +2473,13 @@ class LibraryDatabase:
             connection.execute(
                 """
                 INSERT INTO media_sources(
-                    id, name, provider, base_url, root_path, root_paths, section,
+                    id, name, provider, base_url, root_path, root_paths, excluded_paths, section,
                     scan_mode, anonymous, token, username, password, enabled,
                     sort_order
                 )
                 VALUES(
-                    :id, :name, :provider, :base_url, :root_path, :root_paths, :section,
+                    :id, :name, :provider, :base_url, :root_path, :root_paths,
+                    :excluded_paths, :section,
                     :scan_mode, :anonymous, :token, :username, :password, :enabled,
                     :sort_order
                 )
@@ -2335,6 +2495,7 @@ class LibraryDatabase:
             "base_url",
             "root_path",
             "root_paths",
+            "excluded_paths",
             "section",
             "scan_mode",
             "anonymous",
@@ -2360,16 +2521,46 @@ class LibraryDatabase:
             roots = normalize_root_paths(updates["root_path"])
             updates["root_path"] = roots[0]
             updates["root_paths"] = json.dumps(roots)
+        if "excluded_paths" in updates:
+            roots = normalize_root_paths(
+                updates.get("root_paths"),
+                fallback=updates.get("root_path") or "/",
+            )
+            try:
+                excluded = normalize_excluded_paths(updates["excluded_paths"], roots=roots)
+            except ValueError as exc:
+                raise ValueError(str(exc)) from exc
+            updates["excluded_paths"] = json.dumps(excluded, ensure_ascii=False)
         if "anonymous" in updates:
             updates["anonymous"] = int(bool(updates["anonymous"]))
         if "enabled" in updates:
             updates["enabled"] = int(bool(updates["enabled"]))
         assignments = ", ".join(f"{key} = ?" for key in updates)
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 f"UPDATE media_sources SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 [*updates.values(), source_id],
             )
+            if "excluded_paths" in updates:
+                for path in json.loads(str(updates["excluded_paths"])):
+                    escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    connection.execute(
+                        """
+                        UPDATE videos SET active = 0
+                        WHERE source = ? AND active = 1
+                          AND (path = ? OR path LIKE ? ESCAPE '\\')
+                        """,
+                        (source_id, path, f"{escaped}/%"),
+                    )
+                    connection.execute(
+                        """
+                        DELETE FROM asmr_author_directories
+                        WHERE source = ? AND (path = ? OR path LIKE ? ESCAPE '\\')
+                        """,
+                        (source_id, path, f"{escaped}/%"),
+                    )
+            connection.commit()
         return self.get_media_source(source_id)
 
     def delete_media_source(self, source_id: str) -> bool:
@@ -2383,6 +2574,7 @@ class LibraryDatabase:
                 return False
             connection.execute("DELETE FROM movies WHERE source = ?", (source_id,))
             connection.execute("DELETE FROM dramas WHERE source = ?", (source_id,))
+            connection.execute("DELETE FROM asmr_author_directories WHERE source = ?", (source_id,))
             # Watch history follows its rows out: a removed library must not
             # keep feeding "recently played" entries whose media is gone.
             connection.execute(
@@ -2529,6 +2721,10 @@ class LibraryDatabase:
             "base_url": str(source["base_url"]).rstrip("/"),
             "root_path": roots[0],
             "root_paths": json.dumps(roots),
+            "excluded_paths": json.dumps(
+                normalize_excluded_paths(source.get("excluded_paths"), roots=roots),
+                ensure_ascii=False,
+            ),
             "section": str(source["section"]),
             "scan_mode": str(source.get("scan_mode") or "tree"),
             "anonymous": int(bool(source.get("anonymous", True))),
@@ -2546,6 +2742,10 @@ class LibraryDatabase:
         source["root_paths"] = normalize_root_paths(
             source.get("root_paths"),
             fallback=source.get("root_path") or "/",
+        )
+        source["excluded_paths"] = normalize_excluded_paths(
+            source.get("excluded_paths"),
+            roots=source["root_paths"],
         )
         if "videos" in source:
             source["videos"] = int(source["videos"] or 0)
@@ -2812,11 +3012,14 @@ class LibraryDatabase:
         offset: int = 0,
         sources: Sequence[str] = ("asmr",),
     ) -> list[dict[str, Any]]:
-        source_clause, source_params = self._sources_clause(sources)
-        conditions = ["active = 1", source_clause, "author IS NOT NULL"]
-        params: list[Any] = list(source_params)
+        selected = tuple(dict.fromkeys(str(source) for source in sources if source))
+        if not selected:
+            return []
+        placeholders = ", ".join("?" for _ in selected)
+        conditions: list[str] = []
+        params: list[Any] = [*selected, *selected]
         if search:
-            conditions.append("author LIKE ? ESCAPE '\\'")
+            conditions.append("a.author LIKE ? ESCAPE '\\'")
             params.append(f"%{self._escape_like(search)}%")
         with self._lock, self._connect() as connection:
             pagination = ""
@@ -2826,21 +3029,26 @@ class LibraryDatabase:
                 query_params.extend([limit, offset])
             rows = connection.execute(
                 f"""
-                SELECT author,
-                       COUNT(*) AS item_count,
+                SELECT a.author,
+                       COUNT(v.id) AS item_count,
                        SUM(CASE
-                           WHEN LOWER(COALESCE(media_format, '')) = 'm3u8'
-                                OR media_kind = 'video' THEN 1 ELSE 0
+                           WHEN LOWER(COALESCE(v.media_format, '')) = 'm3u8'
+                                OR v.media_kind = 'video' THEN 1 ELSE 0
                        END) AS video_count,
                        SUM(CASE
-                           WHEN LOWER(COALESCE(media_format, '')) != 'm3u8'
-                                AND media_kind = 'audio' THEN 1 ELSE 0
+                           WHEN LOWER(COALESCE(v.media_format, '')) != 'm3u8'
+                                AND v.media_kind = 'audio' THEN 1 ELSE 0
                        END) AS audio_count,
-                       MAX(modified) AS modified
-                FROM videos
-                WHERE {' AND '.join(conditions)}
-                GROUP BY author
-                ORDER BY author COLLATE NOCASE{pagination}
+                       MAX(v.modified) AS modified
+                FROM (
+                    SELECT DISTINCT author FROM asmr_author_directories
+                    WHERE source IN ({placeholders})
+                ) a
+                LEFT JOIN videos v ON v.author = a.author AND v.active = 1
+                    AND v.source IN ({placeholders})
+                {f"WHERE {' AND '.join(conditions)}" if conditions else ""}
+                GROUP BY a.author
+                ORDER BY a.author COLLATE NOCASE{pagination}
                 """,
                 query_params,
             ).fetchall()
@@ -2852,18 +3060,49 @@ class LibraryDatabase:
         search: str = "",
         sources: Sequence[str] = ("asmr",),
     ) -> int:
-        source_clause, source_params = self._sources_clause(sources)
-        conditions = ["active = 1", source_clause, "author IS NOT NULL"]
-        params: list[Any] = list(source_params)
+        selected = tuple(dict.fromkeys(str(source) for source in sources if source))
+        if not selected:
+            return 0
+        placeholders = ", ".join("?" for _ in selected)
+        conditions: list[str] = []
+        params: list[Any] = list(selected)
         if search:
             conditions.append("author LIKE ? ESCAPE '\\'")
             params.append(f"%{self._escape_like(search)}%")
         with self._lock, self._connect() as connection:
             row = connection.execute(
-                f"SELECT COUNT(DISTINCT author) FROM videos WHERE {' AND '.join(conditions)}",
+                f"""
+                SELECT COUNT(DISTINCT author) FROM asmr_author_directories
+                WHERE source IN ({placeholders})
+                {f"AND {' AND '.join(conditions)}" if conditions else ""}
+                """,
                 params,
             ).fetchone()
         return int(row[0] or 0)
+
+    def asmr_author_for_path(self, *, source: str, path: str) -> str | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT author FROM asmr_author_directories
+                WHERE source = ? AND (path = ? OR ? LIKE path || '/%')
+                ORDER BY LENGTH(path) DESC LIMIT 1
+                """,
+                (source, path, path),
+            ).fetchone()
+        return str(row["author"]) if row else None
+
+    def asmr_author_exists(self, *, author: str, sources: Sequence[str]) -> bool:
+        source_clause, source_params = self._sources_clause(sources)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT 1 FROM asmr_author_directories
+                WHERE {source_clause} AND author = ? LIMIT 1
+                """,
+                [*source_params, author],
+            ).fetchone()
+        return row is not None
 
     def asmr_items(
         self,
@@ -2876,7 +3115,13 @@ class LibraryDatabase:
         sources: Sequence[str] = ("asmr",),
     ) -> list[dict[str, Any]]:
         source_clause, source_params = self._sources_clause(sources)
-        conditions = ["active = 1", source_clause, "author = ?"]
+        conditions = [
+            "active = 1",
+            source_clause,
+            "author = ?",
+            "EXISTS (SELECT 1 FROM asmr_author_directories d "
+            "WHERE d.source = videos.source AND d.author = videos.author)",
+        ]
         params: list[Any] = [*source_params, author]
         if kind == "video":
             conditions.append(

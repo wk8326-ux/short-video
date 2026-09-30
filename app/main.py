@@ -26,7 +26,11 @@ from pydantic import BaseModel, Field
 from app.alist import AListError
 from app.app_update import AppUpdateStore, InvalidUpdateManifest, UpdateNotPublished
 from app.auth import LoginRateLimiter, SESSION_COOKIE, SessionManager, verify_password
-from app.database import LibraryDatabase, normalize_root_paths
+from app.database import (
+    LibraryDatabase,
+    normalize_excluded_paths,
+    normalize_root_paths,
+)
 from app.drama import (
     CATEGORY_SLUGS,
     build_series,
@@ -56,7 +60,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.6.0-beta.38"
+APP_VERSION = "1.6.0-beta.39"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -386,6 +390,8 @@ def _scan_job_matches(job: dict[str, Any], config: dict[str, Any]) -> bool:
     return (
         str(job["base_url"]) == str(config["base_url"])
         and normalize_root_paths(job["root_path"]) == list(config["root_paths"])
+        and normalize_excluded_paths(job.get("excluded_paths"), roots=config["root_paths"])
+        == list(config["excluded_paths"])
         and str(job["scan_mode"]) == str(config["scan_mode"])
     )
 
@@ -425,6 +431,7 @@ async def scan_source(source: str) -> bool:
                     database.create_scan_job,
                     source=source,
                     root_path=json.dumps(roots),
+                    excluded_paths=json.dumps(config["excluded_paths"], ensure_ascii=False),
                     base_url=str(config["base_url"]),
                     scan_mode=str(config["scan_mode"]),
                     section=str(config["section"]),
@@ -435,9 +442,6 @@ async def scan_source(source: str) -> bool:
                     initial_steps(
                         str(config["scan_mode"]),
                         roots,
-                        search_paths=settings.asmr_search_paths
-                        if source == "asmr"
-                        else (),
                     ),
                 )
             else:
@@ -459,8 +463,10 @@ async def scan_source(source: str) -> bool:
                 source=source,
                 marker=marker,
                 author_group_paths=settings.asmr_author_group_paths
-                if source == "asmr"
+                if config["section"] == "asmr"
                 else frozenset(),
+                excluded_paths=config["excluded_paths"],
+                recursive_authors=str(config["scan_mode"]) == "authors_recursive",
                 search_result_limit=settings.asmr_search_result_limit,
                 on_progress=lambda progress: apply_scan_progress(source_state, progress),
             )
@@ -1321,6 +1327,7 @@ class MediaSourceRequest(BaseModel):
     # of the app keep sending it, and one folder is just a one-item list.
     rootPath: str = Field(default="", max_length=500)
     rootPaths: list[str] = Field(default_factory=list)
+    excludedPaths: list[str] = Field(default_factory=list, max_length=200)
     section: Literal["feed", "asmr", "movie", "drama"]
     scanMode: Literal["tree", "authors", "authors_recursive"] | None = None
     anonymous: bool = True
@@ -1358,12 +1365,17 @@ def normalize_source_payload(payload: MediaSourceRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="该板块来源必须使用递归目录扫描")
     if payload.section == "asmr" and scan_mode == "tree":
         raise HTTPException(status_code=422, detail="ASMR 来源必须使用作者目录扫描")
+    try:
+        excluded_paths = normalize_excluded_paths(payload.excludedPaths, roots=roots)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
         "name": payload.name.strip(),
         "provider": payload.provider,
         "base_url": base_url,
         "root_path": root_path,
         "root_paths": roots,
+        "excluded_paths": excluded_paths,
         "section": payload.section,
         "scan_mode": scan_mode,
         "anonymous": payload.anonymous,
@@ -1391,6 +1403,7 @@ def public_source(
         "baseUrl": source["base_url"],
         "rootPath": source["root_path"],
         "rootPaths": list(source["root_paths"]),
+        "excludedPaths": list(source["excluded_paths"]),
         "section": source["section"],
         "scanMode": source["scan_mode"],
         "anonymous": source["anonymous"],
@@ -2455,7 +2468,7 @@ async def app_update_apk(versionCode: int | None = Query(default=None, ge=1)):
         filename=manifest.apk_file,
         media_type="application/vnd.android.package-archive",
         headers={
-            "Cache-Control": "private, no-store",
+            "Cache-Control": "private, no-store, no-transform",
             "X-APK-SHA256": manifest.sha256,
         },
     )
@@ -3139,10 +3152,9 @@ async def asmr_author_items(
             sources=sources,
         ),
     )
-    if total == 0 and not await asyncio.to_thread(
-        database.asmr_authors,
-        search=author,
-        limit=1,
+    if not await asyncio.to_thread(
+        database.asmr_author_exists,
+        author=author,
         sources=sources,
     ):
         raise HTTPException(status_code=404, detail="Author not found")

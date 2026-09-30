@@ -11,6 +11,7 @@ import okio.Buffer
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -61,8 +62,12 @@ class ResumableUpdateDownloaderTest {
         )
         downloader.download(server.url("/update.apk"), target, bytes.size.toLong(), sha256(bytes)) { _, _ -> }
 
-        assertEquals(null, server.takeRequest().getHeader("Range"))
-        assertEquals("bytes=$resumedFrom-", server.takeRequest().getHeader("Range"))
+        val initialRequest = server.takeRequest()
+        val resumedRequest = server.takeRequest()
+        assertEquals(null, initialRequest.getHeader("Range"))
+        assertEquals("identity", initialRequest.getHeader("Accept-Encoding"))
+        assertEquals("bytes=$resumedFrom-", resumedRequest.getHeader("Range"))
+        assertEquals("identity", resumedRequest.getHeader("Accept-Encoding"))
         assertArrayEquals(bytes, target.readBytes())
     }
 
@@ -87,6 +92,21 @@ class ResumableUpdateDownloaderTest {
         downloader.download(server.url("/update.apk"), target, bytes.size.toLong(), sha256(bytes)) { _, _ -> }
 
         assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun hashMismatchDeletesCorruptPartialAndReportsIntegrityError() {
+        val bytes = "corrupt-update".toByteArray()
+        val target = File(temporaryFolder.root, "update.apk")
+        val partial = File(temporaryFolder.root, "update.apk.part")
+        server.enqueue(MockResponse().setBody(Buffer().write(bytes)))
+
+        assertThrows(UpdateIntegrityException::class.java) {
+            downloader.download(server.url("/update.apk"), target, bytes.size.toLong(), "0".repeat(64)) { _, _ -> }
+        }
+
+        assertFalse(target.exists())
+        assertFalse(partial.exists())
     }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")

@@ -577,6 +577,7 @@ data class MediaLibrarySource(
     val rootPath: String,
     /** Every folder this source scans; [rootPath] mirrors the first entry. */
     val rootPaths: List<String>,
+    val excludedPaths: List<String>,
     val section: LibrarySection,
     val scanMode: String,
     val anonymous: Boolean,
@@ -604,6 +605,7 @@ data class MediaLibrarySource(
             baseUrl = value.optString("baseUrl"),
             rootPath = roots.firstOrNull() ?: legacyRoot,
             rootPaths = roots.ifEmpty { listOf(legacyRoot) },
+            excludedPaths = value.optStringList("excludedPaths"),
             section = LibrarySection.entries.firstOrNull {
                 it.apiValue == value.optString("section")
             } ?: LibrarySection.FEED,
@@ -628,6 +630,7 @@ data class MediaSourceDraft(
     val baseUrl: String,
     /** One entry per folder; the server keeps them all under the same source. */
     val rootPaths: List<String>,
+    val excludedPaths: List<String> = emptyList(),
     val section: LibrarySection,
     val scanMode: String,
     val anonymous: Boolean,

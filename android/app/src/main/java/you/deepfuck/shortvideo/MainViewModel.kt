@@ -3184,6 +3184,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun appUpdateErrorMessage(error: Throwable): String = when ((error as? ApiException)?.statusCode) {
         404 -> "服务器尚未发布可安装版本"
         409 -> "服务器版本已变化，请重新检查"
+        422 -> "安装包完整性校验失败，已清除损坏文件，请重新下载"
         else -> if (error.message?.contains("SHA-256") == true) {
             "安装包校验失败，请重新下载"
         } else {

@@ -17,7 +17,8 @@ class SourceRuntime:
 
 
 def default_media_sources(settings: Settings) -> list[dict[str, Any]]:
-    asmr_root = settings.asmr_search_paths[0] if settings.asmr_search_paths else "/asmr"
+    asmr_roots = list(settings.asmr_search_paths) or ["/asmr"]
+    asmr_root = asmr_roots[0]
     return [
         {
             "id": "guangya",
@@ -39,6 +40,7 @@ def default_media_sources(settings: Settings) -> list[dict[str, Any]]:
             "provider": "alist",
             "base_url": settings.asmr_base_url,
             "root_path": asmr_root,
+            "root_paths": asmr_roots,
             "section": "asmr",
             "scan_mode": "authors_recursive",
             "anonymous": True,
