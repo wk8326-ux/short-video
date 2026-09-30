@@ -173,8 +173,22 @@ class ResumableScanner:
             )
         if kind == STEP_AUTHORS:
             entries = await self.client.list_directory(path)
+            # Some ASMR collections use the selected folder as the collection
+            # itself and put playable files directly in it, rather than making
+            # one subdirectory per author. Keep those files discoverable under
+            # the folder name while still treating child folders as authors.
+            root_author = posixpath.basename(path.rstrip("/")) or self.source
+            records = [
+                record
+                for entry in entries
+                if (record := self.client.build_author_record(path, root_author, entry))
+                is not None
+                and not path_is_excluded(str(record.get("path") or ""), self.excluded_paths)
+            ]
             authors: list[dict[str, str]] = []
             steps: list[tuple[str, str]] = []
+            if records:
+                authors.append({"path": path, "author": root_author})
             groups = {"/" + group.strip("/") for group in self.author_group_paths}
             for entry in entries:
                 name = str(entry.get("name") or "")
@@ -188,7 +202,7 @@ class ResumableScanner:
                 else:
                     authors.append({"path": child, "author": name})
                     steps.append((STEP_AUTHOR, child))
-            return StepPlan(authors=authors, steps=steps)
+            return StepPlan(records=records, authors=authors, steps=steps)
         if kind == STEP_AUTHOR:
             author = await asyncio.to_thread(
                 self.database.asmr_author_for_path,

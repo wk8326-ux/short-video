@@ -517,6 +517,30 @@ async def test_authors_scan_records_author_and_media_kind(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_authors_scan_indexes_media_directly_inside_the_selected_root(monkeypatch, tmp_path):
+    main = await boot(monkeypatch, tmp_path)
+    fake = FakeAList(build_tree({ASMR_ROOT: ["采耳.mp4", "助眠.mp3"]}))
+    await serve(main, "asmr6", fake)
+
+    assert await main.scan_source("asmr6") is True
+
+    assert active_paths(main, "asmr6") == [
+        ASMR_ROOT + "/助眠.mp3",
+        ASMR_ROOT + "/采耳.mp4",
+    ]
+    stored = stored_rows(main, "asmr6")
+    assert {stored[path]["author"] for path in stored} == {"asmr6"}
+    authors = main.database.asmr_authors(sources=("asmr6",))
+    assert [
+        (row["author"], row["item_count"], row["video_count"], row["audio_count"])
+        for row in authors
+    ] == [
+        ("asmr6", 2, 1, 1),
+    ]
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
 async def test_scanning_one_source_leaves_other_sources_untouched(
     monkeypatch, tmp_path
 ):
