@@ -92,15 +92,20 @@ export default function AsmrLibrary({
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [scanRunning, setScanRunning] = useState(false);
+  const [authorTotal, setAuthorTotal] = useState(0);
   const [error, setError] = useState("");
   const playerHistoryRef = useRef<string | null>(null);
   const playerHistoryClosingRef = useRef(false);
 
-  const loadAuthors = useCallback(async () => {
+  const loadAuthors = useCallback(async (query = "") => {
     setLoading(true);
     setError("");
     try {
-      const response = await fetch("/api/asmr/authors", { cache: "no-store" });
+      const trimmedQuery = query.trim();
+      const search = trimmedQuery
+        ? `?q=${encodeURIComponent(trimmedQuery)}`
+        : "";
+      const response = await fetch(`/api/asmr/authors${search}`, { cache: "no-store" });
       if (response.status === 401) {
         onUnauthorized();
         return;
@@ -108,9 +113,11 @@ export default function AsmrLibrary({
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json() as {
         items: AsmrAuthor[];
+        total?: number;
         scan?: { running?: boolean };
       };
       setAuthors(data.items);
+      setAuthorTotal(typeof data.total === "number" ? data.total : data.items.length);
       setScanRunning(data.scan?.running === true);
     } catch {
       setError("无法载入 ASMR 作者列表");
@@ -120,14 +127,16 @@ export default function AsmrLibrary({
   }, [onUnauthorized]);
 
   useEffect(() => {
-    void loadAuthors();
-  }, [loadAuthors]);
+    const delay = authorSearch.trim() ? 250 : 0;
+    const timer = window.setTimeout(() => void loadAuthors(authorSearch), delay);
+    return () => window.clearTimeout(timer);
+  }, [authorSearch, loadAuthors]);
 
   useEffect(() => {
     if (!scanRunning) return;
-    const timer = window.setTimeout(() => void loadAuthors(), 1500);
+    const timer = window.setTimeout(() => void loadAuthors(authorSearch), 1500);
     return () => window.clearTimeout(timer);
-  }, [loadAuthors, scanRunning]);
+  }, [authorSearch, loadAuthors, scanRunning]);
 
   useEffect(() => {
     if (!selectedAuthor) return;
@@ -188,12 +197,6 @@ export default function AsmrLibrary({
     onProgress(videoId, rawTime, duration);
   }, [onProgress]);
 
-  const visibleAuthors = useMemo(() => {
-    const query = authorSearch.trim().toLocaleLowerCase();
-    if (!query) return authors;
-    return authors.filter((author) => author.name.toLocaleLowerCase().includes(query));
-  }, [authorSearch, authors]);
-
   const visibleItems = useMemo(() => {
     const query = itemSearch.trim().toLocaleLowerCase();
     return items.filter((item) => {
@@ -246,7 +249,7 @@ export default function AsmrLibrary({
             <div className="library-heading">
               <div>
                 <h1>ASMR</h1>
-                <p>{authors.length ? `${authors.length} 位作者` : "作者媒体库"}</p>
+                <p>{authorTotal ? `${authorTotal} 位作者` : "作者媒体库"}</p>
               </div>
               <Library size={22} aria-hidden="true" />
             </div>
@@ -257,7 +260,7 @@ export default function AsmrLibrary({
               label="搜索 ASMR 作者"
             />
             <div className="author-list" aria-label="作者列表">
-              {visibleAuthors.map((author) => (
+              {authors.map((author) => (
                 <button key={author.name} type="button" onClick={() => openAuthor(author.name)}>
                   <span className="author-mark" aria-hidden="true">{author.name.slice(0, 1)}</span>
                   <span className="author-copy">
@@ -360,7 +363,7 @@ export default function AsmrLibrary({
           </div>
         )}
         {!loading && !error && (
-          (!selectedAuthor && visibleAuthors.length === 0)
+          (!selectedAuthor && authors.length === 0)
           || (selectedAuthor && visibleItems.length === 0)
         ) && <div className="library-state">没有匹配的内容</div>}
       </div>
