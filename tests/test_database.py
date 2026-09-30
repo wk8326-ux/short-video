@@ -28,6 +28,28 @@ def _records() -> list[dict]:
     ]
 
 
+def test_seed_migrates_legacy_builtin_asmr_to_recursive_scan(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    source = {
+        "id": "asmr",
+        "name": "中文音声",
+        "provider": "alist",
+        "base_url": "https://example.com",
+        "root_path": "/asmr/中文音声",
+        "section": "asmr",
+        "scan_mode": "authors",
+        "anonymous": True,
+        "enabled": True,
+    }
+    database.seed_media_sources([source])
+    assert database.get_media_source("asmr")["scan_mode"] == "authors"
+
+    database.seed_media_sources([{**source, "scan_mode": "authors_recursive"}])
+
+    assert database.get_media_source("asmr")["scan_mode"] == "authors_recursive"
+
+
 def test_scan_and_stable_shuffle_cursor(tmp_path):
     database = LibraryDatabase(str(tmp_path / "library.db"))
     database.initialize()

@@ -2445,6 +2445,22 @@ class LibraryDatabase:
                 """,
                 [self._source_record(source) for source in records if source["id"] not in deleted_ids],
             )
+            # The built-in ASMR source used the shallow ``authors`` traversal
+            # before nested author folders were supported. Existing databases
+            # do not receive the new default through INSERT ... DO NOTHING, so
+            # upgrade that legacy row once while leaving user-created sources
+            # and the separate asmr6 source untouched.
+            asmr = next((source for source in records if source["id"] == "asmr"), None)
+            if asmr and str(asmr.get("scan_mode") or "") == "authors_recursive":
+                connection.execute(
+                    """
+                    UPDATE media_sources
+                    SET scan_mode = 'authors_recursive'
+                    WHERE id = 'asmr'
+                      AND section = 'asmr'
+                      AND scan_mode = 'authors'
+                    """
+                )
             asmr6 = next((source for source in records if source["id"] == "asmr6"), None)
             if asmr6:
                 root = "/" + str(asmr6["root_path"]).strip("/")
