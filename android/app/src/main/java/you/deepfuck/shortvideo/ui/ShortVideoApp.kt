@@ -1,14 +1,10 @@
 package you.deepfuck.shortvideo.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -30,22 +26,28 @@ import androidx.compose.material.icons.automirrored.outlined.Login
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.AdminPanelSettings
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.LiveTv
+import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Shuffle
 import androidx.compose.material.icons.outlined.SystemUpdate
+import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,10 +59,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -498,70 +497,63 @@ internal fun AppNavigation(
     modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    BoxWithConstraints(
+    Row(
         modifier = modifier
             .fillMaxWidth()
             .height(UiDimens.NavigationHeight)
-            .padding(horizontal = if (compact) 8.dp else 12.dp),
+            .padding(horizontal = if (compact) 8.dp else 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        // 分栏数量会随板块增加，这里按两侧各留一个 48dp 圆钮的空间来分配宽度，
-        // 下限压到 36dp，保证窄屏上 5 个分栏也不会和右侧“更多”按钮叠在一起。
-        val tabWidth = ((maxWidth - 104.dp - 16.dp) / MediaSurface.entries.size)
-            .coerceIn(36.dp, 72.dp)
-        val indicatorOffset by animateDpAsState(
-            targetValue = tabWidth * state.surface.ordinal,
-            animationSpec = tween(200),
-            label = "分类指示线",
-        )
         GlassPanel(
             modifier = Modifier
-                .align(Alignment.Center)
-                .width(tabWidth * MediaSurface.entries.size + 16.dp)
+                .weight(1f)
                 .height(UiDimens.NavigationHeight),
-            fill = GlassFillSoft,
+            fill = Color(0xE61B1D21),
             line = Line,
         ) {
-            Box(Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
-                Row(Modifier.fillMaxSize()) {
-                    MediaSurface.entries.forEach { surface ->
-                        val active = state.surface == surface
-                        TextButton(
+            Row(Modifier.fillMaxSize()) {
+                MediaSurface.entries.forEach { surface ->
+                    val active = state.surface == surface
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxSize()
+                            .semantics { selected = active },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        IconButton(
                             onClick = { onSurface(surface) },
-                            modifier = Modifier
-                                .width(tabWidth)
-                                .height(48.dp)
-                                .semantics { selected = active },
-                            contentPadding = PaddingValues(horizontal = 2.dp),
-                            colors = ButtonDefaults.textButtonColors(
-                                contentColor = Color.White.copy(alpha = if (active) 1f else 0.66f),
+                            modifier = Modifier.fillMaxSize(),
+                            colors = IconButtonDefaults.iconButtonColors(
+                                contentColor = if (active) AccentSoft else TextPrimary,
                             ),
                         ) {
-                            Text(
-                                surface.label,
-                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                style = (when {
-                                    tabWidth < 46.dp -> MaterialTheme.typography.labelSmall
-                                    tabWidth < 62.dp -> MaterialTheme.typography.labelMedium
-                                    else -> MaterialTheme.typography.labelLarge
-                                }).copy(
-                                    shadow = Shadow(Color.Black.copy(alpha = 0.58f), Offset(0f, 1f), 3f),
-                                ),
+                            Icon(
+                                imageVector = when (surface) {
+                                    MediaSurface.SHORT -> Icons.Outlined.PlayCircle
+                                    MediaSurface.LONG -> Icons.Outlined.VideoLibrary
+                                    MediaSurface.ASMR -> Icons.Outlined.Headphones
+                                    MediaSurface.MOVIE -> Icons.Outlined.Movie
+                                    MediaSurface.DRAMA -> Icons.Outlined.LiveTv
+                                },
+                                contentDescription = surface.label,
+                                modifier = Modifier.size(if (active) 25.dp else 24.dp),
                             )
                         }
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .width(24.dp)
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(if (active) Accent else Color.Transparent),
+                        )
                     }
                 }
-                Box(
-                    Modifier
-                        .align(Alignment.BottomStart)
-                        .offset { IntOffset(x = (indicatorOffset + (tabWidth - 24.dp) / 2).roundToPx(), y = 0) }
-                        .width(24.dp)
-                        .height(2.dp)
-                        .clip(RoundedCornerShape(1.dp))
-                        .background(Accent),
-                )
             }
         }
-        Box(Modifier.align(Alignment.CenterEnd)) {
+        Spacer(Modifier.width(4.dp))
+        Box(Modifier.align(Alignment.CenterVertically)) {
             GlassIconButton(
                 label = "更多",
                 onClick = { menuOpen = true },

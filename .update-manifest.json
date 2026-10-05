@@ -1,8 +1,8 @@
 {
-  "versionCode": 195,
-  "versionName": "1.6.0-beta.38",
-  "apkFile": "deepfuck-android-v1.6.0-beta.38.apk",
-  "sha256": "ef57738fee3d330d26abb8ec69387b8a8bbdc2d97db1a00a647203a2a2394045",
-  "size": 4325720,
-  "notes": "统一前端页面布局、媒体卡片、元数据标签和图标按钮触控区域；包含最近播放封面和播放器反馈优化。"
+  "versionCode": 197,
+  "versionName": "1.7.0",
+  "apkFile": "deepfuck-android-v1.7.0.apk",
+  "sha256": "9fb0003aa2472849db652b651ae5e765af9772b0bfc9febf2173831c6085c0f2",
+  "size": 4325712,
+  "notes": "重构高对比媒体导航：使用统一板块图标、明确选中状态和稳定触控区域。"
 }
