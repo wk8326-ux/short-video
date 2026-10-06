@@ -38,12 +38,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import androidx.compose.material.icons.automirrored.outlined.Sort
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.LiveTv
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -101,10 +107,12 @@ internal fun DramaScreen(
     onBack: () -> Unit,
     onResumeEpisode: (DramaItem, List<DramaEpisode>) -> DramaEpisode?,
     onPlayEpisode: (DramaItem, DramaEpisode) -> Unit,
+    onToggleFavorite: (DramaItem) -> Unit,
     onStopPlayback: () -> Unit,
     onOpenGroup: (String) -> Unit,
     onCloseGroup: () -> Unit,
     onLoadMoreGroup: () -> Unit,
+    onSortGroup: (String) -> Unit,
     onRetry: () -> Unit,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
@@ -151,8 +159,10 @@ internal fun DramaScreen(
             error = state.dramaError,
             imageLoader = imageLoader,
             resumeEpisode = resumeEpisode,
+            favorite = "drama:${detail.item.id}" in state.favoriteMediaIds,
             onBack = onBack,
             onPlay = { episode -> onPlayEpisode(detail.item, episode) },
+            onToggleFavorite = { onToggleFavorite(detail.item) },
         )
         return
     }
@@ -192,6 +202,8 @@ internal fun DramaScreen(
             onBack = onCloseGroup,
             onSelect = onSelect,
             onLoadMore = onLoadMoreGroup,
+            sort = state.openDramaGroupSort,
+            onSort = onSortGroup,
         )
         return
     }
@@ -379,8 +391,12 @@ private fun DramaLibraryPage(
     onBack: () -> Unit,
     onSelect: (DramaItem) -> Unit,
     onLoadMore: () -> Unit,
+    sort: String,
+    onSort: (String) -> Unit,
 ) {
     val gridState = rememberLazyGridState()
+    var sortMenuOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(sort) { gridState.scrollToItem(0) }
     val hasMore = items.size < total
     TrackDramaGrid(
         gridState = gridState,
@@ -416,6 +432,31 @@ private fun DramaLibraryPage(
                     maxLines = 1,
                 )
             }
+            Box {
+                GlassIconButton(label = "排序", onClick = { sortMenuOpen = true }) {
+                    Icon(Icons.AutoMirrored.Outlined.Sort, contentDescription = null)
+                }
+                DropdownMenu(
+                    expanded = sortMenuOpen,
+                    onDismissRequest = { sortMenuOpen = false },
+                    containerColor = RaisedStrong,
+                    shape = GlassPanelShape,
+                    shadowElevation = 0.dp,
+                ) {
+                    listOf("newest" to "最新", "oldest" to "最早", "name" to "名称").forEach { (value, label) ->
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            trailingIcon = if (sort == value) {
+                                { Icon(Icons.Outlined.Check, contentDescription = "当前排序") }
+                            } else null,
+                            onClick = {
+                                sortMenuOpen = false
+                                onSort(value)
+                            },
+                        )
+                    }
+                }
+            }
         }
 
         when {
@@ -431,7 +472,7 @@ private fun DramaLibraryPage(
                 onAction = {},
             )
             else -> LazyVerticalGrid(
-                columns = GridCells.Adaptive(UiDimens.DramaGridMin),
+                columns = GridCells.Fixed(3),
                 state = gridState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 34.dp),
@@ -642,7 +683,7 @@ private fun DramaCard(drama: DramaItem, imageLoader: ImageLoader, onClick: () ->
 @Composable
 private fun DramaSkeletonGrid() {
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(UiDimens.DramaGridMin),
+        columns = GridCells.Fixed(3),
         modifier = Modifier.fillMaxSize(),
         userScrollEnabled = false,
         contentPadding = PaddingValues(start = 12.dp, top = 6.dp, end = 12.dp, bottom = 34.dp),
@@ -681,8 +722,10 @@ private fun DramaDetailPage(
     error: String?,
     imageLoader: ImageLoader,
     resumeEpisode: DramaEpisode?,
+    favorite: Boolean,
     onBack: () -> Unit,
     onPlay: (DramaEpisode) -> Unit,
+    onToggleFavorite: () -> Unit,
 ) {
     val drama = detail.item
     BoxWithConstraints(Modifier.fillMaxSize().background(Canvas)) {
@@ -717,9 +760,23 @@ private fun DramaDetailPage(
             contentPadding = PaddingValues(bottom = 32.dp),
         ) {
             item {
-                Box(Modifier.fillMaxWidth().padding(6.dp)) {
+                Row(
+                    Modifier.fillMaxWidth().padding(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     GlassIconButton(label = "返回短剧库", onClick = onBack) {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    GlassIconButton(
+                        label = if (favorite) "取消收藏" else "收藏",
+                        onClick = onToggleFavorite,
+                        tint = if (favorite) Accent else Color.White,
+                    ) {
+                        Icon(
+                            if (favorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                            contentDescription = null,
+                        )
                     }
                 }
             }

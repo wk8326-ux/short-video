@@ -36,6 +36,10 @@ class PlaybackPreferences(context: Context) {
         }.getOrDefault(FeedMode.SHUFFLE)
         set(value) = preferences.edit().putString(KEY_MODE, value.name).apply()
 
+    var skin: String
+        get() = preferences.getString(KEY_SKIN, "obsidian-coral") ?: "obsidian-coral"
+        set(value) = preferences.edit().putString(KEY_SKIN, value).apply()
+
     var movieWallView: MovieWallView
         get() = MovieWallView.fromValue(preferences.getString(KEY_MOVIE_WALL_VIEW, null))
         set(value) = preferences.edit().putString(KEY_MOVIE_WALL_VIEW, value.apiValue).apply()
@@ -329,6 +333,7 @@ class PlaybackPreferences(context: Context) {
         const val KEY_SESSION = "session_cookie"
         const val KEY_SURFACE = "surface"
         const val KEY_MODE = "mode"
+        const val KEY_SKIN = "skin"
         const val KEY_MOVIE_WALL_VIEW = "movie_wall_view"
         const val KEY_MOVIE_WALL_SORT = "movie_wall_sort"
         const val KEY_MUTED = "muted"

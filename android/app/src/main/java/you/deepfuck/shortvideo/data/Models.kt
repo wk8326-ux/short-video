@@ -151,6 +151,7 @@ data class MovieItem(
     val videoId: Long,
     val title: String,
     val originalTitle: String?,
+    val code: String? = null,
     val year: Int?,
     val overview: String,
     val posterUrl: String?,
@@ -176,6 +177,10 @@ data class MovieItem(
     val resumePositionMs: Long = 0L,
     /** Whether this title sits in the account's favourites list. */
     val favorite: Boolean = false,
+    val recommendationScore: Double? = null,
+    val recommendationKeywordMatches: Int = 0,
+    val recommendationPerformerMatches: Int = 0,
+    val recommendationStudioMatches: Int = 0,
 ) {
     val resumeFraction: Float
         get() {
@@ -203,6 +208,7 @@ data class MovieItem(
             videoId = value.getLong("videoId"),
             title = value.optString("title"),
             originalTitle = value.optNullableString("originalTitle"),
+            code = value.optNullableString("code"),
             year = value.optNullableInt("year"),
             overview = value.optString("overview"),
             posterUrl = value.optNullableString("posterUrl"),
@@ -231,6 +237,10 @@ data class MovieItem(
             // Only the detail response carries this; every other list leaves it
             // false, which is exactly what the wall needs to draw no heart.
             favorite = value.optBoolean("favorite"),
+            recommendationScore = value.optDouble("recommendationScore").takeIf { it.isFinite() },
+            recommendationKeywordMatches = value.optJSONObject("recommendationMatches")?.optInt("keywords") ?: 0,
+            recommendationPerformerMatches = value.optJSONObject("recommendationMatches")?.optInt("performers") ?: 0,
+            recommendationStudioMatches = value.optJSONObject("recommendationMatches")?.optInt("studios") ?: 0,
         )
     }
 }
@@ -283,6 +293,54 @@ data class MovieFavoritesPage(
     val total: Int,
     val nextOffset: Int?,
 )
+
+data class LibraryResult(
+    val id: String,
+    val type: String,
+    val section: String,
+    val title: String,
+    val subtitle: String,
+    val posterUrl: String?,
+    val author: String?,
+    val media: MediaEntry?,
+    val movie: MovieItem?,
+    val drama: DramaItem?,
+    val entity: MovieMetadataEntity?,
+    val favorite: Boolean,
+) {
+    val favoriteTargetId: String?
+        get() = when {
+            movie != null -> movie.id.toString()
+            drama != null -> drama.id
+            media != null -> media.id.toString()
+            else -> null
+        }
+
+    companion object {
+        fun fromJson(value: JSONObject): LibraryResult = LibraryResult(
+            id = value.optString("id"),
+            type = value.optString("type"),
+            section = value.optString("section"),
+            title = value.optString("title"),
+            subtitle = value.optString("subtitle"),
+            posterUrl = value.optNullableString("posterUrl"),
+            author = value.optNullableString("author"),
+            media = value.optJSONObject("media")?.let(MediaEntry::fromJson),
+            movie = value.optJSONObject("movie")?.let(MovieItem::fromJson),
+            drama = value.optJSONObject("drama")?.let(DramaItem::fromJson),
+            entity = value.optJSONObject("entity")?.let(MovieMetadataEntity::fromJson),
+            favorite = value.optBoolean("favorite"),
+        )
+    }
+}
+
+data class LibraryResultsPage(
+    val items: List<LibraryResult>,
+    val total: Int,
+    val nextOffset: Int?,
+)
+
+data class AppSettings(val skin: String = "obsidian-coral")
 
 data class MoviePage(
     val items: List<MovieItem>,

@@ -25,14 +25,20 @@ import androidx.compose.material.icons.automirrored.outlined.VolumeOff
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Forward10
 import androidx.compose.material.icons.outlined.Fullscreen
 import androidx.compose.material.icons.outlined.FullscreenExit
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.PictureInPictureAlt
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Replay10
+import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Shuffle
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -75,6 +81,7 @@ internal fun FeedScreen(
     pipMode: Boolean,
     onSurface: (MediaSurface) -> Unit,
     onMode: (FeedMode) -> Unit,
+    onToggleFavorite: (MediaEntry) -> Unit,
     onActive: (Int) -> Unit,
     onLoadMore: () -> Unit,
     onRetry: () -> Unit,
@@ -136,6 +143,10 @@ internal fun FeedScreen(
                 muted = state.muted,
                 fullscreen = fullscreen,
                 pipMode = pipMode,
+                mode = state.mode,
+                favorite = "${state.surface.apiValue}:${state.feedItems[index].id}" in state.favoriteMediaIds,
+                onMode = onMode,
+                onToggleFavorite = { onToggleFavorite(state.feedItems[index]) },
                 onTogglePlayback = onTogglePlayback,
                 onMuted = onMuted,
                 onVolume = onVolume,
@@ -149,7 +160,7 @@ internal fun FeedScreen(
             )
         }
         if (fullscreen && fullscreenChromeVisible) {
-            Box(Modifier.statusBarsPadding().padding(top = 2.dp)) {
+            Box(Modifier.padding(top = 2.dp)) {
                 AppNavigation(
                     state = state,
                     compact = false,
@@ -175,6 +186,10 @@ private fun FeedPage(
     muted: Boolean,
     fullscreen: Boolean,
     pipMode: Boolean,
+    mode: FeedMode,
+    favorite: Boolean,
+    onMode: (FeedMode) -> Unit,
+    onToggleFavorite: () -> Unit,
     onTogglePlayback: () -> Unit,
     onMuted: (Boolean) -> Unit,
     onVolume: (Float) -> Unit,
@@ -185,19 +200,33 @@ private fun FeedPage(
     onChromeVisible: (Boolean) -> Unit,
 ) {
     var chromeVisible by remember(fullscreen, entry.id) { mutableStateOf(true) }
+    var playbackFeedbackVisible by remember(fullscreen, entry.id) { mutableStateOf(false) }
+    var playbackFeedbackShowsPause by remember(fullscreen, entry.id) { mutableStateOf(false) }
+    var chromeInteractionToken by remember(fullscreen, entry.id) { mutableStateOf(0) }
     var dragPixels by remember { mutableFloatStateOf(0f) }
     var seekPreviewMs by remember { mutableStateOf<Long?>(null) }
     var seekBaseMs by remember { mutableStateOf(0L) }
     val latestPositionMs = rememberUpdatedState(player.positionMs)
 
-    LaunchedEffect(fullscreen, chromeVisible, player.isPlaying, player.mediaId) {
-        if (fullscreen && chromeVisible && player.isPlaying && player.mediaId == entry.id) {
+    LaunchedEffect(chromeVisible, entry.id, pipMode, chromeInteractionToken) {
+        if (chromeVisible && !pipMode && active) {
             delay(5_000)
             chromeVisible = false
         }
     }
+    LaunchedEffect(playbackFeedbackVisible, entry.id) {
+        if (playbackFeedbackVisible) {
+            delay(900)
+            playbackFeedbackVisible = false
+        }
+    }
     LaunchedEffect(active, chromeVisible) {
         if (active) onChromeVisible(chromeVisible)
+    }
+
+    fun showChrome() {
+        chromeVisible = true
+        chromeInteractionToken += 1
     }
 
     // Scrubbing works in both orientations; the vertical pager keeps owning the
@@ -211,7 +240,7 @@ private fun FeedPage(
                     dragPixels = 0f
                     seekBaseMs = latestPositionMs.value
                     seekPreviewMs = seekBaseMs
-                    chromeVisible = true
+                    showChrome()
                 },
                 onHorizontalDrag = { change, amount ->
                     change.consume()
@@ -249,14 +278,17 @@ private fun FeedPage(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = {
-                    if (fullscreen) chromeVisible = !chromeVisible else onTogglePlayback()
+                    showChrome()
+                    playbackFeedbackShowsPause = player.playWhenReady
+                    playbackFeedbackVisible = true
+                    onTogglePlayback()
                 },
             ),
     ) {
         if (shouldAttachFeedPlayer(active, entry.id, player.mediaId)) playerHost()
         BufferSpinner(active && player.isBuffering && player.mediaId == entry.id)
 
-        val controlsVisible = !pipMode && (!fullscreen || chromeVisible)
+        val controlsVisible = !pipMode && chromeVisible
         if (!pipMode) {
             PlayerSideControls(
                 volume = player.volume,
@@ -279,73 +311,114 @@ private fun FeedPage(
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .navigationBarsPadding()
-                    .padding(start = 16.dp, end = 82.dp, bottom = 38.dp),
+                    .then(if (!fullscreen) Modifier.navigationBarsPadding() else Modifier)
+                    .padding(start = 12.dp, bottom = if (fullscreen) 18.dp else UiDimens.PlayerBottomContentInset),
             ) {
                 Text(
                     entry.title,
-                    maxLines = if (fullscreen) 1 else 2,
+                    modifier = Modifier.widthIn(max = 260.dp),
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     fontWeight = FontWeight.SemiBold,
-                    color = TextPrimary,
+                    color = Color.White,
                 )
-                Spacer(Modifier.height(4.dp))
                 Text(
                     "${index + 1} / ${total.coerceAtLeast(index + 1)}",
-                    color = TextSecondary,
+                    color = Color.White.copy(alpha = 0.72f),
                     style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 )
             }
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .navigationBarsPadding()
-                    .padding(end = 12.dp, bottom = 38.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                    .then(if (!fullscreen) Modifier.navigationBarsPadding() else Modifier)
+                    .padding(end = 8.dp, bottom = if (fullscreen) 18.dp else UiDimens.PlayerBottomContentInset),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                OverlayIconControl(
-                    label = if (muted) "打开声音" else "静音",
-                    onClick = { onMuted(!muted) },
-                ) {
-                    Icon(if (muted) Icons.AutoMirrored.Outlined.VolumeOff else Icons.AutoMirrored.Outlined.VolumeUp, contentDescription = null)
+                val modeIcon = when (mode) {
+                    FeedMode.SHUFFLE -> Icons.Outlined.Shuffle
+                    FeedMode.NEWEST -> Icons.Outlined.Schedule
+                    FeedMode.OLDEST -> Icons.Outlined.History
+                }
+                val modeLabel = when (mode) {
+                    FeedMode.SHUFFLE -> "随机播放"
+                    FeedMode.NEWEST -> "最新优先"
+                    FeedMode.OLDEST -> "最早优先"
                 }
                 OverlayIconControl(
+                    label = "播放顺序：$modeLabel",
+                    size = 44,
+                    tint = Color.White,
+                    onClick = {
+                        showChrome()
+                        onMode(FeedMode.entries[(FeedMode.entries.indexOf(mode) + 1) % FeedMode.entries.size])
+                    },
+                ) { Icon(modeIcon, contentDescription = null) }
+                OverlayIconControl(
                     label = if (fullscreen) "退出横屏" else "横屏",
-                    onClick = { onFullscreen(!fullscreen) },
+                    size = 44,
+                    tint = Color.White,
+                    onClick = {
+                        showChrome()
+                        onFullscreen(!fullscreen)
+                    },
                 ) {
                     Icon(if (fullscreen) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen, contentDescription = null)
                 }
                 OverlayIconControl(
                     label = "浮窗播放",
-                    onClick = onPip,
+                    size = 44,
+                    tint = Color.White,
+                    onClick = {
+                        showChrome()
+                        onPip()
+                    },
+                ) { Icon(Icons.Outlined.PictureInPictureAlt, contentDescription = null) }
+                OverlayIconControl(
+                    label = if (favorite) "取消收藏" else "收藏",
+                    size = 44,
+                    tint = Color.White,
+                    onClick = {
+                        showChrome()
+                        onToggleFavorite()
+                    },
                 ) {
-                    Icon(Icons.Outlined.PictureInPictureAlt, contentDescription = null)
+                    Icon(if (favorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder, contentDescription = null)
                 }
             }
             ProgressControl(
                 player = player,
                 onSeek = onSeek,
-                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding(),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .then(if (!fullscreen) Modifier.navigationBarsPadding() else Modifier)
+                    .padding(bottom = if (fullscreen) 14.dp else UiDimens.PlayerBottomContentInset),
             )
         }
 
-        val showPortraitPlay = !fullscreen && !pipMode && !player.playWhenReady && !player.isBuffering
-        if (active && showPortraitPlay && player.mediaId == entry.id) {
+        val showPlaybackFeedback = !pipMode && playbackFeedbackVisible && !player.isBuffering
+        if (active && !fullscreen && showPlaybackFeedback && player.mediaId == entry.id) {
             OverlayIconControl(
-                label = "播放",
+                label = if (player.playWhenReady) "暂停" else "播放",
                 size = 64,
                 modifier = Modifier.align(Alignment.Center),
-                onClick = onTogglePlayback,
+                onClick = {
+                    playbackFeedbackShowsPause = player.playWhenReady
+                    playbackFeedbackVisible = true
+                    showChrome()
+                    onTogglePlayback()
+                },
             ) {
                 Icon(
-                    Icons.Filled.PlayArrow,
+                    if (playbackFeedbackShowsPause) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                     contentDescription = null,
+                    tint = Color.White,
                     modifier = Modifier.size(32.dp),
                 )
             }
         }
 
-        if (active && fullscreen && !pipMode && chromeVisible && player.mediaId == entry.id && !player.isBuffering) {
+        if (active && fullscreen && showPlaybackFeedback && player.mediaId == entry.id) {
             Row(
                 modifier = Modifier.align(Alignment.Center),
                 horizontalArrangement = Arrangement.spacedBy(36.dp),
@@ -357,10 +430,16 @@ private fun FeedPage(
                 OverlayIconControl(
                     label = if (player.playWhenReady) "暂停" else "播放",
                     size = 64,
-                    onClick = onTogglePlayback,
+                    tint = Color.White,
+                    onClick = {
+                        playbackFeedbackShowsPause = player.playWhenReady
+                        playbackFeedbackVisible = true
+                        showChrome()
+                        onTogglePlayback()
+                    },
                 ) {
                     Icon(
-                        if (player.playWhenReady) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        if (playbackFeedbackShowsPause) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         contentDescription = null,
                         modifier = Modifier.size(32.dp),
                     )
@@ -412,6 +491,7 @@ internal fun OverlayIconControl(
     label: String,
     modifier: Modifier = Modifier,
     size: Int = 48,
+    tint: Color = Color.White,
     onClick: () -> Unit,
     content: @Composable () -> Unit,
 ) {
@@ -421,6 +501,7 @@ internal fun OverlayIconControl(
         modifier = modifier
             .size(size.dp),
         size = size.dp,
+        tint = tint,
     ) {
         content()
     }

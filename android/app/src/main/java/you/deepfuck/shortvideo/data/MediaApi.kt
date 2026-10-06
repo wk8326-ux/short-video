@@ -207,10 +207,12 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         entityId: Long,
         offset: Int = 0,
         limit: Int = MOVIE_LIBRARY_PAGE_SIZE,
+        sort: String = "cover",
     ): MovieMetadataPage {
         val target = url("/api/movie-metadata/$entityId/movies").newBuilder()
             .addQueryParameter("limit", limit.toString())
             .addQueryParameter("offset", offset.toString())
+            .addQueryParameter("sort", sort)
             .build()
         return MovieMetadataPage.fromJson(getJson(target.toString()))
     }
@@ -314,15 +316,91 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         return MovieItem.fromJson(executeJson(request))
     }
 
+    fun searchLibrary(query: String, section: String): List<LibraryResult> {
+        val target = url("/api/search").newBuilder()
+            .addQueryParameter("q", query)
+            .addQueryParameter("section", section)
+            .addQueryParameter("limit", "60")
+            .build()
+        return getJson(target.toString()).optObjectList("items", LibraryResult::fromJson)
+    }
+
+    fun favoriteEntries(section: String, offset: Int = 0, limit: Int = 40): LibraryResultsPage {
+        val target = url("/api/favorites").newBuilder()
+            .addQueryParameter("section", section)
+            .addQueryParameter("offset", offset.toString())
+            .addQueryParameter("limit", limit.toString())
+            .build()
+        val payload = getJson(target.toString())
+        return LibraryResultsPage(
+            items = payload.optObjectList("items", LibraryResult::fromJson),
+            total = payload.optInt("total"),
+            nextOffset = payload.optIntOrNull("nextOffset"),
+        )
+    }
+
+    fun favoriteStatuses(section: String, ids: List<String>): Set<String> {
+        require(section in setOf("short", "long", "asmr", "movie", "drama"))
+        if (ids.isEmpty()) return emptySet()
+        val target = url("/api/favorites/status").newBuilder()
+            .addQueryParameter("section", section)
+            .apply { ids.distinct().take(100).forEach { addQueryParameter("ids", it) } }
+            .build()
+        val favorites = getJson(target.toString()).optJSONArray("ids") ?: return emptySet()
+        return buildSet {
+            for (index in 0 until favorites.length()) add(favorites.optString(index))
+        }
+    }
+
+    fun setFavorite(section: String, targetId: String, favorite: Boolean): Boolean {
+        require(section in setOf("short", "long", "asmr", "movie", "drama"))
+        val target = baseUrl.newBuilder()
+            .addPathSegments("api/favorites")
+            .addPathSegment(section)
+            .addPathSegment(targetId)
+            .build()
+        val builder = Request.Builder().url(target)
+        val request = if (favorite) {
+            builder.put(ByteArray(0).toRequestBody(null)).build()
+        } else {
+            builder.delete().build()
+        }
+        return executeJson(request).optBoolean("favorite")
+    }
+
+    fun appSettings(): AppSettings = AppSettings(
+        skin = getJson("/api/settings").optString("skin", "obsidian-coral"),
+    )
+
+    fun saveAppSettings(settings: AppSettings): AppSettings {
+        val body = JSONObject().put("skin", settings.skin).toString()
+            .toRequestBody(JSON_MEDIA_TYPE)
+        return AppSettings(
+            skin = executeJson(
+                Request.Builder()
+                    .url(url("/api/settings"))
+                    .put(body)
+                    .build(),
+            ).optString("skin", "obsidian-coral"),
+        )
+    }
+
+    fun movieRecommendations(movieId: Long, limit: Int = 6): List<MovieItem> {
+        val payload = getJson("/api/movies/$movieId/recommendations?limit=$limit")
+        return payload.optObjectList("items", MovieItem::fromJson)
+    }
+
     fun dramas(
         query: String = "",
         limit: Int = DRAMA_PAGE_SIZE,
         offset: Int = 0,
         category: String = "",
+        sort: String = "cover",
     ): DramaPage {
         val target = url("/api/dramas").newBuilder()
             .addQueryParameter("limit", limit.toString())
             .addQueryParameter("offset", offset.toString())
+            .addQueryParameter("sort", sort)
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
             .apply { if (category.isNotBlank()) addQueryParameter("category", category) }
             .build()

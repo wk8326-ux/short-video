@@ -33,13 +33,18 @@ internal object UiDimens {
     val NavigationHeight = 52.dp
     val NavigationGap = 10.dp
     val NavigationInset = NavigationHeight + NavigationGap
+    // RootChrome overlays the page with a top bar and a bottom navigation bar.
+    // These values reserve breathing room for those app-level surfaces.
+    val RootTopContentInset = 12.dp
+    val RootBottomContentInset = 92.dp
+    val PlayerBottomContentInset = 104.dp
     val TouchTarget = 48.dp
     val SectionGap = 24.dp
     val GridGap = 10.dp
     val MovieGridMin = 148.dp
     val DramaGridMin = 112.dp
-    val CardRadius = 8.dp
-    val ControlRadius = 6.dp
+    val CardRadius = 20.dp
+    val ControlRadius = 999.dp
 }
 
 internal val MediaCardShape = RoundedCornerShape(UiDimens.CardRadius)

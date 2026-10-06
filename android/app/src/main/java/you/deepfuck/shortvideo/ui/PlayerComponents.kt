@@ -33,6 +33,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.outlined.Brightness6
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -93,6 +95,7 @@ internal fun BufferSpinner(visible: Boolean, modifier: Modifier = Modifier) {
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 internal fun DelayedSpinner(visible: Boolean, modifier: Modifier = Modifier) {
     var delayedVisible by remember { mutableStateOf(false) }
@@ -104,32 +107,10 @@ internal fun DelayedSpinner(visible: Boolean, modifier: Modifier = Modifier) {
         }
     }
     if (!delayedVisible) return
-    val transition = rememberInfiniteTransition(label = "loading ring")
-    val rotation by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(850, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "loading ring rotation",
+    LoadingIndicator(
+        modifier = modifier.size(40.dp).semantics { contentDescription = "正在加载" },
+        color = Color.White,
     )
-    Canvas(
-        modifier = modifier
-            .size(24.dp)
-            .semantics { contentDescription = "正在加载" },
-    ) {
-        val stroke = 2.dp.toPx()
-        drawArc(
-            color = Color.White,
-            startAngle = rotation,
-            sweepAngle = 252f,
-            useCenter = false,
-            topLeft = Offset(stroke / 2f, stroke / 2f),
-            size = androidx.compose.ui.geometry.Size(size.width - stroke, size.height - stroke),
-            style = Stroke(width = stroke, cap = StrokeCap.Round),
-        )
-    }
 }
 
 @Composable

@@ -33,6 +33,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.core.content.FileProvider
@@ -109,11 +114,19 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightNavigationBars = false
         }
         setContent {
-            ShortVideoTheme {
+            val state by viewModel.state.collectAsStateWithLifecycle()
+            val darkTheme = isSystemInDarkTheme()
+            SideEffect {
+                WindowInsetsControllerCompat(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !darkTheme
+                    isAppearanceLightNavigationBars = !darkTheme
+                }
+            }
+            ShortVideoTheme(skin = state.skin) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = Canvas,
-                    contentColor = TextPrimary,
+                    color = MaterialTheme.colorScheme.background,
+                    contentColor = MaterialTheme.colorScheme.onBackground,
                 ) {
                     Box(Modifier.fillMaxSize()) {
                         ShortVideoApp(

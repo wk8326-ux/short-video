@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -44,6 +45,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -89,6 +91,8 @@ fun ShortVideoApp(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val player by viewModel.playback.snapshot.collectAsStateWithLifecycle()
     var fullscreen by rememberSaveable { mutableStateOf(false) }
+    var rootTab by rememberSaveable { mutableStateOf(RootTab.HOME) }
+    var showingThemes by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(
         state.authentication,
@@ -179,6 +183,13 @@ fun ShortVideoApp(
     ) {
         viewModel.closeDramaGroup()
     }
+    BackHandler(
+        enabled = !fullscreen && !state.showManagement && state.expandedMedia == null &&
+            state.selectedMovie == null && state.selectedDrama == null &&
+            (showingThemes || rootTab != RootTab.HOME),
+    ) {
+        if (showingThemes) showingThemes = false else rootTab = RootTab.HOME
+    }
 
     when (state.authentication) {
         AuthenticationState.CHECKING -> LoadingScreen()
@@ -190,7 +201,7 @@ fun ShortVideoApp(
         AuthenticationState.SIGNED_IN -> if (state.showManagement) {
             ManagementScreen(
                 state = state,
-                onBack = viewModel::hideManagement,
+                onBack = { viewModel.hideManagement(); rootTab = RootTab.SETTINGS },
                 onRefresh = viewModel::loadAdminStatus,
                 onScanSource = viewModel::startLibraryScan,
                 onSaveSource = viewModel::saveMediaSource,
@@ -202,7 +213,64 @@ fun ShortVideoApp(
                 onClearLogs = viewModel::clearRuntimeLogs,
                 onExportLogs = onExportLogs,
             )
+        } else if (rootTab != RootTab.HOME) {
+            RootChrome(
+                state = state,
+                tab = rootTab,
+                onTab = { destination ->
+                    rootTab = destination
+                    if (destination == RootTab.FAVORITES) viewModel.loadFavorites(reset = true)
+                    if (destination == RootTab.HOME) showingThemes = false
+                },
+                onSurface = { surface ->
+                    rootTab = RootTab.HOME
+                    viewModel.changeSurface(surface)
+                },
+            ) {
+                when (rootTab) {
+                    RootTab.HOME -> Unit
+                    RootTab.SEARCH -> LibrarySearchScreen(
+                        state = state,
+                        viewModel = viewModel,
+                        onOpen = { result -> viewModel.openLibraryResult(result); rootTab = RootTab.HOME },
+                        onFavorite = viewModel::toggleLibraryFavorite,
+                    )
+                    RootTab.FAVORITES -> FavoritesScreen(
+                        state = state,
+                        viewModel = viewModel,
+                        onOpen = { result -> viewModel.openLibraryResult(result); rootTab = RootTab.HOME },
+                        onFavorite = viewModel::toggleLibraryFavorite,
+                    )
+                    RootTab.SETTINGS -> if (showingThemes) {
+                        ThemeSettingsScreen(
+                            state = state,
+                            onBack = { showingThemes = false },
+                            onSelect = viewModel::setSkin,
+                            onRetry = viewModel::retrySkinSave,
+                        )
+                    } else {
+                        SettingsScreen(
+                            state = state,
+                            onManagement = viewModel::showManagement,
+                            onUpdate = viewModel::checkForAppUpdate,
+                            onThemes = { showingThemes = true },
+                            onLogout = viewModel::logout,
+                        )
+                    }
+                }
+            }
         } else {
+            RootChrome(
+                state = state,
+                tab = RootTab.HOME,
+                onTab = { destination ->
+                    rootTab = destination
+                    if (destination == RootTab.FAVORITES) viewModel.loadFavorites(reset = true)
+                },
+                onSurface = viewModel::changeSurface,
+                showNavigation = !pipMode && !fullscreen && state.expandedMedia == null &&
+                    state.selectedMovie == null && state.selectedDrama == null,
+            ) {
             Box(Modifier.fillMaxSize()) {
                 key(state.surface) {
                     when (state.surface) {
@@ -223,6 +291,7 @@ fun ShortVideoApp(
                             onLoadMoreItems = viewModel::loadMoreAsmrItems,
                             onFilter = viewModel::setAsmrFilter,
                             onQuery = viewModel::setAsmrQuery,
+                            onToggleFavorite = { entry -> viewModel.toggleMediaFavorite("asmr", entry.id.toString()) },
                             onPlay = { entry ->
                                 viewModel.playAsmr(entry)
                                 if (entry.isAudio) onBackgroundPlaybackRequested()
@@ -277,6 +346,7 @@ fun ShortVideoApp(
                                 onOpenMetadata = viewModel::openMovieMetadata,
                                 onCloseMetadata = viewModel::closeMovieMetadata,
                                 onLoadMoreMetadata = viewModel::loadMoreMovieMetadata,
+                                onSortMetadata = viewModel::setMovieMetadataSort,
                                 onMetadataListPosition = viewModel::saveMovieMetadataListPosition,
                                 onToggleFavorite = viewModel::toggleMovieFavorite,
                                 onWallView = viewModel::setMovieWallView,
@@ -308,10 +378,12 @@ fun ShortVideoApp(
                                 onBack = viewModel::closeDramaDetail,
                                 onResumeEpisode = viewModel::dramaResumeEpisode,
                                 onPlayEpisode = viewModel::playDramaEpisode,
+                                onToggleFavorite = { drama -> viewModel.toggleMediaFavorite("drama", drama.id) },
                                 onStopPlayback = viewModel::stopDramaPlayback,
                                 onOpenGroup = viewModel::openDramaGroup,
                                 onCloseGroup = viewModel::closeDramaGroup,
                                 onLoadMoreGroup = viewModel::loadMoreDramaGroup,
+                                onSortGroup = viewModel::setDramaGroupSort,
                                 onRetry = viewModel::retryDramas,
                                  onTogglePlayback = viewModel::togglePlayback,
                                  onMuted = viewModel::setMuted,
@@ -335,6 +407,9 @@ fun ShortVideoApp(
                             pipMode = pipMode,
                             onSurface = viewModel::changeSurface,
                             onMode = viewModel::changeMode,
+                            onToggleFavorite = { entry ->
+                                viewModel.toggleMediaFavorite(state.surface.apiValue, entry.id.toString())
+                            },
                             onActive = viewModel::activateFeedItem,
                             onLoadMore = viewModel::loadMoreFeed,
                             onRetry = viewModel::retryFeed,
@@ -355,27 +430,7 @@ fun ShortVideoApp(
                         }
                     }
                 }
-                if (
-                    !pipMode &&
-                    !fullscreen &&
-                    state.expandedMedia == null &&
-                    state.selectedMovie == null &&
-                    state.selectedDrama == null
-                ) {
-                    AppNavigation(
-                        state = state,
-                        compact = false,
-                        onSurface = viewModel::changeSurface,
-                        onMode = viewModel::changeMode,
-                        onManage = viewModel::showManagement,
-                        onCheckUpdate = viewModel::checkForAppUpdate,
-                        onLogout = viewModel::logout,
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .statusBarsPadding()
-                            .padding(top = 2.dp),
-                    )
-                }
+            }
             }
         }
     }
@@ -496,36 +551,23 @@ internal fun AppNavigation(
     onLogout: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var menuOpen by remember { mutableStateOf(false) }
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(UiDimens.NavigationHeight)
-            .padding(horizontal = if (compact) 8.dp else 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        GlassPanel(
-            modifier = Modifier
-                .weight(1f)
-                .height(UiDimens.NavigationHeight),
-            fill = Color(0xE61B1D21),
-            line = Line,
-        ) {
-            Row(Modifier.fillMaxSize()) {
+    Box(modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).statusBarsPadding()) {
+        Column {
+            Row(
+                Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 MediaSurface.entries.forEach { surface ->
                     val active = state.surface == surface
                     Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxSize()
-                            .semantics { selected = active },
+                        Modifier.weight(1f).fillMaxHeight().semantics { selected = active },
                         contentAlignment = Alignment.Center,
                     ) {
                         IconButton(
                             onClick = { onSurface(surface) },
                             modifier = Modifier.fillMaxSize(),
                             colors = IconButtonDefaults.iconButtonColors(
-                                contentColor = if (active) AccentSoft else TextPrimary,
+                                contentColor = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                             ),
                         ) {
                             Icon(
@@ -537,69 +579,19 @@ internal fun AppNavigation(
                                     MediaSurface.DRAMA -> Icons.Outlined.LiveTv
                                 },
                                 contentDescription = surface.label,
-                                modifier = Modifier.size(if (active) 25.dp else 24.dp),
+                                modifier = Modifier.size(24.dp),
                             )
                         }
                         Box(
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .width(24.dp)
-                                .height(3.dp)
+                            Modifier.align(Alignment.BottomCenter)
+                                .width(24.dp).height(3.dp)
                                 .clip(RoundedCornerShape(2.dp))
-                                .background(if (active) Accent else Color.Transparent),
+                                .background(if (active) MaterialTheme.colorScheme.primary else Color.Transparent),
                         )
                     }
                 }
             }
-        }
-        Spacer(Modifier.width(4.dp))
-        Box(Modifier.align(Alignment.CenterVertically)) {
-            GlassIconButton(
-                label = "更多",
-                onClick = { menuOpen = true },
-            ) {
-                Icon(Icons.Outlined.MoreVert, contentDescription = null)
-            }
-            DropdownMenu(
-                expanded = menuOpen,
-                onDismissRequest = { menuOpen = false },
-                containerColor = RaisedStrong,
-                shape = GlassPanelShape,
-                shadowElevation = 0.dp,
-            ) {
-                if (state.surface.isFeed) {
-                    FeedMode.entries.forEach { mode ->
-                        DropdownMenuItem(
-                            text = { Text(mode.label) },
-                            leadingIcon = {
-                                Icon(
-                                    if (mode == FeedMode.SHUFFLE) Icons.Outlined.Shuffle else Icons.Outlined.Schedule,
-                                    contentDescription = null,
-                                )
-                            },
-                            trailingIcon = {
-                                if (state.mode == mode) Icon(Icons.Outlined.Check, contentDescription = null)
-                            },
-                            onClick = { menuOpen = false; onMode(mode) },
-                        )
-                    }
-                }
-                DropdownMenuItem(
-                    text = { Text("管理") },
-                    leadingIcon = { Icon(Icons.Outlined.AdminPanelSettings, contentDescription = null) },
-                    onClick = { menuOpen = false; onManage() },
-                )
-                DropdownMenuItem(
-                    text = { Text("检查更新") },
-                    leadingIcon = { Icon(Icons.Outlined.SystemUpdate, contentDescription = null) },
-                    onClick = { menuOpen = false; onCheckUpdate() },
-                )
-                DropdownMenuItem(
-                    text = { Text("退出登录") },
-                    leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Logout, contentDescription = null) },
-                    onClick = { menuOpen = false; onLogout() },
-                )
-            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         }
     }
 }

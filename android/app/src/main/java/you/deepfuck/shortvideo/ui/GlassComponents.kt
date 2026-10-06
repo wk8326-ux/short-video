@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -30,28 +31,35 @@ import androidx.compose.ui.unit.dp
 internal val GlassPanelShape = RoundedCornerShape(UiDimens.CardRadius)
 internal val ControlShape = RoundedCornerShape(UiDimens.ControlRadius)
 
+@Composable
 internal fun Modifier.glassSurface(
     shape: Shape = GlassPanelShape,
-    fill: Color = GlassFill,
-    line: Color = GlassLine,
-): Modifier = this
-    .clip(shape)
-    .background(fill, shape)
-    .drawWithCache {
-        val highlight = Brush.verticalGradient(
-            colors = listOf(GlassHighlight, Color.Transparent),
-            endY = 18.dp.toPx(),
-        )
-        onDrawBehind { drawRect(highlight) }
-    }
-    .border(width = 1.dp, color = line, shape = shape)
+    fill: Color = Color.Unspecified,
+    line: Color = Color.Unspecified,
+): Modifier {
+    val colors = MaterialTheme.colorScheme
+    val resolvedFill = if (fill == Color.Unspecified) colors.surfaceContainerLow else fill
+    val resolvedLine = if (line == Color.Unspecified) colors.outlineVariant else line
+    val highlightColor = colors.surfaceContainerHighest.copy(alpha = 0.18f)
+    return this
+        .clip(shape)
+        .background(resolvedFill, shape)
+        .drawWithCache {
+            val highlight = Brush.verticalGradient(
+                colors = listOf(highlightColor, Color.Transparent),
+                endY = 18.dp.toPx(),
+            )
+            onDrawBehind { drawRect(highlight) }
+        }
+        .border(width = 1.dp, color = resolvedLine, shape = shape)
+}
 
 @Composable
 internal fun GlassPanel(
     modifier: Modifier = Modifier,
     shape: Shape = GlassPanelShape,
-    fill: Color = GlassFill,
-    line: Color = GlassLine,
+    fill: Color = Color.Unspecified,
+    line: Color = Color.Unspecified,
     content: @Composable BoxScope.() -> Unit,
 ) {
     Box(
@@ -67,12 +75,17 @@ internal fun GlassIconButton(
     modifier: Modifier = Modifier,
     size: Dp = 48.dp,
     enabled: Boolean = true,
-    tint: Color = Color.White,
+    tint: Color = Color.Unspecified,
     content: @Composable () -> Unit,
 ) {
     val resolvedSize = size.coerceAtLeast(UiDimens.TouchTarget)
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
+    val contentColor = if (tint == Color.Unspecified) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        tint
+    }
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.96f else 1f,
         animationSpec = tween(120),
@@ -88,7 +101,7 @@ internal fun GlassIconButton(
             }
             .semantics { contentDescription = label },
         enabled = enabled,
-        colors = IconButtonDefaults.iconButtonColors(contentColor = tint),
+        colors = IconButtonDefaults.iconButtonColors(contentColor = contentColor),
         interactionSource = interactionSource,
         content = content,
     )

@@ -1,8 +1,8 @@
 {
-  "versionCode": 197,
-  "versionName": "1.7.0",
-  "apkFile": "deepfuck-android-v1.7.0.apk",
-  "sha256": "9fb0003aa2472849db652b651ae5e765af9772b0bfc9febf2173831c6085c0f2",
-  "size": 4325712,
+  "versionCode": 198,
+  "versionName": "1.7.1",
+  "apkFile": "deepfuck-android-v1.7.1.apk",
+  "sha256": "C62DA32A49643A23B5E459E8FCF1350981830CC6E943D8BDDFE877278C0AAF48",
+  "size": 4561893,
   "notes": "重构高对比媒体导航：使用统一板块图标、明确选中状态和稳定触控区域。"
 }

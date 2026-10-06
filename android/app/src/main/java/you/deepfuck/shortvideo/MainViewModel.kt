@@ -24,6 +24,7 @@ import you.deepfuck.shortvideo.data.ApiException
 import you.deepfuck.shortvideo.data.AppUpdateInfo
 import you.deepfuck.shortvideo.data.AppUpdatePhase
 import you.deepfuck.shortvideo.data.AppUpdateUiState
+import you.deepfuck.shortvideo.data.AppSettings
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.AsmrFilter
 import you.deepfuck.shortvideo.data.DramaDetail
@@ -32,6 +33,8 @@ import you.deepfuck.shortvideo.data.DramaGroup
 import you.deepfuck.shortvideo.data.DramaItem
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.LibraryScanStatus
+import you.deepfuck.shortvideo.data.LibraryResult
+import you.deepfuck.shortvideo.data.LibraryResultsPage
 import you.deepfuck.shortvideo.data.LibrarySection
 import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
@@ -58,10 +61,36 @@ import you.deepfuck.shortvideo.update.sha256Matches
 
 enum class AuthenticationState { CHECKING, SIGNED_IN, SIGNED_OUT }
 
+internal val LIBRARY_SECTIONS = setOf("all", "short", "long", "asmr", "movie", "drama")
+internal val LIBRARY_MEDIA_SECTIONS = setOf("short", "long", "asmr", "movie", "drama")
+internal val APP_SKINS = setOf(
+    "obsidian-coral",
+    "graphite-cyan",
+    "midnight-amber",
+    "forest-mint",
+    "paper-ink",
+)
+internal const val DEFAULT_APP_SKIN = "obsidian-coral"
+
 data class AppUiState(
     val authentication: AuthenticationState = AuthenticationState.CHECKING,
     val loginBusy: Boolean = false,
     val loginError: String? = null,
+    val skin: String = "obsidian-coral",
+    val skinSaving: Boolean = false,
+    val skinSaveError: String? = null,
+    val searchQuery: String = "",
+    val searchSection: String = "all",
+    val searchResults: List<LibraryResult> = emptyList(),
+    val searchLoading: Boolean = false,
+    val searchError: String? = null,
+    val favoritesSection: String = "all",
+    val favoriteItems: List<LibraryResult> = emptyList(),
+    val favoriteTotal: Int = 0,
+    val favoriteNextOffset: Int? = 0,
+    val favoritesLoading: Boolean = false,
+    val favoritesError: String? = null,
+    val favoriteMediaIds: Set<String> = emptySet(),
     val surface: MediaSurface = MediaSurface.SHORT,
     val mode: FeedMode = FeedMode.SHUFFLE,
     val muted: Boolean = true,
@@ -114,11 +143,14 @@ data class AppUiState(
     val selectedMovie: MovieItem? = null,
     val movieNavigation: MovieBrowseNavigation = MovieBrowseNavigation(),
     val movieMetadataEntity: MovieMetadataEntity? = null,
+    val movieMetadataSort: String = "cover",
     val movieMetadataItems: List<MovieItem> = emptyList(),
     val movieMetadataTotal: Int = 0,
     val movieMetadataNextOffset: Int? = 0,
     val movieMetadataLoading: Boolean = false,
     val movieMetadataError: String? = null,
+    val movieRecommendations: List<MovieItem> = emptyList(),
+    val movieRecommendationsLoading: Boolean = false,
     val dramaItems: List<DramaItem> = emptyList(),
     val dramaTotal: Int = 0,
     val dramaNextOffset: Int? = 0,
@@ -136,6 +168,7 @@ data class AppUiState(
     val openDramaGroupNextOffset: Int? = 0,
     val openDramaGroupLoading: Boolean = false,
     val openDramaGroupError: String? = null,
+    val openDramaGroupSort: String = "newest",
     val dramaDetailLoading: Boolean = false,
     val selectedDrama: DramaDetail? = null,
     val expandedMedia: MediaEntry? = null,
@@ -173,6 +206,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 AuthenticationState.CHECKING
             },
             surface = initialSurface,
+            skin = preferences.skin,
             mode = preferences.mode,
             muted = preferences.muted(initialSurface),
             movieWallView = preferences.movieWallView,
@@ -215,6 +249,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var movieDetailJob: Job? = null
     private var movieMetadataJob: Job? = null
     private var movieMetadataGeneration = 0L
+    private var movieRecommendationsJob: Job? = null
+    private var librarySearchJob: Job? = null
+    private var favoritesJob: Job? = null
+    private var librarySearchGeneration = 0L
+    private var favoritesGeneration = 0L
+    private val favoriteStatusJobs = mutableMapOf<String, Job>()
+    private val favoriteMutationJobs = mutableMapOf<String, Job>()
     private val movieDetailCache = mutableMapOf<Long, MovieItem>()
     private val movieMetadataCache = mutableMapOf<Long, MovieMetadataPage>()
     private val movieMetadataPositions = mutableMapOf<Long, ListPosition>()
@@ -240,6 +281,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var dramaCatalogDirty = false
     private var appUpdateJob: Job? = null
     private var appUpdateObserverJob: Job? = null
+    private var skinSaveGeneration = 0L
     val movieImageLoader by lazy { api.movieImageLoader(application) }
 
     init {
@@ -252,6 +294,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (api.hasSession()) {
             restoreCurrentSurface()
+            loadAppSettings()
             verifySessionInBackground()
         } else {
             viewModelScope.launch { mutableState.value = mutableState.value.copy(authentication = AuthenticationState.SIGNED_OUT) }
@@ -302,6 +345,280 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopPlaybackService()
         activeFeedItemId = null
         mutableState.value = AppUiState(authentication = AuthenticationState.SIGNED_OUT)
+    }
+
+    fun searchLibrary(query: String = mutableState.value.searchQuery) {
+        val state = mutableState.value
+        if (query != state.searchQuery) {
+            mutableState.value = state.copy(searchQuery = query, searchError = null)
+        }
+        librarySearchJob?.cancel()
+        val generation = ++librarySearchGeneration
+        if (query.isBlank()) {
+            mutableState.value = mutableState.value.copy(
+                searchResults = emptyList(),
+                searchLoading = false,
+                searchError = null,
+            )
+            return
+        }
+        val section = mutableState.value.searchSection
+        mutableState.value = mutableState.value.copy(searchLoading = true, searchError = null)
+        librarySearchJob = viewModelScope.launch {
+            delay(260)
+            runApi { api.searchLibrary(query.trim(), section) }
+                .onSuccess { items ->
+                    if (generation != librarySearchGeneration) return@onSuccess
+                    mutableState.value = mutableState.value.copy(
+                        searchResults = items,
+                        searchLoading = false,
+                        searchError = null,
+                    )
+                }
+                .onFailure { error ->
+                    if (generation != librarySearchGeneration || handleUnauthorized(error)) return@onFailure
+                    mutableState.value = mutableState.value.copy(
+                        searchLoading = false,
+                        searchError = "搜索暂时不可用，请重试",
+                    )
+                }
+        }
+    }
+
+    fun setSearchSection(section: String) {
+        if (section !in LIBRARY_SECTIONS || section == mutableState.value.searchSection) return
+        mutableState.value = mutableState.value.copy(searchSection = section)
+        searchLibrary()
+    }
+
+    fun loadFavorites(section: String = mutableState.value.favoritesSection, reset: Boolean = true) {
+        if (section !in LIBRARY_SECTIONS) return
+        val state = mutableState.value
+        if (!reset && (state.favoritesLoading || state.favoriteNextOffset == null)) return
+        favoritesJob?.cancel()
+        val generation = ++favoritesGeneration
+        val sectionChanged = section != state.favoritesSection
+        val offset = if (reset || sectionChanged) 0 else state.favoriteNextOffset ?: return
+        mutableState.value = state.copy(
+            favoritesSection = section,
+            favoriteItems = if (reset || sectionChanged) emptyList() else state.favoriteItems,
+            favoriteTotal = if (reset || sectionChanged) 0 else state.favoriteTotal,
+            favoriteNextOffset = if (reset || sectionChanged) 0 else state.favoriteNextOffset,
+            favoritesLoading = true,
+            favoritesError = null,
+        )
+        favoritesJob = viewModelScope.launch {
+            runApi { api.favoriteEntries(section, offset) }
+                .onSuccess { page ->
+                    if (generation != favoritesGeneration) return@onSuccess
+                    val current = mutableState.value
+                    val ids = if (offset == 0) mutableSetOf() else current.favoriteItems.mapTo(mutableSetOf()) { it.id }
+                    mutableState.value = current.copy(
+                        favoriteItems = if (offset == 0) page.items else current.favoriteItems + page.items.filter { ids.add(it.id) },
+                        favoriteTotal = page.total,
+                        favoriteNextOffset = page.nextOffset,
+                        favoritesLoading = false,
+                        favoritesError = null,
+                    )
+                }
+                .onFailure { error ->
+                    if (generation != favoritesGeneration || handleUnauthorized(error)) return@onFailure
+                    mutableState.value = mutableState.value.copy(
+                        favoritesLoading = false,
+                        favoritesError = "收藏列表暂时不可用，请重试",
+                    )
+                }
+        }
+    }
+
+    fun loadMoreFavorites() = loadFavorites(reset = false)
+
+    fun toggleLibraryFavorite(item: LibraryResult) {
+        val targetId = item.favoriteTargetId ?: return
+        if (item.section !in LIBRARY_MEDIA_SECTIONS) return
+        val wanted = !item.favorite
+        stampLibraryFavorite(item, wanted)
+        viewModelScope.launch {
+            runApi { api.setFavorite(item.section, targetId, wanted) }
+                .onSuccess { stored -> if (stored != wanted) stampLibraryFavorite(item, stored) }
+                .onFailure { error ->
+                    if (handleUnauthorized(error)) return@onFailure
+                    stampLibraryFavorite(item, !wanted)
+                    mutableState.value = mutableState.value.copy(
+                        favoritesError = "收藏状态未能同步，请重试",
+                    )
+                }
+        }
+    }
+
+    fun toggleMediaFavorite(section: String, targetId: String) {
+        if (section !in LIBRARY_MEDIA_SECTIONS || targetId.isBlank()) return
+        val key = "$section:$targetId"
+        val current = mutableState.value
+        val wanted = key !in current.favoriteMediaIds
+        mutableState.value = current.copy(
+            favoriteMediaIds = if (wanted) current.favoriteMediaIds + key else current.favoriteMediaIds - key,
+        )
+        favoriteMutationJobs.remove(key)?.cancel()
+        favoriteMutationJobs[key] = viewModelScope.launch {
+            runApi { api.setFavorite(section, targetId, wanted) }
+                .onSuccess { stored ->
+                    if (stored != wanted) stampFavoriteMediaId(section, targetId, stored)
+                }
+                .onFailure { error ->
+                    if (!handleUnauthorized(error)) {
+                        stampFavoriteMediaId(section, targetId, !wanted)
+                        mutableState.value = mutableState.value.copy(
+                            favoritesError = "收藏状态未能同步，请重试",
+                        )
+                    }
+                }
+        }
+    }
+
+    private fun stampFavoriteMediaId(section: String, targetId: String, favorite: Boolean) {
+        val key = "$section:$targetId"
+        mutableState.update { state ->
+            state.copy(
+                favoriteMediaIds = if (favorite) state.favoriteMediaIds + key else state.favoriteMediaIds - key,
+            )
+        }
+    }
+
+    private fun loadFavoriteStatuses(section: String, targetIds: List<String>) {
+        val ids = targetIds.distinct().filter(String::isNotBlank).take(100)
+        if (section !in LIBRARY_MEDIA_SECTIONS || ids.isEmpty()) return
+        val requestKey = "$section:${ids.sorted().joinToString(",")}"
+        favoriteStatusJobs.remove(requestKey)?.cancel()
+        favoriteStatusJobs[requestKey] = viewModelScope.launch {
+            runApi { api.favoriteStatuses(section, ids) }
+                .onSuccess { favorites ->
+                    val keys = ids.mapTo(mutableSetOf()) { "$section:$it" }
+                    mutableState.update { state ->
+                        state.copy(
+                            favoriteMediaIds = state.favoriteMediaIds - keys +
+                                favorites.map { "$section:$it" },
+                        )
+                    }
+                }
+                .onFailure { error -> handleUnauthorized(error) }
+        }
+    }
+
+    private fun stampLibraryFavorite(item: LibraryResult, favorite: Boolean) {
+        fun LibraryResult.stamp(): LibraryResult = if (id == item.id) copy(
+            favorite = favorite,
+            movie = movie?.copy(favorite = favorite),
+        ) else this
+        val state = mutableState.value
+        val existing = state.favoriteItems.any { it.id == item.id }
+        val favorites = when {
+            favorite && !existing -> listOf(item.copy(favorite = true, movie = item.movie?.copy(favorite = true))) + state.favoriteItems
+            favorite -> state.favoriteItems.map { it.stamp() }
+            else -> state.favoriteItems.filterNot { it.id == item.id }
+        }
+        val favoriteKey = item.favoriteTargetId?.let { "${item.section}:$it" }
+        mutableState.value = state.copy(
+            searchResults = state.searchResults.map { it.stamp() },
+            favoriteItems = favorites,
+            favoriteMediaIds = when {
+                favorite && favoriteKey != null -> state.favoriteMediaIds + favoriteKey
+                !favorite && favoriteKey != null -> state.favoriteMediaIds - favoriteKey
+                else -> state.favoriteMediaIds
+            },
+            favoriteTotal = (state.favoriteTotal + when {
+                favorite && !existing -> 1
+                !favorite && existing -> -1
+                else -> 0
+            }).coerceAtLeast(0),
+        )
+    }
+
+    fun openLibraryResult(item: LibraryResult) {
+        when {
+            item.type == "author" -> {
+                changeSurface(MediaSurface.ASMR)
+                item.author?.let(::selectAsmrAuthor)
+            }
+            item.type == "entity" -> {
+                changeSurface(MediaSurface.MOVIE)
+                item.entity?.let(::openMovieMetadata)
+            }
+            item.movie != null -> {
+                changeSurface(MediaSurface.MOVIE)
+                selectMovie(item.movie)
+            }
+            item.drama != null -> {
+                changeSurface(MediaSurface.DRAMA)
+                selectDrama(item.drama)
+            }
+            item.media != null && item.section == "asmr" -> {
+                changeSurface(MediaSurface.ASMR)
+                item.media.author?.let(::selectAsmrAuthor)
+                asmrQueueKey = item.media.author?.let { AsmrItemsKey(it, mutableState.value.asmrFilter) }
+                asmrQueue = listOf(item.media)
+                startAsmrPlayback(item.media, expandVideo = !item.media.isAudio)
+            }
+            item.media != null -> {
+                val surface = MediaSurface.entries.firstOrNull { it.apiValue == item.section } ?: return
+                preferences.setLastVideo(surface, item.media.id)
+                changeSurface(surface)
+            }
+        }
+    }
+
+    fun setSkin(skin: String) {
+        if (skin !in APP_SKINS || skin == mutableState.value.skin) return
+        val generation = ++skinSaveGeneration
+        // The preview is immediate, but the device preference is committed only
+        // after the server accepts the same generation. This prevents an older
+        // request from winning when the user changes skins quickly.
+        mutableState.value = mutableState.value.copy(skin = skin, skinSaving = true, skinSaveError = null)
+        persistSkin(skin, generation)
+    }
+
+    fun retrySkinSave() {
+        persistSkin(mutableState.value.skin, ++skinSaveGeneration)
+    }
+
+    private fun persistSkin(skin: String, generation: Long) {
+        viewModelScope.launch {
+            mutableState.value = mutableState.value.copy(skinSaving = true, skinSaveError = null)
+            runApi { api.saveAppSettings(AppSettings(skin)) }
+                .onSuccess { saved ->
+                    if (generation != skinSaveGeneration || saved.skin != mutableState.value.skin) return@onSuccess
+                    preferences.skin = saved.skin
+                    mutableState.value = mutableState.value.copy(
+                        skin = saved.skin,
+                        skinSaving = false,
+                        skinSaveError = null,
+                    )
+                }
+                .onFailure { error ->
+                    if (handleUnauthorized(error)) return@onFailure
+                    if (generation != skinSaveGeneration) return@onFailure
+                    mutableState.value = mutableState.value.copy(
+                        skinSaving = false,
+                        skinSaveError = "保存失败，当前皮肤预览已保留",
+                    )
+                }
+        }
+    }
+
+    private fun loadAppSettings() {
+        val generation = skinSaveGeneration
+        viewModelScope.launch {
+            runApi { api.appSettings() }
+                .onSuccess { saved ->
+                    if (generation != skinSaveGeneration) return@onSuccess
+                    val skin = saved.skin.takeIf { it in APP_SKINS } ?: DEFAULT_APP_SKIN
+                    preferences.skin = skin
+                    mutableState.value = mutableState.value.copy(skin = skin)
+                }
+                .onFailure { error ->
+                    if (!handleUnauthorized(error)) logs.warning("app_settings_load_failed")
+                }
+        }
     }
 
     fun changeSurface(surface: MediaSurface) {
@@ -370,6 +687,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieMetadataNextOffset = 0,
             movieMetadataLoading = false,
             movieMetadataError = null,
+            movieRecommendations = emptyList(),
+            movieRecommendationsLoading = false,
             openMovieGroupId = null,
             openMovieGroupName = "",
             openMovieGroupItems = emptyList(),
@@ -1011,6 +1330,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = mutableState.value
         fun MovieItem.stamped(): MovieItem =
             if (id == movie.id) copy(favorite = favorite) else this
+        fun LibraryResult.stamped(): LibraryResult =
+            if (this.movie?.id == movie.id) copy(
+                favorite = favorite,
+                movie = this.movie.copy(favorite = favorite),
+            ) else this
         val hearted = movie.copy(favorite = true)
         val without = state.movieFavorites.filterNot { it.id == movie.id }
         val hadRow = without.size != state.movieFavorites.size
@@ -1039,6 +1363,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             },
             movieFavorites = favorites,
             movieFavoritesTotal = (state.movieFavoritesTotal + delta).coerceAtLeast(0),
+            searchResults = state.searchResults.map { it.stamped() },
+            favoriteItems = if (favorite) {
+                state.favoriteItems.map { it.stamped() }
+            } else {
+                state.favoriteItems.filterNot { it.movie?.id == movie.id }
+            },
+            favoriteTotal = (state.favoriteTotal + if (!favorite && state.favoriteItems.any { it.movie?.id == movie.id }) -1 else 0)
+                .coerceAtLeast(0),
         )
     }
 
@@ -1056,6 +1388,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selectedMovie = localMovie,
             movieDetailLoading = true,
             movieError = null,
+            movieRecommendations = emptyList(),
+            movieRecommendationsLoading = true,
             nowPlaying = null,
             movieNavigation = navigation,
         )
@@ -1074,6 +1408,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         movieGroups = state.movieGroups.map { it.withItem(resolved) },
                         movieDetailLoading = false,
                     )
+                    loadMovieRecommendations(resolved.id)
                 }
                 .onFailure { error ->
                     if (!handleUnauthorized(error)) {
@@ -1132,6 +1467,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selectedMovie = null,
             movieDetailLoading = false,
             movieMetadataEntity = entity,
+            movieMetadataSort = "cover",
             movieMetadataItems = cached?.items?.map { it.withResumePosition() } ?: emptyList(),
             movieMetadataTotal = cached?.total ?: entity.movieCount,
             movieMetadataNextOffset = cached?.nextOffset ?: 0,
@@ -1153,6 +1489,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = state.copy(
             selectedMovie = restoredMovie,
             movieMetadataEntity = null,
+            movieMetadataSort = "cover",
             movieMetadataItems = emptyList(),
             movieMetadataTotal = 0,
             movieMetadataNextOffset = 0,
@@ -1169,6 +1506,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setMovieMetadataSort(sort: String) {
+        if (sort !in setOf("cover", "time")) return
+        val state = mutableState.value
+        if (state.movieMetadataEntity == null || state.movieMetadataSort == sort) return
+        movieMetadataJob?.cancel()
+        mutableState.value = state.copy(
+            movieMetadataSort = sort,
+            movieMetadataItems = emptyList(),
+            movieMetadataNextOffset = 0,
+            movieMetadataLoading = true,
+            movieMetadataError = null,
+        )
+        loadMovieMetadataPage(reset = true)
+    }
+
+    private fun loadMovieRecommendations(movieId: Long) {
+        movieRecommendationsJob?.cancel()
+        movieRecommendationsJob = viewModelScope.launch {
+            runApi { api.movieRecommendations(movieId) }
+                .onSuccess { items ->
+                    val state = mutableState.value
+                    if (state.surface == MediaSurface.MOVIE && state.selectedMovie?.id == movieId) {
+                        mutableState.value = state.copy(
+                            movieRecommendations = items,
+                            movieRecommendationsLoading = false,
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    if (!handleUnauthorized(error)) {
+                        val state = mutableState.value
+                        if (state.surface == MediaSurface.MOVIE && state.selectedMovie?.id == movieId) {
+                            mutableState.value = state.copy(movieRecommendationsLoading = false)
+                        }
+                    }
+                }
+        }
+    }
+
     private fun loadMovieMetadataPage(reset: Boolean) {
         val state = mutableState.value
         val entity = state.movieMetadataEntity ?: return
@@ -1177,7 +1553,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         movieMetadataJob?.cancel()
         mutableState.value = state.copy(movieMetadataLoading = true, movieMetadataError = null)
         movieMetadataJob = viewModelScope.launch {
-            runApi { api.movieMetadataMovies(entity.id, offset = offset) }
+            runApi {
+                api.movieMetadataMovies(
+                    entity.id,
+                    offset = offset,
+                    sort = state.movieMetadataSort,
+                )
+            }
                 .onSuccess { page ->
                     val current = mutableState.value
                     if (generation != movieMetadataGeneration || current.movieMetadataEntity?.id != entity.id) return@onSuccess
@@ -1265,6 +1647,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openDramaGroupNextOffset = if (prefetched.isEmpty()) 0 else group.nextOffset,
             openDramaGroupLoading = true,
             openDramaGroupError = null,
+            openDramaGroupSort = "newest",
         )
         loadDramaGroupPage(reset = true)
     }
@@ -1281,7 +1664,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             openDramaGroupNextOffset = 0,
             openDramaGroupLoading = false,
             openDramaGroupError = null,
+            openDramaGroupSort = "newest",
         )
+    }
+
+    fun setDramaGroupSort(sort: String) {
+        if (sort !in setOf("newest", "oldest", "name")) return
+        val state = mutableState.value
+        if (state.openDramaGroupId == null || state.openDramaGroupSort == sort) return
+        mutableState.value = state.copy(
+            openDramaGroupSort = sort,
+            openDramaGroupItems = emptyList(),
+            openDramaGroupNextOffset = 0,
+            openDramaGroupLoading = true,
+            openDramaGroupError = null,
+        )
+        loadDramaGroupPage(reset = true)
     }
 
     fun loadMoreDramaGroup() {
@@ -1305,6 +1703,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     category = groupId,
                     offset = offset,
                     limit = MediaApi.DRAMA_LIBRARY_PAGE_SIZE,
+                    sort = state.openDramaGroupSort,
                 )
             }
                 .onSuccess { page ->
@@ -1362,6 +1761,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectDrama(drama: DramaItem) {
         if (mutableState.value.surface != MediaSurface.DRAMA) return
+        loadFavoriteStatuses("drama", listOf(drama.id))
         mutableState.value = mutableState.value.copy(
             selectedDrama = DramaDetail(item = drama, episodes = emptyList()),
             dramaDetailLoading = true,
@@ -2223,6 +2623,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         dramaLoading = false,
                         dramaError = null,
                     )
+                    loadFavoriteStatuses("drama", incoming.map { it.id })
                     if (reset && page.items.isEmpty() && page.scanRunning) {
                         delay(1_500)
                         loadDramas(reset = true)
@@ -2538,6 +2939,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             feedError = null,
         )
         if (items.isNotEmpty()) {
+            loadFavoriteStatuses(surface.apiValue, items.map { it.id.toString() })
             activateFeedItem(activeIndex, autoPlay = session?.playWhenReady ?: true)
             refreshFeedTotal(surface)
         } else {
@@ -2590,6 +2992,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val ids = current.mapTo(mutableSetOf()) { it.id }
                         current + page.items.filter { ids.add(it.id) }
                     }
+                    loadFavoriteStatuses(requestedSurface.apiValue, page.items.map { it.id.toString() })
                     mutableState.value = mutableState.value.copy(
                         feedItems = merged,
                         feedTotal = reconcileFeedTotal(
@@ -2983,6 +3386,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     asmrLoading = false,
                     asmrError = null,
                 )
+                loadFavoriteStatuses("asmr", page.items.map { it.id.toString() })
             } else if (asmrQueueKey != key) {
                 return@launch
             }

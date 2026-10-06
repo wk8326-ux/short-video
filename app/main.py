@@ -60,7 +60,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -1318,6 +1318,16 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class AppSettingsRequest(BaseModel):
+    skin: Literal[
+        "obsidian-coral",
+        "graphite-cyan",
+        "midnight-amber",
+        "forest-mint",
+        "paper-ink",
+    ]
+
+
 class MediaSourceRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     provider: Literal["alist", "openlist"] = "alist"
@@ -1516,6 +1526,7 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         "videoId": int(row["video_id"]),
         "title": str(row.get("display_title") or Path(row["name"]).stem),
         "originalTitle": row.get("original_title"),
+        "code": row.get("code"),
         "year": row.get("year"),
         "overview": row.get("overview") or "",
         # Keep third-party image URLs server-side.  Mobile clients frequently
@@ -1593,6 +1604,102 @@ def public_drama(row: dict[str, Any]) -> dict[str, Any]:
         "source": row.get("source"),
         "path": row.get("folder"),
     }
+
+
+def _public_media_result(row: dict[str, Any], section: str) -> dict[str, Any]:
+    video_id = int(row["id"])
+    title = Path(str(row.get("name") or "")).stem
+    media = {
+        "id": video_id,
+        "title": title,
+        "size": int(row.get("size") or 0),
+        "modified": row.get("modified"),
+        "duration": row.get("duration_seconds"),
+        "playUrl": f"/api/videos/{video_id}/play",
+        "posterUrl": f"/api/videos/{video_id}/poster" if row.get("thumb") else None,
+        "author": row.get("author"),
+        "format": row.get("media_format"),
+        "kind": row.get("media_kind") or "video",
+    }
+    section_label = {"short": "短视频", "long": "长视频", "asmr": "ASMR"}[section]
+    media_kind = "音频" if media["kind"] == "audio" else "视频"
+    return {
+        "type": "media",
+        "section": section,
+        "id": f"{section}:{video_id}",
+        "title": title,
+        "subtitle": f"{section_label} · {media_kind}",
+        "posterUrl": media["posterUrl"],
+        "favorite": False,
+        "media": media,
+    }
+
+
+def _resolve_favorite_entries(
+    entries: list[dict[str, Any]],
+    sources_by_section: dict[str, tuple[str, ...]],
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for entry in entries:
+        section = str(entry["media_type"])
+        target_id = str(entry["target_id"])
+        sources = sources_by_section.get(section, ())
+        if section == "movie":
+            row = database.get_movie(int(target_id), sources=sources)
+            if row:
+                movie = public_movie(row)
+                items.append({
+                    "type": "movie",
+                    "section": section,
+                    "id": f"movie:{target_id}",
+                    "title": movie["title"],
+                    "subtitle": f"電影 · {movie.get('year') or '年份未知'}",
+                    "posterUrl": movie.get("posterUrl"),
+                    "favorite": True,
+                    "movie": movie,
+                })
+            continue
+        if section == "drama":
+            row = database.get_drama(target_id, sources=sources)
+            if row:
+                drama = public_drama(row)
+                items.append({
+                    "type": "drama",
+                    "section": section,
+                    "id": f"drama:{target_id}",
+                    "title": drama["title"],
+                    "subtitle": f"短劇 · {drama['episodeCount']} 集",
+                    "posterUrl": drama.get("posterUrl"),
+                    "favorite": True,
+                    "drama": drama,
+                })
+            continue
+        if section not in {"short", "long", "asmr"}:
+            continue
+        try:
+            row = database.get_video(int(target_id))
+        except ValueError:
+            continue
+        if not row or str(row.get("source") or "") not in sources:
+            continue
+        if section == "asmr":
+            if not row.get("author") or not database.asmr_author_exists(
+                author=str(row["author"]), sources=sources
+            ):
+                continue
+        else:
+            duration = row.get("duration_seconds")
+            if duration is None:
+                continue
+            if section == "short" and float(duration) >= settings.duration_boundary_seconds:
+                continue
+            if section == "long" and float(duration) < settings.duration_boundary_seconds:
+                continue
+        result = _public_media_result(row, section)
+        result["favorite"] = True
+        result["favoritedAt"] = entry.get("created_at")
+        items.append(result)
+    return items
 
 
 def public_drama_episode(video: dict[str, Any], position: int) -> dict[str, Any]:
@@ -2967,6 +3074,298 @@ async def sweep_movie_cover_cache() -> None:
             await asyncio.sleep(MOVIE_IMAGE_WARM_PAUSE_SECONDS)
 
 
+@app.get("/api/settings")
+async def get_app_settings() -> dict[str, str]:
+    settings_value = await asyncio.to_thread(database.get_app_settings)
+    skin = settings_value.get("skin", "obsidian-coral")
+    allowed = {
+        "obsidian-coral",
+        "graphite-cyan",
+        "midnight-amber",
+        "forest-mint",
+        "paper-ink",
+    }
+    if skin not in allowed:
+        skin = "obsidian-coral"
+        await asyncio.to_thread(database.set_app_setting, "skin", skin)
+    return {"skin": skin}
+
+
+@app.put("/api/settings")
+async def update_app_settings(payload: AppSettingsRequest) -> dict[str, str]:
+    await asyncio.to_thread(database.set_app_setting, "skin", payload.skin)
+    return {"skin": payload.skin}
+
+
+@app.get("/api/search")
+async def search_library(
+    q: str = Query(default="", max_length=100),
+    section: str = Query(
+        default="all",
+        pattern="^(all|short|long|asmr|movie|drama)$",
+    ),
+    limit: int = Query(default=40, ge=1, le=100),
+) -> dict[str, Any]:
+    search = q.strip()
+    if not search:
+        return {"items": [], "query": "", "section": section}
+
+    sections = (
+        ("short", "long", "asmr", "movie", "drama")
+        if section == "all"
+        else (section,)
+    )
+    sources_by_section = {
+        "short": source_registry.ids("feed"),
+        "long": source_registry.ids("feed"),
+        "asmr": source_registry.ids("asmr"),
+        "movie": source_registry.ids("movie"),
+        "drama": source_registry.ids("drama"),
+    }
+    tasks: dict[str, Any] = {}
+    if "short" in sections:
+        tasks["short"] = asyncio.to_thread(
+            database.search_media,
+            search=search,
+            section="short",
+            sources=sources_by_section["short"],
+            duration_boundary=settings.duration_boundary_seconds,
+            limit=limit,
+        )
+    if "long" in sections:
+        tasks["long"] = asyncio.to_thread(
+            database.search_media,
+            search=search,
+            section="long",
+            sources=sources_by_section["long"],
+            duration_boundary=settings.duration_boundary_seconds,
+            limit=limit,
+        )
+    if "asmr" in sections:
+        tasks["authors"] = asyncio.to_thread(
+            database.asmr_authors,
+            search=search,
+            limit=limit,
+            offset=0,
+            sources=sources_by_section["asmr"],
+        )
+        tasks["asmr"] = asyncio.to_thread(
+            database.search_media,
+            search=search,
+            section="asmr",
+            sources=sources_by_section["asmr"],
+            duration_boundary=settings.duration_boundary_seconds,
+            limit=limit,
+        )
+    if "movie" in sections:
+        tasks["movies"] = asyncio.to_thread(
+            database.movies,
+            search=search,
+            limit=limit,
+            offset=0,
+            sources=sources_by_section["movie"],
+        )
+        tasks["entities"] = asyncio.to_thread(
+            database.search_movie_metadata_entities,
+            search=search,
+            sources=sources_by_section["movie"],
+            limit=limit,
+        )
+    if "drama" in sections:
+        tasks["dramas"] = asyncio.to_thread(
+            database.dramas,
+            search=search,
+            limit=limit,
+            offset=0,
+            sources=sources_by_section["drama"],
+        )
+    resolved = dict(zip(tasks, await asyncio.gather(*tasks.values())))
+
+    items: list[dict[str, Any]] = []
+    for key in ("authors", "entities", "movies", "short", "long", "asmr", "dramas"):
+        for row in resolved.get(key, []):
+            if key == "authors":
+                author = str(row["author"])
+                items.append({
+                    "type": "author",
+                    "section": "asmr",
+                    "id": f"author:{author}",
+                    "title": author,
+                    "subtitle": f"ASMR 作者目录 · {int(row.get('item_count') or 0)} 条媒体",
+                    "author": author,
+                    "count": int(row.get("item_count") or 0),
+                })
+            elif key == "entities":
+                entity = {
+                    "id": int(row["id"]),
+                    "type": str(row["type"]),
+                    "name": str(row["name"]),
+                    "movieCount": int(row["movie_count"] or 0),
+                }
+                labels = {"performer": "演员", "studio": "制作商", "genre": "类型", "year": "年份"}
+                items.append({
+                    "type": "entity",
+                    "section": "movie",
+                    "id": f"entity:{entity['id']}",
+                    "title": entity["name"],
+                    "subtitle": f"{labels.get(entity['type'], '元数据')} · {entity['movieCount']} 部电影",
+                    "entity": entity,
+                })
+            elif key == "movies":
+                movie = public_movie(row)
+                movie["favorite"] = await asyncio.to_thread(
+                    database.is_media_favorite, "movie", movie["id"]
+                )
+                items.append({
+                    "type": "movie",
+                    "section": "movie",
+                    "id": f"movie:{movie['id']}",
+                    "title": movie["title"],
+                    "subtitle": f"电影 · {movie.get('year') or '年份未知'}",
+                    "posterUrl": movie.get("posterUrl"),
+                    "movie": movie,
+                })
+            elif key in {"short", "long", "asmr"}:
+                items.append(_public_media_result(row, key))
+            elif key == "dramas":
+                drama = public_drama(row)
+                items.append({
+                    "type": "drama",
+                    "section": "drama",
+                    "id": f"drama:{drama['id']}",
+                    "title": drama["title"],
+                    "subtitle": f"短劇 · {drama['episodeCount']} 集",
+                    "posterUrl": drama.get("posterUrl"),
+                    "drama": drama,
+                })
+    favorite_map = await asyncio.to_thread(database.media_favorite_map)
+    items = items[:limit]
+    for item in items:
+        item["favorite"] = favorite_map.get(
+            (str(item.get("section") or ""), str(item.get("id") or "").split(":", 1)[-1]),
+            False,
+        )
+        if isinstance(item.get("movie"), dict):
+            item["movie"]["favorite"] = item["favorite"]
+    return {"items": items, "query": search, "section": section}
+
+
+@app.get("/api/favorites")
+async def all_favorites(
+    section: str = Query(
+        default="all",
+        pattern="^(all|short|long|asmr|movie|drama)$",
+    ),
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    entries, total = await asyncio.to_thread(
+        database.favorite_entries,
+        section=section,
+        limit=limit,
+        offset=offset,
+    )
+    sources_by_section = {
+        "short": source_registry.ids("feed"),
+        "long": source_registry.ids("feed"),
+        "asmr": source_registry.ids("asmr"),
+        "movie": source_registry.ids("movie"),
+        "drama": source_registry.ids("drama"),
+    }
+    items = await asyncio.to_thread(
+        _resolve_favorite_entries,
+        entries,
+        sources_by_section,
+    )
+    return {
+        "items": items,
+        "total": total,
+        "nextOffset": offset + len(entries) if offset + len(entries) < total else None,
+        "section": section,
+    }
+
+
+@app.get("/api/favorites/status")
+async def favorite_status(
+    section: Literal["short", "long", "asmr", "movie", "drama"],
+    ids: list[str] = Query(default=[]),
+) -> dict[str, list[str]]:
+    if len(ids) > 100 or any(not value.strip() or len(value) > 200 for value in ids):
+        raise HTTPException(status_code=422, detail="Invalid favorite status query")
+    favorites = await asyncio.to_thread(
+        database.media_favorite_statuses,
+        section,
+        ids,
+    )
+    return {"ids": sorted(favorites)}
+
+
+@app.put("/api/favorites/{media_type}/{target_id}")
+async def set_media_favorite(
+    media_type: Literal["short", "long", "asmr", "movie", "drama"],
+    target_id: str,
+) -> dict[str, Any]:
+    sources = source_registry.ids("feed" if media_type in {"short", "long"} else media_type)
+    if media_type == "movie":
+        try:
+            row = await asyncio.to_thread(database.get_movie, int(target_id), sources=sources)
+        except ValueError:
+            row = None
+        if not row:
+            raise HTTPException(status_code=404, detail="Movie not found")
+        await asyncio.to_thread(database.set_movie_favorite, int(row["video_id"]), True)
+    elif media_type == "drama":
+        row = await asyncio.to_thread(database.get_drama, target_id, sources=sources)
+        if not row:
+            raise HTTPException(status_code=404, detail="Drama not found")
+        await asyncio.to_thread(database.set_media_favorite, media_type, target_id, True)
+    else:
+        try:
+            row = await asyncio.to_thread(database.get_video, int(target_id))
+        except ValueError:
+            row = None
+        if not row or str(row.get("source") or "") not in sources:
+            raise HTTPException(status_code=404, detail="Media not found")
+        if media_type == "asmr":
+            if not row.get("author") or not await asyncio.to_thread(
+                database.asmr_author_exists,
+                author=str(row["author"]),
+                sources=sources,
+            ):
+                raise HTTPException(status_code=404, detail="ASMR media not found")
+        else:
+            duration = row.get("duration_seconds")
+            if duration is None or (
+                media_type == "short" and float(duration) >= settings.duration_boundary_seconds
+            ) or (
+                media_type == "long" and float(duration) < settings.duration_boundary_seconds
+            ):
+                raise HTTPException(status_code=404, detail="Media not found in this section")
+        await asyncio.to_thread(database.set_media_favorite, media_type, target_id, True)
+    return {"favorite": True}
+
+
+@app.delete("/api/favorites/{media_type}/{target_id}")
+async def remove_media_favorite(
+    media_type: Literal["short", "long", "asmr", "movie", "drama"],
+    target_id: str,
+) -> dict[str, Any]:
+    sources = source_registry.ids("feed" if media_type in {"short", "long"} else media_type)
+    if media_type == "movie":
+        try:
+            row = await asyncio.to_thread(database.get_movie, int(target_id), sources=sources)
+        except ValueError:
+            row = None
+        if not row:
+            raise HTTPException(status_code=404, detail="Movie not found")
+        await asyncio.to_thread(database.set_movie_favorite, int(row["video_id"]), False)
+    elif media_type == "drama":
+        await asyncio.to_thread(database.set_media_favorite, media_type, target_id, False)
+    else:
+        await asyncio.to_thread(database.set_media_favorite, media_type, target_id, False)
+    return {"favorite": False}
+
+
 @app.get("/api/feed")
 async def feed(
     limit: int = Query(default=12, ge=1, le=30),
@@ -3417,6 +3816,7 @@ async def movie_metadata_movies(
     entity_id: int,
     limit: int = Query(default=24, ge=1, le=60),
     offset: int = Query(default=0, ge=0),
+    sort: Literal["cover", "title", "time"] = Query(default="cover"),
 ) -> dict[str, Any]:
     """Browse every active movie linked to one metadata entity across libraries."""
     sources = source_registry.ids("movie")
@@ -3428,7 +3828,8 @@ async def movie_metadata_movies(
             metadata_entity_id=entity_id,
             limit=limit,
             offset=offset,
-            sort="cover",
+            sort=sort,
+            direction="desc",
         ),
         asyncio.to_thread(
             database.movie_count,
@@ -3501,6 +3902,48 @@ async def movie_detail(movie_id: int) -> dict[str, Any]:
         int(row["video_id"]),
     )
     return payload
+
+
+@app.get("/api/movies/{movie_id}/recommendations")
+async def movie_recommendations(
+    movie_id: int,
+    limit: int = Query(default=6, ge=1, le=60),
+) -> dict[str, Any]:
+    sources = source_registry.ids("movie")
+    current = await asyncio.to_thread(database.get_movie, movie_id, sources=sources)
+    if not current:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    ranked = await asyncio.to_thread(
+        database.movie_recommendations,
+        movie_id,
+        sources=sources,
+        limit=limit,
+    )
+    results: list[dict[str, Any]] = []
+    for recommendation in ranked:
+        row = await asyncio.to_thread(
+            database.get_movie,
+            int(recommendation["id"]),
+            sources=sources,
+        )
+        if not row:
+            continue
+        movie = public_movie(row)
+        movie["recommendationScore"] = float(recommendation["score"] or 0.0)
+        movie["recommendationMatches"] = {
+            "code": int(recommendation.get("code_matches") or 0),
+            "keywords": int(recommendation.get("keyword_matches") or 0),
+            "performers": int(recommendation.get("performer_matches") or 0),
+            "studios": int(recommendation.get("studio_matches") or 0),
+        }
+        movie["favorite"] = await asyncio.to_thread(
+            database.is_media_favorite, "movie", movie["id"]
+        )
+        results.append(movie)
+    return {
+        "items": results,
+        "algorithm": "番号优先，其次演员和类型；三种条件为 OR 关系",
+    }
 
 
 async def _movie_image(
@@ -3630,6 +4073,7 @@ async def dramas(
     limit: int = Query(default=24, ge=1, le=60),
     offset: int = Query(default=0, ge=0),
     category: str = Query(default="", max_length=100),
+    sort: Literal["cover", "newest", "oldest", "name"] = Query(default="cover"),
 ) -> dict[str, Any]:
     sources = source_registry.ids("drama")
     search = q.strip()
@@ -3642,6 +4086,7 @@ async def dramas(
             offset=offset,
             sources=sources,
             category=scope,
+            sort=sort,
         ),
         asyncio.to_thread(
             database.drama_count,

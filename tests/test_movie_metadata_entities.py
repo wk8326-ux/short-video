@@ -92,3 +92,86 @@ def test_entity_movie_page_spans_libraries_and_reports_counts(tmp_path):
         sources=("library-a", "library-b"),
         metadata_entity_id=int(entity["id"]),
     ) == 3
+
+
+def test_movie_recommendations_use_or_signals_and_number_prefix(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    movies = _seed(database)
+    source, keyword_led, performer_led = movies
+    database.update_movie_metadata(
+        int(source["id"]),
+        metadata_entities={
+            "performer": ["演员甲", "演员乙"],
+            "studio": ["片商甲"],
+            "genre": ["剧情", "悬疑"],
+        },
+    )
+    database.update_movie_metadata(
+        int(keyword_led["id"]),
+        metadata_entities={
+            "performer": ["演员甲"],
+            "studio": ["片商甲"],
+            "genre": ["剧情", "悬疑"],
+        },
+    )
+    database.update_movie_metadata(
+        int(performer_led["id"]),
+        metadata_entities={
+            "performer": ["演员甲", "演员乙"],
+            "studio": [],
+            "genre": ["剧情"],
+        },
+    )
+
+    ranked = database.movie_recommendations(
+        int(source["id"]),
+        sources=("library-a", "library-b"),
+    )
+
+    assert [row["id"] for row in ranked] == [performer_led["id"], keyword_led["id"]]
+    assert ranked[0]["code_matches"] == 1
+    assert ranked[1]["code_matches"] == 1
+    assert ranked[0]["score"] > ranked[1]["score"]
+
+
+def test_movie_recommendations_do_not_require_metadata_signals_to_coincide(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    database.replace_scan(
+        [
+            {"path": "/a/KTSB-001.mp4", "name": "KTSB-001.mp4", "size": 1},
+            {"path": "/a/KTSB-002.mp4", "name": "KTSB-002.mp4", "size": 1},
+            {"path": "/a/ABP-001.mp4", "name": "ABP-001.mp4", "size": 1},
+            {"path": "/a/XYZ-001.mp4", "name": "XYZ-001.mp4", "size": 1},
+        ],
+        source="library-a",
+    )
+    database.sync_movie_index("library-a", parse_movie_filename)
+    movies = database.movies(sources=("library-a",), limit=10, sort="title")
+    by_title = {str(movie["display_title"]): movie for movie in movies}
+    current = by_title["KTSB-001"]
+    code_only = by_title["KTSB-002"]
+    performer_only = by_title["ABP-001"]
+    genre_only = by_title["XYZ-001"]
+    database.update_movie_metadata(
+        int(current["id"]),
+        metadata_entities={"performer": ["演员甲"], "genre": ["剧情"]},
+    )
+    database.update_movie_metadata(
+        int(performer_only["id"]),
+        metadata_entities={"performer": ["演员甲"]},
+    )
+    database.update_movie_metadata(
+        int(genre_only["id"]),
+        metadata_entities={"genre": ["剧情"]},
+    )
+
+    ranked = database.movie_recommendations(
+        int(current["id"]),
+        sources=("library-a",),
+    )
+    ids = [row["id"] for row in ranked]
+    assert int(code_only["id"]) in ids
+    assert int(performer_only["id"]) in ids
+    assert int(genre_only["id"]) in ids
+    assert ranked[0]["id"] == code_only["id"]

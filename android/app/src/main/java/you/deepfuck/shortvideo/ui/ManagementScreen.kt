@@ -32,8 +32,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Badge
+import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Category
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Close
@@ -53,26 +55,27 @@ import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.LiveTv
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.PlayCircle
+import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.SwapVert
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -940,23 +943,31 @@ private fun MediaSourceDialog(
     onSave: (MediaSourceDraft) -> Unit,
 ) {
     var name by remember(source?.id) { mutableStateOf(source?.name.orEmpty()) }
-    var provider by remember(source?.id) { mutableStateOf(source?.provider ?: "alist") }
+    var provider by remember(source?.id) { mutableStateOf(source?.provider ?: "openlist") }
     var baseUrl by remember(source?.id) { mutableStateOf(source?.baseUrl.orEmpty()) }
     var rootPaths by remember(source?.id) {
-        mutableStateOf(source?.effectiveRootPaths?.ifEmpty { listOf("/") } ?: listOf("/"))
+        mutableStateOf(source?.effectiveRootPaths?.ifEmpty { listOf("/") } ?: listOf("/电影"))
     }
     var excludedPaths by remember(source?.id) {
         mutableStateOf(source?.excludedPaths.orEmpty())
     }
-    var section by remember(source?.id) { mutableStateOf(source?.section ?: LibrarySection.FEED) }
+    var section by remember(source?.id) { mutableStateOf(source?.section ?: LibrarySection.MOVIE) }
     var scanMode by remember(source?.id) {
         mutableStateOf(source?.scanMode ?: if (source?.section == LibrarySection.ASMR) "authors_recursive" else "tree")
     }
-    var anonymous by remember(source?.id) { mutableStateOf(source?.anonymous ?: true) }
+    var authMode by remember(source?.id) {
+        mutableStateOf(
+            when {
+                source == null || source.anonymous -> "anonymous"
+                source.tokenConfigured -> "token"
+                else -> "password"
+            },
+        )
+    }
     var username by remember(source?.id) { mutableStateOf("") }
     var password by remember(source?.id) { mutableStateOf("") }
     var token by remember(source?.id) { mutableStateOf("") }
-    var enabled by remember(source?.id) { mutableStateOf(source?.enabled ?: true) }
+    var enabled by remember(source?.id) { mutableStateOf(source?.enabled ?: false) }
     val valid = name.isNotBlank() && baseUrl.startsWith("http") && rootPaths.any { it.isNotBlank() }
     val knownAddresses = history.map { it.first }.distinct().filter { it != baseUrl.trim() }
     val knownRoots = history
@@ -964,26 +975,16 @@ private fun MediaSourceDialog(
         .map { it.second }
         .distinct()
         .filter { it.isNotBlank() && it !in rootPaths.map(String::trim) }
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = Raised,
-        dragHandle = { BottomSheetDefaults.DragHandle(color = Line) },
-    ) {
-        Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
+    BackHandler(onBack = onDismiss)
+    Box(Modifier.fillMaxSize().background(Canvas).safeDrawingPadding()) {
+        Column(Modifier.fillMaxSize()) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, bottom = 4.dp),
+                modifier = Modifier.fillMaxWidth().height(60.dp).padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    if (source == null) Icons.Outlined.Add else Icons.Outlined.Edit,
-                    contentDescription = null,
-                    tint = TextSecondary,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(Modifier.size(10.dp))
+                GlassIconButton(label = "返回管理", onClick = onDismiss, tint = TextPrimary) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
+                }
                 Text(
                     if (source == null) "添加媒体源" else "编辑媒体源",
                     modifier = Modifier.weight(1f),
@@ -991,20 +992,31 @@ private fun MediaSourceDialog(
                     color = TextPrimary,
                     style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
                 )
-                GlassIconButton(label = "关闭", onClick = onDismiss, tint = TextSecondary) {
+                GlassIconButton(label = "关闭", onClick = onDismiss, tint = TextPrimary) {
                     Icon(Icons.Outlined.Close, contentDescription = null)
                 }
             }
+            HorizontalDivider(color = Line)
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 500.dp)
+                    .weight(1f)
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 20.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(20.dp),
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
             ) {
                 FieldGroup("归属板块", Icons.Outlined.Category) {
-                    SectionTiles(section) { picked ->
+                    ChoiceRow(
+                        label = "归属板块",
+                        choices = listOf(
+                            "feed" to "短视频 / 长视频",
+                            "asmr" to "ASMR",
+                            "movie" to "电影",
+                            "drama" to "短剧",
+                        ),
+                        selected = section.apiValue,
+                    ) { value ->
+                        val picked = LibrarySection.entries.first { it.apiValue == value }
                         section = picked
                         scanMode = if (picked.usesTreeScan) "tree" else "authors_recursive"
                     }
@@ -1031,6 +1043,7 @@ private fun MediaSourceDialog(
                         { name = it },
                         Modifier.fillMaxWidth(),
                         label = { Text("名称") },
+                        placeholder = { Text("例如：夸克电影") },
                         leadingIcon = { Icon(Icons.Outlined.Badge, contentDescription = null, modifier = Modifier.size(18.dp)) },
                         singleLine = true,
                     )
@@ -1039,6 +1052,7 @@ private fun MediaSourceDialog(
                         { baseUrl = it },
                         Modifier.fillMaxWidth(),
                         label = { Text("服务地址") },
+                        placeholder = { Text("https://example.com") },
                         leadingIcon = { Icon(Icons.Outlined.Link, contentDescription = null, modifier = Modifier.size(18.dp)) },
                         singleLine = true,
                     )
@@ -1060,13 +1074,23 @@ private fun MediaSourceDialog(
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text("排除路径（每行一条）") },
                         placeholder = { Text("/asmr/中文音声/小元") },
+                        leadingIcon = { Icon(Icons.Outlined.Block, contentDescription = null, modifier = Modifier.size(18.dp)) },
                         minLines = 2,
                         maxLines = 5,
                     )
                 }
                 FieldGroup("鉴权", Icons.Outlined.Key) {
-                    ToggleRow("匿名访问", anonymous) { anonymous = it }
-                    if (!anonymous) {
+                    ChoiceRow(
+                        label = "鉴权方式",
+                        choices = listOf(
+                            "anonymous" to "匿名访问",
+                            "password" to "用户名和密码",
+                            "token" to "令牌",
+                        ),
+                        selected = authMode,
+                        onSelected = { authMode = it },
+                    )
+                    if (authMode == "password") {
                         OutlinedTextField(
                             username,
                             { username = it },
@@ -1084,6 +1108,8 @@ private fun MediaSourceDialog(
                             visualTransformation = PasswordVisualTransformation(),
                             singleLine = true,
                         )
+                    }
+                    if (authMode == "token") {
                         OutlinedTextField(
                             token,
                             { token = it },
@@ -1098,7 +1124,7 @@ private fun MediaSourceDialog(
                 }
             }
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
+                modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 OutlinedButton(
@@ -1120,7 +1146,7 @@ private fun MediaSourceDialog(
                                 excludedPaths = excludedPaths,
                                 section = section,
                                 scanMode = if (section.usesTreeScan) "tree" else scanMode,
-                                anonymous = anonymous,
+                                anonymous = authMode == "anonymous",
                                 token = token,
                                 username = username,
                                 password = password,
@@ -1218,36 +1244,41 @@ private fun ChoiceRow(
     selected: String,
     onSelected: (String) -> Unit,
 ) {
+    var expanded by remember(label, selected) { mutableStateOf(false) }
+    val selectedLabel = choices.firstOrNull { it.first == selected }?.second.orEmpty()
+    val icon = when (label) {
+        "归属板块" -> Icons.Outlined.Category
+        "服务类型" -> Icons.Outlined.Cloud
+        "鉴权方式" -> Icons.Outlined.Key
+        else -> null
+    }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(label, color = TextFaint, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            choices.forEach { (value, text) ->
-                if (value == selected) {
-                    Button(
-                        onClick = { onSelected(value) },
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                        shape = ControlShape,
-                    ) {
-                        Text(
-                            text,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
-                        )
-                    }
-                } else {
-                    OutlinedButton(
-                        onClick = { onSelected(value) },
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                        shape = ControlShape,
-                    ) {
-                        Text(
-                            text,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
-                        )
-                    }
+        Box(Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick = { expanded = true },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                shape = ControlShape,
+            ) {
+                icon?.let { Icon(it, contentDescription = null) }
+                Text(
+                    selectedLabel,
+                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                )
+                Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = null)
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                choices.forEach { (value, text) ->
+                    DropdownMenuItem(
+                        text = { Text(text) },
+                        onClick = {
+                            expanded = false
+                            onSelected(value)
+                        },
+                    )
                 }
             }
         }

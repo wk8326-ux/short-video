@@ -13,6 +13,8 @@ import time
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+from app.movie_metadata import parse_movie_filename
+
 
 # A directory that keeps failing (AList hiccup, deleted path, oversized listing)
 # is retried on later manual scans, but only this many times. Past that budget it
@@ -292,6 +294,7 @@ class LibraryDatabase:
                     normalized_title TEXT NOT NULL,
                     original_title TEXT,
                     year INTEGER,
+                    code TEXT,
                     overview TEXT,
                     poster_url TEXT,
                     backdrop_url TEXT,
@@ -378,6 +381,20 @@ class LibraryDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_movie_favorites_recent
                     ON movie_favorites(id DESC);
+                CREATE TABLE IF NOT EXISTS media_favorites (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    media_type TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(media_type, target_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_media_favorites_recent
+                    ON media_favorites(id DESC);
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 -- A poster_url whose host answers 404/502 is not artwork: the
                 -- wall paints the same empty placeholder for it as for a row
                 -- with no cover at all. The proxy records every failure it
@@ -397,6 +414,16 @@ class LibraryDatabase:
             self._migrate_media_source_order(connection)
             self._migrate_excluded_paths(connection)
             self._backfill_asmr_author_directories(connection)
+            connection.execute(
+                """
+                INSERT INTO media_favorites(media_type, target_id, created_at)
+                SELECT 'movie', CAST(m.id AS TEXT), f.created_at
+                FROM movie_favorites f
+                JOIN movies m ON m.video_id = f.video_id
+                ON CONFLICT(media_type, target_id) DO NOTHING
+                """
+            )
+            connection.commit()
             movie_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(movies)").fetchall()
@@ -404,6 +431,7 @@ class LibraryDatabase:
             for name, definition in (
                 ("metadata_provider", "TEXT"),
                 ("release_date", "TEXT"),
+                ("code", "TEXT"),
             ):
                 if name not in movie_columns:
                     connection.execute(f"ALTER TABLE movies ADD COLUMN {name} {definition}")
@@ -1325,12 +1353,13 @@ class LibraryDatabase:
                         "display_title": parsed.display_title,
                         "normalized_title": parsed.normalized_title,
                         "year": parsed.year,
+                        "code": parsed.code,
                     }
                 )
             connection.executemany(
                 """
-                INSERT INTO movies(video_id, source, display_title, normalized_title, year)
-                VALUES(:video_id, :source, :display_title, :normalized_title, :year)
+                INSERT INTO movies(video_id, source, display_title, normalized_title, year, code)
+                VALUES(:video_id, :source, :display_title, :normalized_title, :year, :code)
                 ON CONFLICT(video_id) DO UPDATE SET
                     source = excluded.source,
                     display_title = CASE
@@ -1345,6 +1374,7 @@ class LibraryDatabase:
                         WHEN movies.match_status IN ('matched', 'manual') THEN movies.year
                         ELSE excluded.year
                     END,
+                    code = COALESCE(excluded.code, movies.code),
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 parsed_rows,
@@ -1462,10 +1492,11 @@ class LibraryDatabase:
         self,
         *,
         search: str = "",
-        limit: int = 24,
+        limit: int = 6,
         offset: int = 0,
         sources: Sequence[str] = (),
         category: str = "",
+        sort: str = "cover",
     ) -> list[dict[str, Any]]:
         conditions, params = self._drama_conditions(
             search=search,
@@ -1473,6 +1504,19 @@ class LibraryDatabase:
             category=category,
         )
         cover_rank = "CASE WHEN LOWER(COALESCE(d.poster_url, '')) <> '' THEN 0 ELSE 1 END"
+        order_by = {
+            "newest": (
+                "COALESCE((SELECT MAX(v.modified) FROM videos v "
+                "WHERE v.series_id = d.id AND v.active = 1), '') DESC, "
+                "d.title COLLATE NOCASE, d.id"
+            ),
+            "oldest": (
+                "COALESCE((SELECT MIN(v.modified) FROM videos v "
+                "WHERE v.series_id = d.id AND v.active = 1), '') ASC, "
+                "d.title COLLATE NOCASE, d.id"
+            ),
+            "name": "d.title COLLATE NOCASE, d.id",
+        }.get(sort, f"{cover_rank}, d.title COLLATE NOCASE, d.id")
         params.extend([max(1, limit), max(0, offset)])
         with self._lock, self._connect() as connection:
             rows = connection.execute(
@@ -1480,7 +1524,7 @@ class LibraryDatabase:
                 SELECT d.*
                 FROM dramas d
                 WHERE {' AND '.join(conditions)}
-                ORDER BY {cover_rank}, d.title COLLATE NOCASE, d.id
+                ORDER BY {order_by}
                 LIMIT ? OFFSET ?
                 """,
                 params,
@@ -1681,9 +1725,12 @@ class LibraryDatabase:
         if search:
             escaped = self._escape_like(search)
             conditions.append(
-                "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\')"
+                "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\' "
+                "OR EXISTS (SELECT 1 FROM movie_metadata_links search_link "
+                "JOIN movie_metadata_entities search_entity ON search_entity.id = search_link.entity_id "
+                "WHERE search_link.movie_id = m.id AND search_entity.name LIKE ? ESCAPE '\\'))"
             )
-            params.extend([f"%{escaped}%", f"%{escaped}%"])
+            params.extend([f"%{escaped}%", f"%{escaped}%", f"%{escaped}%"])
         if metadata_entity_id is not None:
             conditions.append(
                 "EXISTS (SELECT 1 FROM movie_metadata_links mml "
@@ -1773,9 +1820,12 @@ class LibraryDatabase:
         if search:
             escaped = self._escape_like(search)
             conditions.append(
-                "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\')"
+                "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\' "
+                "OR EXISTS (SELECT 1 FROM movie_metadata_links search_link "
+                "JOIN movie_metadata_entities search_entity ON search_entity.id = search_link.entity_id "
+                "WHERE search_link.movie_id = m.id AND search_entity.name LIKE ? ESCAPE '\\'))"
             )
-            params.extend([f"%{escaped}%", f"%{escaped}%"])
+            params.extend([f"%{escaped}%", f"%{escaped}%", f"%{escaped}%"])
         if metadata_entity_id is not None:
             conditions.append(
                 "EXISTS (SELECT 1 FROM movie_metadata_links mml "
@@ -1793,6 +1843,300 @@ class LibraryDatabase:
                 params,
             ).fetchone()
         return int(row[0] or 0)
+
+    def search_media(
+        self,
+        *,
+        search: str,
+        section: str,
+        sources: Sequence[str],
+        duration_boundary: float = 180.0,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        """Find indexed files and paths without walking the remote libraries."""
+        if not search.strip() or section not in {"short", "long", "asmr"}:
+            return []
+        source_clause, source_params = self._sources_clause(sources)
+        escaped = self._escape_like(search.strip())
+        conditions = [
+            "v.active = 1",
+            source_clause.replace("source IN", "v.source IN"),
+            "(v.name LIKE ? ESCAPE '\\' OR v.path LIKE ? ESCAPE '\\' "
+            "OR COALESCE(v.author, '') LIKE ? ESCAPE '\\')",
+        ]
+        params: list[Any] = [*source_params, f"%{escaped}%", f"%{escaped}%", f"%{escaped}%"]
+        if section == "short":
+            conditions.append("v.duration_seconds < ?")
+            params.append(float(duration_boundary))
+        elif section == "long":
+            conditions.append("v.duration_seconds >= ?")
+            params.append(float(duration_boundary))
+        else:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM asmr_author_directories d "
+                "WHERE d.source = v.source AND d.author = v.author)"
+            )
+        params.append(max(1, min(int(limit), 100)))
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT v.* FROM videos v
+                WHERE {' AND '.join(conditions)}
+                ORDER BY v.modified DESC, v.id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def search_movie_metadata_entities(
+        self,
+        *,
+        search: str,
+        sources: Sequence[str],
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        if not search.strip():
+            return []
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        escaped = self._escape_like(search.strip())
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT e.id, e.type, e.name, COUNT(DISTINCT m.id) AS movie_count
+                FROM movie_metadata_entities e
+                JOIN movie_metadata_links l ON l.entity_id = e.id
+                JOIN movies m ON m.id = l.movie_id
+                JOIN videos v ON v.id = m.video_id AND v.active = 1
+                WHERE {source_clause} AND e.name LIKE ? ESCAPE '\\'
+                GROUP BY e.id, e.type, e.name
+                ORDER BY movie_count DESC, e.name COLLATE NOCASE
+                LIMIT ?
+                """,
+                [*source_params, f"%{escaped}%", max(1, min(int(limit), 100))],
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def movie_recommendations(
+        self,
+        movie_id: int,
+        *,
+        sources: Sequence[str],
+        limit: int = 24,
+    ) -> list[dict[str, Any]]:
+        """Return recommendations using independent code/performer/genre signals.
+
+        A shared performer must not be required together with a shared genre:
+        metadata is incomplete for a portion of the catalogue. The number
+        prefix is the strongest signal, followed by performers and then one or
+        two useful genre overlaps. A candidate matching any one signal is
+        eligible, and the ordering keeps same-code titles together.
+        """
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "candidate.source IN")
+        with self._lock, self._connect() as connection:
+            current = connection.execute(
+                """
+                SELECT m.id, m.code, v.name
+                FROM movies m JOIN videos v ON v.id = m.video_id
+                WHERE m.id = ? AND v.active = 1
+                """,
+                (int(movie_id),),
+            ).fetchone()
+            if not current:
+                return []
+            current_entities = connection.execute(
+                """
+                SELECT e.type, e.normalized_name
+                FROM movie_metadata_links l
+                JOIN movie_metadata_entities e ON e.id = l.entity_id
+                WHERE l.movie_id = ?
+                """,
+                (int(movie_id),),
+            ).fetchall()
+            candidates = connection.execute(
+                f"""
+                SELECT candidate.id, candidate.code, candidate_video.name
+                FROM movies candidate
+                JOIN videos candidate_video ON candidate_video.id = candidate.video_id
+                    AND candidate_video.active = 1
+                WHERE candidate.id <> ? AND {source_clause}
+                """,
+                [int(movie_id), *source_params],
+            ).fetchall()
+            candidate_ids = [int(row["id"]) for row in candidates]
+            links: list[sqlite3.Row] = []
+            if candidate_ids:
+                placeholders = ", ".join("?" for _ in candidate_ids)
+                links = connection.execute(
+                    f"""
+                    SELECT l.movie_id, e.type, e.normalized_name
+                    FROM movie_metadata_links l
+                    JOIN movie_metadata_entities e ON e.id = l.entity_id
+                    WHERE l.movie_id IN ({placeholders})
+                    """,
+                    candidate_ids,
+                ).fetchall()
+
+        current_code = str(current["code"] or "") or parse_movie_filename(str(current["name"])).code or ""
+        current_prefix = current_code.rsplit("-", 1)[0].casefold() if "-" in current_code else ""
+        source_sets = {
+            "performer": {str(row["normalized_name"]) for row in current_entities if row["type"] == "performer"},
+            "genre": {str(row["normalized_name"]) for row in current_entities if row["type"] == "genre"},
+        }
+        candidate_entities: dict[int, dict[str, set[str]]] = {}
+        for row in links:
+            candidate_entities.setdefault(int(row["movie_id"]), {}).setdefault(str(row["type"]), set()).add(
+                str(row["normalized_name"])
+            )
+
+        ranked: list[dict[str, Any]] = []
+        for row in candidates:
+            candidate_code = str(row["code"] or "") or parse_movie_filename(str(row["name"])).code or ""
+            candidate_prefix = candidate_code.rsplit("-", 1)[0].casefold() if "-" in candidate_code else ""
+            entities = candidate_entities.get(int(row["id"]), {})
+            performer_matches = len(source_sets["performer"] & entities.get("performer", set()))
+            keyword_matches = len(source_sets["genre"] & entities.get("genre", set()))
+            code_matches = int(bool(current_prefix and current_prefix == candidate_prefix))
+            if not (code_matches or performer_matches or keyword_matches):
+                continue
+            score = float(code_matches * 100 + performer_matches * 10 + keyword_matches)
+            ranked.append({
+                "id": int(row["id"]),
+                "code_matches": code_matches,
+                "keyword_matches": keyword_matches,
+                "performer_matches": performer_matches,
+                "studio_matches": 0,
+                "score": score,
+            })
+        ranked.sort(
+            key=lambda item: (
+                -item["code_matches"],
+                -item["performer_matches"],
+                -item["keyword_matches"],
+                -item["id"],
+            )
+        )
+        return ranked[: max(1, min(int(limit), 60))]
+
+    def set_media_favorite(
+        self,
+        media_type: str,
+        target_id: str | int,
+        favorite: bool,
+    ) -> bool:
+        if media_type not in {"short", "long", "asmr", "movie", "drama"}:
+            raise ValueError("Unsupported media type")
+        key = str(target_id).strip()
+        if not key or len(key) > 200:
+            raise ValueError("Invalid media id")
+        with self._lock, self._connect() as connection:
+            if favorite:
+                connection.execute(
+                    """
+                    INSERT INTO media_favorites(media_type, target_id)
+                    VALUES(?, ?)
+                    ON CONFLICT(media_type, target_id) DO NOTHING
+                    """,
+                    (media_type, key),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM media_favorites WHERE media_type = ? AND target_id = ?",
+                    (media_type, key),
+                )
+            connection.commit()
+        return favorite
+
+    def is_media_favorite(self, media_type: str, target_id: str | int) -> bool:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM media_favorites WHERE media_type = ? AND target_id = ?",
+                (media_type, str(target_id)),
+            ).fetchone()
+        return row is not None
+
+    def media_favorite_map(self) -> dict[tuple[str, str], bool]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT media_type, target_id FROM media_favorites"
+            ).fetchall()
+        return {(str(row["media_type"]), str(row["target_id"])): True for row in rows}
+
+    def media_favorite_statuses(
+        self,
+        media_type: str,
+        target_ids: Sequence[str | int],
+    ) -> set[str]:
+        if media_type not in {"short", "long", "asmr", "movie", "drama"}:
+            raise ValueError("Unsupported favorite media type")
+        ids = tuple(dict.fromkeys(str(value).strip() for value in target_ids if str(value).strip()))
+        if not ids:
+            return set()
+        placeholders = ", ".join("?" for _ in ids)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT target_id FROM media_favorites
+                WHERE media_type = ? AND target_id IN ({placeholders})
+                """,
+                [media_type, *ids],
+            ).fetchall()
+        return {str(row["target_id"]) for row in rows}
+
+    def favorite_entries(
+        self,
+        *,
+        section: str = "all",
+        limit: int = 30,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        allowed = {
+            "all": ("short", "long", "asmr", "movie", "drama"),
+            "short": ("short",),
+            "long": ("long",),
+            "asmr": ("asmr",),
+            "movie": ("movie",),
+            "drama": ("drama",),
+        }.get(section)
+        if allowed is None:
+            raise ValueError("Unsupported favorite section")
+        placeholders = ", ".join("?" for _ in allowed)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT media_type, target_id, created_at
+                FROM media_favorites
+                WHERE media_type IN ({placeholders})
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*allowed, max(1, min(int(limit), 100)), max(0, int(offset))],
+            ).fetchall()
+            count = connection.execute(
+                f"SELECT COUNT(*) FROM media_favorites WHERE media_type IN ({placeholders})",
+                list(allowed),
+            ).fetchone()
+        return [dict(row) for row in rows], int(count[0] or 0)
+
+    def get_app_settings(self) -> dict[str, str]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute("SELECT key, value FROM app_settings").fetchall()
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    def set_app_setting(self, key: str, value: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO app_settings(key, value) VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (key, value),
+            )
+            connection.commit()
 
     def movie_source_counts(
         self,
@@ -1813,9 +2157,12 @@ class LibraryDatabase:
         if search:
             escaped = self._escape_like(search)
             conditions.append(
-                "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\')"
+                "(m.display_title LIKE ? ESCAPE '\\' OR m.original_title LIKE ? ESCAPE '\\' "
+                "OR EXISTS (SELECT 1 FROM movie_metadata_links search_link "
+                "JOIN movie_metadata_entities search_entity ON search_entity.id = search_link.entity_id "
+                "WHERE search_link.movie_id = m.id AND search_entity.name LIKE ? ESCAPE '\\'))"
             )
-            params.extend([f"%{escaped}%", f"%{escaped}%"])
+            params.extend([f"%{escaped}%", f"%{escaped}%", f"%{escaped}%"])
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 f"""
@@ -1930,9 +2277,26 @@ class LibraryDatabase:
                     """,
                     (int(video_id),),
                 )
+                connection.execute(
+                    """
+                    INSERT INTO media_favorites(media_type, target_id)
+                    SELECT 'movie', CAST(id AS TEXT) FROM movies WHERE video_id = ?
+                    ON CONFLICT(media_type, target_id) DO NOTHING
+                    """,
+                    (int(video_id),),
+                )
             else:
                 connection.execute(
                     "DELETE FROM movie_favorites WHERE video_id = ?",
+                    (int(video_id),),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM media_favorites
+                    WHERE media_type = 'movie' AND target_id IN (
+                        SELECT CAST(id AS TEXT) FROM movies WHERE video_id = ?
+                    )
+                    """,
                     (int(video_id),),
                 )
             connection.commit()
