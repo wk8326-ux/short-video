@@ -92,6 +92,28 @@ class PlaybackPreferences(context: Context) {
         }
     }.getOrDefault(emptyList())
 
+    fun searchHistory(): List<String> = runCatching {
+        val array = JSONArray(preferences.getString(KEY_SEARCH_HISTORY, "[]"))
+        buildList {
+            for (index in 0 until array.length()) {
+                array.optString(index).trim().takeIf { it.isNotEmpty() }?.let(::add)
+            }
+        }.distinct().take(SEARCH_HISTORY_LIMIT)
+    }.getOrDefault(emptyList())
+
+    fun rememberSearchQuery(query: String): List<String> {
+        val normalized = query.trim()
+        if (normalized.isEmpty()) return searchHistory()
+        val history = listOf(normalized) + searchHistory().filterNot { it == normalized }
+        val stored = history.take(SEARCH_HISTORY_LIMIT)
+        preferences.edit().putString(KEY_SEARCH_HISTORY, JSONArray(stored).toString()).apply()
+        return stored
+    }
+
+    fun clearSearchHistory() {
+        preferences.edit().remove(KEY_SEARCH_HISTORY).apply()
+    }
+
     fun position(mediaId: Long): Long = runCatching {
         JSONObject(preferences.getString(KEY_POSITIONS, "{}") ?: "{}")
             .optLong(mediaId.toString(), 0L)
@@ -350,8 +372,10 @@ class PlaybackPreferences(context: Context) {
         const val KEY_DRAMA_LIST_POSITION = "drama_list_position"
         const val KEY_DRAMA_EPISODE = "drama_episode"
         const val KEY_RECENT = "recent"
+        const val KEY_SEARCH_HISTORY = "search_history"
         const val KEY_POSITIONS = "positions"
         const val FEED_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1_000
         const val FEED_CACHE_ITEM_LIMIT = 180
+        const val SEARCH_HISTORY_LIMIT = 10
     }
 }

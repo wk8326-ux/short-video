@@ -79,7 +79,6 @@ internal fun FeedScreen(
     exoPlayer: ExoPlayer,
     fullscreen: Boolean,
     pipMode: Boolean,
-    onSurface: (MediaSurface) -> Unit,
     onMode: (FeedMode) -> Unit,
     onToggleFavorite: (MediaEntry) -> Unit,
     onActive: (Int) -> Unit,
@@ -92,9 +91,6 @@ internal fun FeedScreen(
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
     onPip: () -> Unit,
-    onManage: () -> Unit,
-    onCheckUpdate: () -> Unit,
-    onLogout: () -> Unit,
 ) {
     if (state.feedItems.isEmpty()) {
         FeedState(
@@ -108,7 +104,6 @@ internal fun FeedScreen(
         initialPage = state.activeIndex.coerceIn(0, state.feedItems.lastIndex),
         pageCount = { state.feedItems.size },
     )
-    var fullscreenChromeVisible by remember(fullscreen) { mutableStateOf(true) }
     val movablePlayerHost = remember(exoPlayer) {
         movableContentOf { PlayerHost(exoPlayer, Modifier.fillMaxSize()) }
     }
@@ -154,23 +149,7 @@ internal fun FeedScreen(
                 onSeekBy = onSeekBy,
                 onFullscreen = onFullscreen,
                 onPip = onPip,
-                onChromeVisible = { visible ->
-                    if (index == pagerState.currentPage) fullscreenChromeVisible = visible
-                },
             )
-        }
-        if (fullscreen && fullscreenChromeVisible) {
-            Box(Modifier.padding(top = 2.dp)) {
-                AppNavigation(
-                    state = state,
-                    compact = false,
-                    onSurface = onSurface,
-                    onMode = onMode,
-                    onManage = onManage,
-                    onCheckUpdate = onCheckUpdate,
-                    onLogout = onLogout,
-                )
-            }
         }
     }
 }
@@ -197,7 +176,6 @@ private fun FeedPage(
     onSeekBy: (Long) -> Unit,
     onFullscreen: (Boolean) -> Unit,
     onPip: () -> Unit,
-    onChromeVisible: (Boolean) -> Unit,
 ) {
     var chromeVisible by remember(fullscreen, entry.id) { mutableStateOf(true) }
     var playbackFeedbackVisible by remember(fullscreen, entry.id) { mutableStateOf(false) }
@@ -220,10 +198,6 @@ private fun FeedPage(
             playbackFeedbackVisible = false
         }
     }
-    LaunchedEffect(active, chromeVisible) {
-        if (active) onChromeVisible(chromeVisible)
-    }
-
     fun showChrome() {
         chromeVisible = true
         chromeInteractionToken += 1
@@ -312,7 +286,7 @@ private fun FeedPage(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .then(if (!fullscreen) Modifier.navigationBarsPadding() else Modifier)
-                    .padding(start = 12.dp, bottom = if (fullscreen) 18.dp else UiDimens.PlayerBottomContentInset),
+                    .padding(start = 12.dp, bottom = if (fullscreen) 88.dp else UiDimens.PlayerBottomContentInset + 58.dp),
             ) {
                 Text(
                     entry.title,
@@ -332,7 +306,7 @@ private fun FeedPage(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .then(if (!fullscreen) Modifier.navigationBarsPadding() else Modifier)
-                    .padding(end = 8.dp, bottom = if (fullscreen) 18.dp else UiDimens.PlayerBottomContentInset),
+                    .padding(end = 8.dp, bottom = if (fullscreen) 16.dp else UiDimens.PlayerBottomContentInset + 58.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 val modeIcon = when (mode) {
@@ -392,7 +366,11 @@ private fun FeedPage(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .then(if (!fullscreen) Modifier.navigationBarsPadding() else Modifier)
-                    .padding(bottom = if (fullscreen) 14.dp else UiDimens.PlayerBottomContentInset),
+                    .padding(
+                        start = 12.dp,
+                        end = if (fullscreen) 68.dp else 72.dp,
+                        bottom = if (fullscreen) 14.dp else UiDimens.PlayerBottomContentInset,
+                    ),
             )
         }
 

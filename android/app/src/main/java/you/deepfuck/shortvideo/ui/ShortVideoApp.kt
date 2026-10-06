@@ -219,7 +219,6 @@ fun ShortVideoApp(
                 tab = rootTab,
                 onTab = { destination ->
                     rootTab = destination
-                    if (destination == RootTab.FAVORITES) viewModel.loadFavorites(reset = true)
                     if (destination == RootTab.HOME) showingThemes = false
                 },
                 onSurface = { surface ->
@@ -265,7 +264,6 @@ fun ShortVideoApp(
                 tab = RootTab.HOME,
                 onTab = { destination ->
                     rootTab = destination
-                    if (destination == RootTab.FAVORITES) viewModel.loadFavorites(reset = true)
                 },
                 onSurface = viewModel::changeSurface,
                 showNavigation = !pipMode && !fullscreen && state.expandedMedia == null &&
@@ -405,7 +403,6 @@ fun ShortVideoApp(
                             exoPlayer = viewModel.playback.player,
                             fullscreen = fullscreen,
                             pipMode = pipMode,
-                            onSurface = viewModel::changeSurface,
                             onMode = viewModel::changeMode,
                             onToggleFavorite = { entry ->
                                 viewModel.toggleMediaFavorite(state.surface.apiValue, entry.id.toString())
@@ -423,9 +420,6 @@ fun ShortVideoApp(
                                 onFullscreenChanged(it)
                             },
                             onPip = onPipRequested,
-                            onManage = viewModel::showManagement,
-                            onCheckUpdate = viewModel::checkForAppUpdate,
-                            onLogout = viewModel::logout,
                         )
                         }
                     }

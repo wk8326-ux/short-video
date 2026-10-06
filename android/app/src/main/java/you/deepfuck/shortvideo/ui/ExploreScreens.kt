@@ -70,6 +70,8 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -201,7 +203,7 @@ internal fun LibrarySearchScreen(
             ?.firstOrNull()
         if (!spoken.isNullOrBlank()) {
             voiceError = null
-            viewModel.searchLibrary(spoken)
+            viewModel.submitSearch(spoken)
         }
     }
     Column(
@@ -216,11 +218,10 @@ internal fun LibrarySearchScreen(
     ) {
         OutlinedTextField(
             value = state.searchQuery,
-            onValueChange = viewModel::searchLibrary,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            onValueChange = viewModel::setSearchQuery,
+            modifier = Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 16.dp),
             singleLine = true,
             shape = ControlShape,
-            supportingText = { voiceError?.let { Text(it, color = MaterialTheme.colorScheme.error) } },
             placeholder = { Text("搜索标题、文件夹、作者、演员、制作商、标签") },
             leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
             trailingIcon = {
@@ -243,8 +244,44 @@ internal fun LibrarySearchScreen(
                 }
             },
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { viewModel.searchLibrary() }),
+            keyboardActions = KeyboardActions(onSearch = { viewModel.submitSearch() }),
         )
+        voiceError?.let {
+            Text(
+                it,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(start = 20.dp, top = 4.dp, end = 20.dp),
+            )
+        }
+        if (state.searchQuery.isBlank() && state.searchHistory.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 18.dp, end = 10.dp, top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "最近搜索",
+                    modifier = Modifier.weight(1f),
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                TextButton(onClick = viewModel::clearSearchHistory) { Text("清除") }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 18.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                state.searchHistory.forEach { query ->
+                    AssistChip(
+                        onClick = { viewModel.submitSearch(query) },
+                        label = { Text(query, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                        ),
+                    )
+                }
+            }
+        }
         SectionTabs(
             selected = state.searchSection,
             onSelected = viewModel::setSearchSection,
@@ -286,7 +323,7 @@ internal fun FavoritesScreen(
     onOpen: (LibraryResult) -> Unit,
     onFavorite: (LibraryResult) -> Unit,
 ) {
-    LaunchedEffect(Unit) { viewModel.loadFavorites(reset = true) }
+    LaunchedEffect(Unit) { viewModel.ensureFavoritesLoaded() }
     Column(
         Modifier
             .fillMaxSize()

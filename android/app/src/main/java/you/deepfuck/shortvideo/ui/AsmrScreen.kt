@@ -821,7 +821,9 @@ private fun ExpandedAsmrPlayer(
                     Modifier
                         .align(Alignment.BottomEnd)
                         .navigationBarsPadding()
-                        .padding(end = 12.dp, bottom = UiDimens.PlayerBottomContentInset)
+                        // Keep the action rail above the progress row. The two
+                        // controls must never compete for the same bottom band.
+                        .padding(end = 12.dp, bottom = UiDimens.PlayerBottomContentInset + 58.dp)
                 },
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {

@@ -81,6 +81,7 @@ data class AppUiState(
     val skinSaveError: String? = null,
     val searchQuery: String = "",
     val searchSection: String = "all",
+    val searchHistory: List<String> = emptyList(),
     val searchResults: List<LibraryResult> = emptyList(),
     val searchLoading: Boolean = false,
     val searchError: String? = null,
@@ -208,6 +209,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             surface = initialSurface,
             skin = preferences.skin,
             mode = preferences.mode,
+            searchHistory = preferences.searchHistory(),
             muted = preferences.muted(initialSurface),
             movieWallView = preferences.movieWallView,
             movieSort = preferences.movieWallSort.ifBlank { MOVIE_SORT_DEFAULT },
@@ -347,7 +349,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = AppUiState(authentication = AuthenticationState.SIGNED_OUT)
     }
 
-    fun searchLibrary(query: String = mutableState.value.searchQuery) {
+    fun searchLibrary(
+        query: String = mutableState.value.searchQuery,
+        rememberQuery: Boolean = false,
+    ) {
         val state = mutableState.value
         if (query != state.searchQuery) {
             mutableState.value = state.copy(searchQuery = query, searchError = null)
@@ -369,7 +374,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runApi { api.searchLibrary(query.trim(), section) }
                 .onSuccess { items ->
                     if (generation != librarySearchGeneration) return@onSuccess
+                    val history = if (rememberQuery) {
+                        preferences.rememberSearchQuery(query.trim())
+                    } else {
+                        mutableState.value.searchHistory
+                    }
                     mutableState.value = mutableState.value.copy(
+                        searchHistory = history,
                         searchResults = items,
                         searchLoading = false,
                         searchError = null,
@@ -391,9 +402,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         searchLibrary()
     }
 
+    fun setSearchQuery(query: String) {
+        searchLibrary(query, rememberQuery = false)
+    }
+
+    fun submitSearch(query: String = mutableState.value.searchQuery) {
+        searchLibrary(query, rememberQuery = true)
+    }
+
+    fun clearSearchHistory() {
+        preferences.clearSearchHistory()
+        mutableState.value = mutableState.value.copy(searchHistory = emptyList())
+    }
+
+    fun ensureFavoritesLoaded() {
+        val state = mutableState.value
+        if (!state.favoritesLoading && state.favoriteItems.isEmpty() && state.favoritesError == null) {
+            loadFavorites(reset = true)
+        }
+    }
+
     fun loadFavorites(section: String = mutableState.value.favoritesSection, reset: Boolean = true) {
         if (section !in LIBRARY_SECTIONS) return
         val state = mutableState.value
+        if (reset && state.favoritesLoading && section == state.favoritesSection) return
         if (!reset && (state.favoritesLoading || state.favoriteNextOffset == null)) return
         favoritesJob?.cancel()
         val generation = ++favoritesGeneration
@@ -552,6 +584,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 changeSurface(MediaSurface.DRAMA)
                 selectDrama(item.drama)
             }
+            item.media != null && item.section in setOf("short", "long") -> {
+                val surface = MediaSurface.entries.firstOrNull { it.apiValue == item.section } ?: return
+                openFeedResult(surface, item.media)
+            }
             item.media != null && item.section == "asmr" -> {
                 changeSurface(MediaSurface.ASMR)
                 item.media.author?.let(::selectAsmrAuthor)
@@ -559,12 +595,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 asmrQueue = listOf(item.media)
                 startAsmrPlayback(item.media, expandVideo = !item.media.isAudio)
             }
-            item.media != null -> {
-                val surface = MediaSurface.entries.firstOrNull { it.apiValue == item.section } ?: return
-                preferences.setLastVideo(surface, item.media.id)
-                changeSurface(surface)
-            }
         }
+    }
+
+    private fun openFeedResult(surface: MediaSurface, target: MediaEntry) {
+        if (!surface.isFeed) return
+        val alreadyOnSurface = mutableState.value.surface == surface
+        if (!alreadyOnSurface) changeSurface(surface)
+
+        // Search results are not necessarily in the current cursor window. Put the
+        // selected item at the head of the local queue, then let normal paging
+        // continue from the existing feed without changing its ordering mode.
+        feedJob?.cancel()
+        feedTotalJob?.cancel()
+        feedJob = null
+        feedTotalJob = null
+        feedRequestGeneration += 1L
+        val existing = if (alreadyOnSurface) {
+            mutableState.value.feedItems.filterNot { it.id == target.id }
+        } else {
+            emptyList()
+        }
+        val merged = listOf(target) + existing
+        feedCursor = null
+        feedStartId = null
+        feedExcludedIds = merged.map(MediaEntry::id).distinct().take(100)
+        activeFeedItemId = null
+        mutableState.value = mutableState.value.copy(
+            surface = surface,
+            feedItems = merged,
+            activeIndex = 0,
+            feedTotal = mutableState.value.feedTotal.coerceAtLeast(merged.size),
+            feedLoading = false,
+            feedError = null,
+        )
+        loadFavoriteStatuses(surface.apiValue, merged.map { it.id.toString() })
+        activateFeedItem(0)
     }
 
     fun setSkin(skin: String) {
