@@ -1,6 +1,8 @@
 package you.deepfuck.shortvideo.data
 
 import android.content.Context
+import java.io.File
+import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 import you.deepfuck.shortvideo.AsmrPlaybackState
@@ -14,13 +16,26 @@ internal data class AsmrAuthorIndex(
 )
 
 class PlaybackPreferences(context: Context) {
+    private val applicationContext = context.applicationContext
     private val preferences = context.getSharedPreferences("short_video", Context.MODE_PRIVATE)
+
+    internal val apiCacheDirectory: File
+        get() = File(applicationContext.cacheDir, "api-responses")
+
+    internal val apiCacheAccount: String?
+        get() = sessionCookie?.let(::hashAccount)
 
     var sessionCookie: String?
         get() = preferences.getString(KEY_SESSION, null)
         set(value) {
+            val previousAccount = apiCacheAccount
+            val nextCookie = value?.takeUnless(String::isBlank)
+            val nextAccount = nextCookie?.let(::hashAccount)
+            if (previousAccount != null && previousAccount != nextAccount) {
+                ApiResponseCache(apiCacheDirectory).clear(previousAccount)
+            }
             preferences.edit().apply {
-                if (value.isNullOrBlank()) remove(KEY_SESSION) else putString(KEY_SESSION, value)
+                if (nextCookie == null) remove(KEY_SESSION) else putString(KEY_SESSION, nextCookie)
             }.apply()
         }
 
@@ -350,6 +365,10 @@ class PlaybackPreferences(context: Context) {
             JSONObject().put("index", position.index).put("offset", position.offset).toString(),
         ).apply()
     }
+
+    private fun hashAccount(cookie: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(cookie.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }
 
     private companion object {
         const val KEY_SESSION = "session_cookie"

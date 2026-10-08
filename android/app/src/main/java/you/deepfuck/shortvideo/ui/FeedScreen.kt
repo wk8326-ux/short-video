@@ -286,7 +286,7 @@ private fun FeedPage(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .then(if (!fullscreen) Modifier.navigationBarsPadding() else Modifier)
-                    .padding(start = 12.dp, bottom = if (fullscreen) 88.dp else UiDimens.PlayerBottomContentInset + 58.dp),
+                    .padding(start = 12.dp, bottom = if (fullscreen) 74.dp else UiDimens.PlayerBottomContentInset + 50.dp),
             ) {
                 Text(
                     entry.title,
@@ -306,7 +306,7 @@ private fun FeedPage(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .then(if (!fullscreen) Modifier.navigationBarsPadding() else Modifier)
-                    .padding(end = 8.dp, bottom = if (fullscreen) 16.dp else UiDimens.PlayerBottomContentInset + 58.dp),
+                    .padding(end = 8.dp, bottom = if (fullscreen) 8.dp else UiDimens.PlayerBottomContentInset + 50.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 val modeIcon = when (mode) {
@@ -368,8 +368,8 @@ private fun FeedPage(
                     .then(if (!fullscreen) Modifier.navigationBarsPadding() else Modifier)
                     .padding(
                         start = 12.dp,
-                        end = if (fullscreen) 68.dp else 72.dp,
-                        bottom = if (fullscreen) 14.dp else UiDimens.PlayerBottomContentInset,
+                        end = 12.dp,
+                        bottom = if (fullscreen) 8.dp else UiDimens.PlayerBottomContentInset - 4.dp,
                     ),
             )
         }
@@ -460,7 +460,8 @@ private fun ProgressControl(
     FineProgressBar(
         player = player,
         onSeek = onSeek,
-        modifier = modifier.padding(horizontal = 8.dp),
+        modifier = modifier,
+        compact = true,
     )
 }
 

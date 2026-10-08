@@ -22,8 +22,8 @@ android {
         applicationId = "you.deepfuck.shortvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 199
-        versionName = "1.7.2"
+        versionCode = 200
+        versionName = "1.7.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -63,6 +63,12 @@ android {
     }
     testOptions.unitTests.isIncludeAndroidResources = true
     packaging.resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    lint {
+        // androidx.lifecycle 2.8.7's detector is incompatible with the
+        // Kotlin 2.0 UAST bundled by this toolchain and crashes lint itself.
+        // Keep the remaining lint checks active until the dependency is aligned.
+        disable += "NullSafeMutableLiveData"
+    }
 }
 
 dependencies {

@@ -1878,14 +1878,19 @@ internal fun MoviePlayer(
                     .fillMaxWidth()
                     .background(Color.Black.copy(alpha = 0.52f))
                     .navigationBarsPadding()
-                    .padding(start = 8.dp, top = 2.dp, end = 8.dp, bottom = 4.dp),
+                    .padding(top = 0.dp, bottom = 2.dp),
             ) {
-                FineProgressBar(player, onSeek, compact = true)
+                FineProgressBar(
+                    player,
+                    onSeek,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                    compact = true,
+                )
                 // The metadata page is gone once playback starts, so the bar is
                 // what still says which film is running.
                 val barTitle = title?.takeIf { it.isNotBlank() }
                 Row(
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    modifier = Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (!fullscreen) {

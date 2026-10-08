@@ -60,7 +60,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -144,9 +144,11 @@ MOVIE_IMAGE_USER_AGENT = "deepfuck-movie-library/1"
 # be the reason the disk fills up.
 MOVIE_IMAGE_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024
 # Below this the cache stops growing and starts evicting, whatever the ceiling
-# says. The database, the app and Docker all live on the same 45 GB root, so the
-# ceiling alone is not enough to keep the host healthy.
-MOVIE_IMAGE_CACHE_MIN_FREE_BYTES = 4 * 1024 * 1024 * 1024
+# says. The database, the app and Docker all live on the same filesystem, so the
+# ceiling alone is not enough to keep the host healthy. Keep the floor modest:
+# refusing every cache write on a nearly-full but still usable disk turns every
+# poster request into another upstream download and makes the cache ineffective.
+MOVIE_IMAGE_CACHE_MIN_FREE_BYTES = 1 * 1024 * 1024 * 1024
 # Re-measuring the cache costs one stat per blob, and it holds thousands, so a
 # write only pays for a measurement when the running total has reached the
 # ceiling or the last one has gone stale.

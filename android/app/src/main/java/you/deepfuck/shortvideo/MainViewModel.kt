@@ -3337,6 +3337,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun refreshLibraryAfterScan(section: LibrarySection) {
         when (section) {
             LibrarySection.FEED -> {
+                api.invalidateLibraryCache()
                 feedSessions.clear()
                 preferences.clearFeedSessions()
                 feedLibraryRefresh.markPending()
@@ -3357,6 +3358,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun refreshAsmrLibrary() {
+        api.invalidateLibraryCache()
         asmrAuthorsJob?.cancel()
         asmrAuthorsJob = null
         asmrAuthorsLoaded = false
@@ -3387,6 +3389,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun refreshMovieLibrary() {
+        api.invalidateLibraryCache()
         movieCatalogDirty = true
         if (mutableState.value.surface == MediaSurface.MOVIE) {
             loadMovies(reset = true)
@@ -3398,6 +3401,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun refreshDramaLibrary() {
+        api.invalidateLibraryCache()
         dramaCatalogDirty = true
         if (mutableState.value.surface == MediaSurface.DRAMA) {
             // A rescan can drop or add episodes, so any open detail page is

@@ -777,10 +777,10 @@ private fun ExpandedAsmrPlayer(
                     .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xB3000000))))
                     .navigationBarsPadding()
                     .padding(
-                        start = 12.dp,
-                        end = 12.dp,
-                        top = 34.dp,
-                        bottom = if (fullscreen) 10.dp else UiDimens.PlayerBottomContentInset,
+                        start = 8.dp,
+                        end = 8.dp,
+                        top = 20.dp,
+                        bottom = if (fullscreen) 6.dp else UiDimens.PlayerBottomContentInset - 2.dp,
                     ),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -803,7 +803,8 @@ private fun ExpandedAsmrPlayer(
                     FineProgressBar(
                         player = player,
                         onSeek = onSeek,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                        compact = true,
                     )
                     Text(
                         "${formatDuration(player.positionMs)} / ${formatDuration(player.durationMs)}",
@@ -823,7 +824,7 @@ private fun ExpandedAsmrPlayer(
                         .navigationBarsPadding()
                         // Keep the action rail above the progress row. The two
                         // controls must never compete for the same bottom band.
-                        .padding(end = 12.dp, bottom = UiDimens.PlayerBottomContentInset + 58.dp)
+                        .padding(end = 12.dp, bottom = UiDimens.PlayerBottomContentInset + 48.dp)
                 },
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {

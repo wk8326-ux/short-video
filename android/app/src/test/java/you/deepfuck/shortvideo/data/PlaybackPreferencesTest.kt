@@ -1,6 +1,7 @@
 package you.deepfuck.shortvideo.data
 
 import android.content.Context
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -75,6 +76,21 @@ class PlaybackPreferencesTest {
         preferences.clearAsmrAuthorIndex()
 
         assertNull(PlaybackPreferences(context).asmrAuthorIndex())
+    }
+
+    @Test
+    fun clearingSessionRemovesItsApiSnapshots() {
+        val context = RuntimeEnvironment.getApplication()
+        context.getSharedPreferences("short_video", Context.MODE_PRIVATE).edit().clear().commit()
+        val preferences = PlaybackPreferences(context).apply { sessionCookie = "session-one" }
+        val cache = ApiResponseCache(preferences.apiCacheDirectory)
+        val url = "/api/search?q=private"
+        val account = requireNotNull(preferences.apiCacheAccount)
+        cache.put(url, account, JSONObject().put("items", 1))
+
+        preferences.clearSession()
+
+        assertNull(cache.fresh(url, account, 10_000L))
     }
 
     @Test

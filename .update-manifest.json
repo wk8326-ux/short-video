@@ -1,8 +1,8 @@
 {
-  "versionCode": 199,
-  "versionName": "1.7.2",
-  "apkFile": "deepfuck-android-v1.7.2.apk",
-  "sha256": "2FAC7B6ECFF90D917F4EDC57B8F947296360D5A1FFA438E1ACB398B9B83AA5FF",
-  "size": 4561893,
-  "notes": "修复播放器导航隐藏、底部控件重叠、收藏加载、搜索历史和短视频/长视频搜索跳转。"
+  "versionCode": 200,
+  "versionName": "1.7.3",
+  "apkFile": "deepfuck-android-v1.7.3.apk",
+  "sha256": "7745045C5F307503D4CBE9C2BB5B86221EE6AF3458132A8FE3DBDB9B44D2E06E",
+  "size": 4578277,
+  "notes": "增加账号隔离的目录与搜索缓存、完善失效策略，压缩并重新排布各类播放器底部控件和进度条。"
 }

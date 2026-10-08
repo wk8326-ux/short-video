@@ -11,7 +11,8 @@ import androidx.media3.datasource.cache.SimpleCache
 import java.io.File
 
 object MediaCacheStore {
-    private const val CACHE_SIZE_BYTES = 1024L * 1024 * 1024
+    // Keep downloaded playback bytes bounded independently from artwork and API data.
+    private const val CACHE_SIZE_BYTES = 512L * 1024 * 1024
 
     @Volatile
     private var instance: SimpleCache? = null

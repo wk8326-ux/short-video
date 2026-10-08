@@ -22,6 +22,7 @@ class ApiException(val statusCode: Int, message: String) : IOException(message)
 
 class MediaApi(private val preferences: PlaybackPreferences) {
     private val baseUrl = BASE_URL.toHttpUrl()
+    private val responseCache = ApiResponseCache(preferences.apiCacheDirectory)
     private val client = OkHttpClient.Builder()
         .followRedirects(false)
         .followSslRedirects(false)
@@ -66,6 +67,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     }
 
     fun logout() {
+        preferences.apiCacheAccount?.let(responseCache::clear)
         runCatching {
             executeJson(
                 Request.Builder()
@@ -313,7 +315,9 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         } else {
             builder.delete().build()
         }
-        return MovieItem.fromJson(executeJson(request))
+        val stored = MovieItem.fromJson(executeJson(request))
+        invalidateFavoriteResponses()
+        return stored
     }
 
     fun searchLibrary(query: String, section: String): List<LibraryResult> {
@@ -365,7 +369,9 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         } else {
             builder.delete().build()
         }
-        return executeJson(request).optBoolean("favorite")
+        val stored = executeJson(request).optBoolean("favorite")
+        invalidateFavoriteResponses()
+        return stored
     }
 
     fun appSettings(): AppSettings = AppSettings(
@@ -470,6 +476,10 @@ class MediaApi(private val preferences: PlaybackPreferences) {
                 .post(body)
                 .build(),
         )
+        val account = preferences.apiCacheAccount ?: return
+        responseCache.invalidate(account) { requestUrl ->
+            requestUrl.toHttpUrl().encodedPath in setOf("/api/movies/recent", "/api/dramas/recent")
+        }
     }
 
     fun adminStatus(): AdminStatus {
@@ -538,6 +548,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             if (sourceId == null) post(body) else put(body)
         }.build()
         executeJson(request)
+        invalidateLibraryCache()
     }
 
     fun deleteMediaSource(sourceId: String) {
@@ -546,6 +557,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .delete()
             .build()
         executeJson(request)
+        invalidateLibraryCache()
     }
 
     /**
@@ -563,6 +575,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .put(body)
             .build()
         executeJson(request)
+        invalidateLibraryCache()
     }
 
     fun startFastStartCheck() = post("/api/admin/fast-start")
@@ -638,7 +651,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
                 // Covers are immutable and small: a phone that keeps a whole
                 // library on disk opens it off local storage on every later
                 // visit instead of re-crossing the Pacific for the same JPEG.
-                .maxSizeBytes(1024L * 1024 * 1024)
+                .maxSizeBytes(256L * 1024 * 1024)
                 .build()
         }
         // The wall, the library page and the detail hero all build their URL
@@ -658,7 +671,53 @@ class MediaApi(private val preferences: PlaybackPreferences) {
 
     private fun getJson(pathOrUrl: String): JSONObject {
         val target = if (pathOrUrl.startsWith("http")) pathOrUrl.toHttpUrl() else url(pathOrUrl)
-        return executeJson(Request.Builder().url(target).get().build())
+        val account = preferences.apiCacheAccount?.takeIf { target.host == baseUrl.host }
+        val ttlMs = responseCacheTtl(target.encodedPath)
+        if (account == null || ttlMs == null) {
+            return executeJson(Request.Builder().url(target).get().build())
+        }
+        responseCache.fresh(target.toString(), account, ttlMs)?.let { return it }
+        return try {
+            executeJson(Request.Builder().url(target).get().build()).also { payload ->
+                responseCache.put(target.toString(), account, payload)
+            }
+        } catch (error: IOException) {
+            if (error is ApiException && error.statusCode !in setOf(408, 429) && error.statusCode < 500) {
+                throw error
+            }
+            responseCache.stale(target.toString(), account, STALE_RESPONSE_MAX_AGE_MS)?.let { return it }
+            throw error
+        }
+    }
+
+    /** Called after a scan or source edit so a local catalogue cannot hide it. */
+    internal fun invalidateLibraryCache() {
+        preferences.apiCacheAccount?.let(responseCache::clear)
+    }
+
+    private fun invalidateFavoriteResponses() {
+        val account = preferences.apiCacheAccount ?: return
+        responseCache.invalidate(account) { requestUrl ->
+            val path = requestUrl.toHttpUrl().encodedPath
+            path == "/api/favorites" ||
+                path == "/api/favorites/status" ||
+                path == "/api/search" ||
+                path.startsWith("/api/movies") ||
+                path.startsWith("/api/dramas")
+        }
+    }
+
+    private fun responseCacheTtl(path: String): Long? = when {
+        path == "/api/feed" -> FEED_RESPONSE_TTL_MS
+        path == "/api/search" -> SEARCH_RESPONSE_TTL_MS
+        path == "/api/favorites/status" -> FAVORITE_STATUS_TTL_MS
+        path == "/api/favorites" -> FAVORITES_RESPONSE_TTL_MS
+        path == "/api/movies/recent" || path == "/api/dramas/recent" -> RECENT_RESPONSE_TTL_MS
+        path.startsWith("/api/asmr/authors") ||
+            path.startsWith("/api/movies") ||
+            path.startsWith("/api/movie-metadata") ||
+            path.startsWith("/api/dramas") -> CATALOG_RESPONSE_TTL_MS
+        else -> null
     }
 
     private fun executeJson(request: Request): JSONObject = client.newCall(request).execute().use { response ->
@@ -688,6 +747,13 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         const val DRAMA_LIBRARY_PAGE_SIZE = 60
         // How many titles the "continue watching" strips hold.
         const val RECENT_LIMIT = 10
+        private const val FEED_RESPONSE_TTL_MS = 45_000L
+        private const val SEARCH_RESPONSE_TTL_MS = 2 * 60_000L
+        private const val FAVORITE_STATUS_TTL_MS = 20_000L
+        private const val FAVORITES_RESPONSE_TTL_MS = 45_000L
+        private const val RECENT_RESPONSE_TTL_MS = 60_000L
+        private const val CATALOG_RESPONSE_TTL_MS = 10 * 60_000L
+        private const val STALE_RESPONSE_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1_000
         const val BASE_URL = "https://short.deepfuck.you/"
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }

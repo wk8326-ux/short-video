@@ -259,14 +259,14 @@ rm -f /tmp/stale-update-body
 当前已构建 APK：
 
 ```text
-versionName: 1.6.0-beta.39
-versionCode: 196
-size: 4325720
-sha256: AAC8E1C898046BC4D93EF430E7F3867881727063AE157B8750E5BB0EEC5664F7
-GitHub tag: v1.6.0-beta.39
-GitHub asset: deepfuck-android-v1.6.0-beta.39.apk
-GitHub asset URL: https://github.com/wk8326-ux/short-video/releases/download/v1.6.0-beta.39/deepfuck-android-v1.6.0-beta.39.apk
-oracle2 APK path: /home/ubuntu/short-video/data/app-update/deepfuck-android-v1.6.0-beta.39.apk
+versionName: 1.7.3
+versionCode: 200
+size: 4578277
+sha256: 7745045C5F307503D4CBE9C2BB5B86221EE6AF3458132A8FE3DBDB9B44D2E06E
+GitHub tag: v1.7.3
+GitHub asset: deepfuck-android-v1.7.3.apk
+GitHub asset URL: https://github.com/wk8326-ux/short-video/releases/download/v1.7.3/deepfuck-android-v1.7.3.apk
+oracle2 APK path: /home/ubuntu/short-video/data/app-update/deepfuck-android-v1.7.3.apk
 ```
 
-beta.39 已完成线上验收：服务端版本为 `1.6.0-beta.39`，APK `HEAD` 返回 `200`，`Range: bytes=0-1023` 返回 `206`，旧版本号返回 `409`。GitHub Release 已清理旧的 `app-release.apk`，只保留规范资产。
+1.7.3 发布后应完成线上验收：服务端版本为 `1.7.3`，APK `HEAD` 返回 `200`，`Range: bytes=0-1023` 返回 `206`，旧版本号返回 `409`。GitHub Release 只保留规范资产。

@@ -40,7 +40,7 @@ ASMR directory API requests are paced at four requests per second by default and
 
 The native client lives in `android/`, targets Android 8.0 and later, and uses Media3/ExoPlayer. It reuses the existing login, feed, ASMR, management, and 302 play APIs.
 
-Cached media is stored in the app's private storage and capped at 1 GiB with least-recently-used eviction. Short videos up to 96 MiB are prefetched in full; larger short videos cache the first 24 MiB; long video and audio cache the first 12 MiB. Already cached bytes bypass play-URL resolution, and HLS playlists/segments use stable keys without signed query parameters.
+Cached media is stored in the app's private storage and capped at 512 MiB with least-recently-used eviction. Artwork has a separate 256 MiB Coil disk cache, and account-scoped catalogue/search/favorites JSON snapshots have a 64 MiB cap with short freshness windows and offline fallback. Short videos up to 96 MiB are prefetched in full; larger short videos cache the first 24 MiB; long video and audio cache the first 12 MiB. Already cached bytes bypass play-URL resolution, and HLS playlists/segments use stable keys without signed query parameters.
 
 Short and long feeds pause whenever their page or the app foreground is left. ASMR audio and video each have a separate persisted background toggle in their player controls; enabled media continues through management views, screen lock, and app backgrounding. Android exposes enabled ASMR playback through a foreground media session with notification and lock-screen play/pause controls, audio focus, headset-disconnect handling, and a network wake lock. On Android 13 or later, allow notifications when prompted to keep the controls visible.
 

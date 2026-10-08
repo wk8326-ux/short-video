@@ -37,7 +37,7 @@ internal object UiDimens {
     // These values reserve breathing room for those app-level surfaces.
     val RootTopContentInset = 12.dp
     val RootBottomContentInset = 92.dp
-    val PlayerBottomContentInset = 104.dp
+    val PlayerBottomContentInset = 92.dp
     val TouchTarget = 48.dp
     val SectionGap = 24.dp
     val GridGap = 10.dp
