@@ -412,6 +412,7 @@ class LibraryDatabase:
             )
             self._migrate_media_source_roots(connection)
             self._migrate_media_source_order(connection)
+            self._migrate_tvbox_virtual_sources(connection)
             self._migrate_excluded_paths(connection)
             self._backfill_asmr_author_directories(connection)
             connection.execute(
@@ -488,6 +489,7 @@ class LibraryDatabase:
                 directories INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                config_json TEXT,
                 UNIQUE(base_url, root_paths, section)
             );
             """
@@ -527,7 +529,7 @@ class LibraryDatabase:
         The management screen lets a library be dragged above another one, and
         the wall renders its sections in the same order, so the position has to
         outlive the process rather than being a client-side arrangement. New
-        rows keep the column's default and sort last inside their section,
+        rows keep the column default and sort last inside their section,
         which is where an added library used to land anyway.
         """
         columns = {
@@ -539,25 +541,39 @@ class LibraryDatabase:
         connection.execute(
             "ALTER TABLE media_sources ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
         )
-        # Backfill from the ordering the column replaces, so the first launch
-        # after the upgrade shows exactly the list the user saw before it.
         rows = connection.execute(
-            """
-            SELECT id, section FROM media_sources
-            ORDER BY section, created_at, rowid
-            """
+            "SELECT id, section, created_at FROM media_sources ORDER BY section, created_at, id"
         ).fetchall()
-        position: dict[str, int] = {}
-        updates: list[tuple[int, str]] = []
+        section_order: dict[str, int] = {}
+        updates = []
         for row in rows:
             section = str(row["section"])
-            index = position.get(section, 0)
-            position[section] = index + 1
-            updates.append((index, str(row["id"])))
+            next_order = section_order.get(section, 0)
+            section_order[section] = next_order + 1
+            updates.append((next_order, int(row["id"])))
         connection.executemany(
-            "UPDATE media_sources SET sort_order = ? WHERE id = ?",
-            updates,
+            "UPDATE media_sources SET sort_order = ? WHERE id = ?", updates
         )
+        connection.commit()
+
+    @staticmethod
+    def _migrate_tvbox_virtual_sources(connection: sqlite3.Connection) -> None:
+        """Give TVBox categories their own virtual library identity."""
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(media_sources)").fetchall()
+        }
+        for name, definition in (
+            ("parent_source_id", "TEXT"),
+            ("virtual_category_id", "TEXT"),
+            ("virtual_category_name", "TEXT"),
+            ("virtual_category_type", "TEXT"),
+            ("config_json", "TEXT"),
+        ):
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE media_sources ADD COLUMN {name} {definition}"
+                )
         connection.commit()
 
     @staticmethod
@@ -571,31 +587,6 @@ class LibraryDatabase:
                 connection.execute(
                     f"ALTER TABLE {table} ADD COLUMN excluded_paths TEXT NOT NULL DEFAULT '[]'"
                 )
-        connection.commit()
-
-    @staticmethod
-    def _backfill_asmr_author_directories(connection: sqlite3.Connection) -> None:
-        rows = connection.execute(
-            """
-            SELECT v.source, v.path, v.author
-            FROM videos v
-            JOIN media_sources s ON s.id = v.source AND s.section = 'asmr'
-            WHERE v.author IS NOT NULL AND TRIM(v.author) != ''
-            """
-        ).fetchall()
-        records: set[tuple[str, str, str]] = set()
-        for row in rows:
-            source = str(row["source"])
-            author = str(row["author"])
-            parent = posixpath.dirname(str(row["path"])) or "/"
-            parts = parent.strip("/").split("/")
-            matching = [index for index, part in enumerate(parts) if part == author]
-            author_path = "/" + "/".join(parts[: matching[-1] + 1]) if matching else parent
-            records.add((source, author_path, author))
-        connection.executemany(
-            "INSERT OR IGNORE INTO asmr_author_directories(source, path, author) VALUES(?, ?, ?)",
-            sorted(records),
-        )
         connection.commit()
 
     @staticmethod
@@ -663,6 +654,31 @@ class LibraryDatabase:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    @staticmethod
+    def _backfill_asmr_author_directories(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT v.source, v.path, v.author
+            FROM videos v
+            JOIN media_sources s ON s.id = v.source AND s.section = 'asmr'
+            WHERE v.author IS NOT NULL AND TRIM(v.author) != ''
+            """
+        ).fetchall()
+        records: set[tuple[str, str, str]] = set()
+        for row in rows:
+            source = str(row["source"])
+            author = str(row["author"])
+            parent = posixpath.dirname(str(row["path"])) or "/"
+            parts = parent.strip("/").split("/")
+            matching = [index for index, part in enumerate(parts) if part == author]
+            author_path = "/" + "/".join(parts[: matching[-1] + 1]) if matching else parent
+            records.add((source, author_path, author))
+        connection.executemany(
+            "INSERT OR IGNORE INTO asmr_author_directories(source, path, author) VALUES(?, ?, ?)",
+            sorted(records),
+        )
+        connection.commit()
 
     def replace_scan(self, videos: Iterable[dict[str, Any]], *, source: str = "guangya") -> int:
         """Atomically replace a source with a complete listing.
@@ -1391,6 +1407,47 @@ class LibraryDatabase:
             )
             connection.commit()
         return len(rows)
+
+    def sync_tvbox_movie_index(
+        self,
+        source: str,
+        items: list[dict[str, Any]],
+        root: str,
+    ) -> int:
+        """Index TVBox feed items as virtual movie rows."""
+        records = []
+        for item in items:
+            remote_id = str(item.get("vod_id") or item.get("id") or "").strip()
+            name = str(item.get("vod_name") or item.get("name") or "").strip()
+            if not remote_id or not name:
+                continue
+            pic = str(item.get("vod_pic") or item.get("pic") or "").strip()
+            year_text = str(item.get("vod_year") or item.get("year") or "").strip()
+            year_match = re.search(r"(19|20)\d{2}", year_text)
+            records.append(
+                {
+                    "source": source,
+                    "remote_id": remote_id,
+                    "root": root,
+                    "name": name,
+                    "pic": pic,
+                    "year": int(year_match.group(0)) if year_match else None,
+                }
+            )
+        with self._lock, self._connect() as connection:
+            connection.executemany(
+                """
+                UPDATE videos
+                SET display_title = :name,
+                    original_title = NULL,
+                    year = :year,
+                    poster_url = :pic,
+                    backdrop_url = :pic
+                WHERE source = :source AND path = :root || '/' || :remote_id
+                """,
+                records,
+            )
+        return len(records)
 
     def sync_drama_index(
         self,
@@ -2855,13 +2912,15 @@ class LibraryDatabase:
                 INSERT INTO media_sources(
                     id, name, provider, base_url, root_path, root_paths, excluded_paths, section,
                     scan_mode, anonymous, token, username, password, enabled,
-                    sort_order
+                    sort_order, parent_source_id, virtual_category_id,
+                    virtual_category_name, virtual_category_type, config_json
                 )
                 VALUES(
                     :id, :name, :provider, :base_url, :root_path, :root_paths,
                     :excluded_paths, :section,
                     :scan_mode, :anonymous, :token, :username, :password, :enabled,
-                    :sort_order
+                    :sort_order, :parent_source_id, :virtual_category_id,
+                    :virtual_category_name, :virtual_category_type, :config_json
                 )
                 """,
                 record,
@@ -2883,6 +2942,10 @@ class LibraryDatabase:
             "username",
             "password",
             "enabled",
+            "parent_source_id",
+            "virtual_category_id",
+            "virtual_category_name",
+            "virtual_category_type",
         }
         updates = {key: value for key, value in values.items() if key in allowed}
         if not updates:
@@ -2978,6 +3041,37 @@ class LibraryDatabase:
             connection.execute(
                 "DELETE FROM media_scan_jobs WHERE source = ?", (source_id,)
             )
+            # A removed TVBox source must not leave its generated category
+            # libraries behind; they only exist to present that source's feed.
+            child_ids = [
+                str(row["id"])
+                for row in connection.execute(
+                    "SELECT id FROM media_sources WHERE parent_source_id = ?",
+                    (source_id,),
+                ).fetchall()
+            ]
+            for child_id in child_ids:
+                connection.execute("DELETE FROM movies WHERE source = ?", (child_id,))
+                connection.execute("DELETE FROM dramas WHERE source = ?", (child_id,))
+                connection.execute("DELETE FROM asmr_author_directories WHERE source = ?", (child_id,))
+                connection.execute(
+                    "DELETE FROM watch_progress WHERE video_id IN (SELECT id FROM videos WHERE source = ?)",
+                    (child_id,),
+                )
+                connection.execute("DELETE FROM videos WHERE source = ?", (child_id,))
+                connection.execute(
+                    """
+                    DELETE FROM media_scan_directories
+                    WHERE job_id IN (SELECT id FROM media_scan_jobs WHERE source = ?)
+                    """,
+                    (child_id,),
+                )
+                connection.execute("DELETE FROM media_scan_jobs WHERE source = ?", (child_id,))
+                connection.execute(
+                    "INSERT OR REPLACE INTO deleted_media_sources(id) VALUES(?)",
+                    (child_id,),
+                )
+                connection.execute("DELETE FROM media_sources WHERE id = ?", (child_id,))
             connection.execute(
                 "INSERT OR REPLACE INTO deleted_media_sources(id) VALUES(?)", (source_id,)
             )
@@ -3023,6 +3117,36 @@ class LibraryDatabase:
                 (section,),
             ).fetchall()
         return tuple(str(row["id"]) for row in rows)
+
+    def tvbox_child_source_ids(self) -> frozenset[str]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id FROM media_sources
+                WHERE parent_source_id IS NOT NULL AND parent_source_id != ''
+                """
+            ).fetchall()
+        return frozenset(str(row["id"]) for row in rows)
+
+    def delete_tvbox_children_not_in(
+        self,
+        source_id: str,
+        keep_ids: Sequence[str],
+    ) -> int:
+        keep = set(keep_ids)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM media_sources WHERE parent_source_id = ?",
+                (source_id,),
+            ).fetchall()
+            removed = 0
+            for row in rows:
+                child_id = str(row["id"])
+                if child_id in keep:
+                    continue
+                if self.delete_media_source(child_id):
+                    removed += 1
+            return removed
 
     def reorder_media_sources(self, order: Sequence[str]) -> int:
         """Apply a dragged order and return how many rows moved.
@@ -3112,6 +3236,11 @@ class LibraryDatabase:
             "username": str(source.get("username") or ""),
             "password": str(source.get("password") or ""),
             "enabled": int(bool(source.get("enabled", True))),
+            "parent_source_id": str(source.get("parent_source_id") or "") or None,
+            "virtual_category_id": str(source.get("virtual_category_id") or "") or None,
+            "virtual_category_name": str(source.get("virtual_category_name") or "") or None,
+            "virtual_category_type": str(source.get("virtual_category_type") or "") or None,
+            "config_json": source.get("config_json"),
         }
 
     @staticmethod
@@ -3127,6 +3256,16 @@ class LibraryDatabase:
             source.get("excluded_paths"),
             roots=source["root_paths"],
         )
+        if source.get("config_json") is None:
+            source["config_json"] = None
+        for key in (
+            "parent_source_id",
+            "virtual_category_id",
+            "virtual_category_name",
+            "virtual_category_type",
+        ):
+            if key in source and not source[key]:
+                source[key] = None
         if "videos" in source:
             source["videos"] = int(source["videos"] or 0)
             source["bytes"] = int(source["bytes"] or 0)

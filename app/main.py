@@ -49,6 +49,12 @@ from app.shared_metadata import (
     SharedMetadataClient,
     normalize_release_date,
 )
+from app.tvbox import (
+    TVBoxClient,
+    TVBoxError,
+    decode_config_payload,
+    parse_site,
+)
 
 try:  # Pillow is a hard dependency of the image; the guard keeps imports working
     from PIL import Image  # in a bare interpreter used by tooling.
@@ -60,7 +66,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.7.3"
+APP_VERSION = "1.8.0"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -627,7 +633,150 @@ async def scan_source(source: str) -> bool:
 
 async def scan_library(sources: tuple[str, ...] | None = None) -> None:
     for source in sources if sources is not None else source_registry.ids():
-        await scan_source(source)
+        config = await asyncio.to_thread(database.get_media_source, source)
+        if config and config["provider"] == "tvbox":
+            await scan_tvbox_source(source)
+        else:
+            await scan_source(source)
+
+
+async def scan_tvbox_source(source_id: str) -> bool:
+    """Synchronise one TVBox source and generate its category libraries."""
+    try:
+        runtime = source_registry.get(source_id)
+    except KeyError:
+        return False
+    lock = scan_locks.setdefault(source_id, asyncio.Lock())
+    if lock.locked():
+        return False
+    async with lock:
+        config = runtime.config
+        source_state = scan_state["sources"].setdefault(
+            source_id, empty_source_scan_state()
+        )
+        source_state["running"] = True
+        source_state["pendingErrors"] = []
+        refresh_scan_summary()
+        try:
+            client = runtime.client
+            categories = await client.categories()
+            wanted_ids = set()
+            category_order = 0
+            for category in categories:
+                category_order += 1
+                items = await client.list_items(category.remote_id, page=1)
+                slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
+                child_id = f"tvbox-{source_id}-{slug or hashlib.sha1(category.remote_id.encode()).hexdigest()[:8]}"
+                wanted_ids.add(child_id)
+                child = await asyncio.to_thread(
+                    database.get_media_source,
+                    child_id,
+                )
+                values = {
+                    "id": child_id,
+                    "name": category.name,
+                    "provider": "tvbox",
+                    "base_url": config["base_url"],
+                    "root_path": f"/tvbox/{category.remote_id}",
+                    "root_paths": [f"/tvbox/{category.remote_id}"],
+                    "excluded_paths": [],
+                    "section": "movie",
+                    "scan_mode": "tvbox",
+                    "anonymous": True,
+                    "token": "",
+                    "username": "",
+                    "password": "",
+                    "enabled": True,
+                    "parent_source_id": source_id,
+                    "virtual_category_id": category.remote_id,
+                    "virtual_category_name": category.name,
+                    "virtual_category_type": "tvbox",
+                    "sort_order": category_order,
+                }
+                if child:
+                    await asyncio.to_thread(
+                        database.update_media_source,
+                        child_id,
+                        values,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        database.add_media_source,
+                        values,
+                    )
+                marker = secrets.token_hex(16)
+                rows: list[dict[str, Any]] = []
+                for item in items:
+                    remote_id = str(item.get("vod_id") or item.get("id") or "").strip()
+                    name = str(item.get("vod_name") or item.get("name") or "").strip()
+                    if not remote_id or not name:
+                        continue
+                    path = f"/tvbox/{category.remote_id}/{remote_id}"
+                    pic = str(item.get("vod_pic") or item.get("pic") or "").strip()
+                    year_text = str(item.get("vod_year") or item.get("year") or "").strip()
+                    year_match = re.search(r"(19|20)\d{2}", year_text)
+                    rows.append(
+                        {
+                            "path": path,
+                            "name": f"{name}.m3u8",
+                            "size": 0,
+                            "modified": None,
+                            "thumb": pic,
+                            "author": None,
+                            "duration_seconds": None,
+                            "media_format": "m3u8",
+                            "media_kind": "video",
+                        }
+                    )
+                await asyncio.to_thread(
+                    database.replace_scan,
+                    rows,
+                    source=child_id,
+                )
+                await asyncio.to_thread(
+                    database.sync_tvbox_movie_index,
+                    child_id,
+                    items,
+                    f"/tvbox/{category.remote_id}",
+                )
+            await asyncio.to_thread(
+                database.delete_tvbox_children_not_in,
+                source_id,
+                tuple(wanted_ids),
+            )
+            now = int(time.time())
+            source_state.update(
+                {
+                    "status": "completed",
+                    "lastSuccess": now,
+                    "lastError": None,
+                    "resumed": False,
+                    "pendingErrors": [],
+                }
+            )
+            await asyncio.to_thread(
+                database.update_source_scan_state,
+                source_id,
+                last_success=now,
+                last_error=None,
+                directories=len(categories),
+            )
+            return True
+        except Exception as exc:
+            source_state["status"] = "interrupted"
+            source_state["lastError"] = str(exc)
+            await asyncio.to_thread(
+                database.update_source_scan_state,
+                source_id,
+                last_success=source_state["lastSuccess"],
+                last_error=str(exc)[:400],
+                directories=source_state["directories"],
+            )
+            logger.exception("TVBox source scan failed")
+            return False
+        finally:
+            source_state["running"] = False
+            refresh_scan_summary()
 
 
 async def check_fast_start(*, force: bool) -> None:
@@ -1332,8 +1481,8 @@ class AppSettingsRequest(BaseModel):
 
 class MediaSourceRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    provider: Literal["alist", "openlist"] = "alist"
-    baseUrl: str = Field(min_length=8, max_length=500)
+    provider: Literal["alist", "openlist", "tvbox"] = "alist"
+    baseUrl: str = Field(default="", max_length=500)
     # A library is often spread over several folders, so the management screen
     # sends a list. The single-path field stays accepted because older installs
     # of the app keep sending it, and one folder is just a one-item list.
@@ -1361,6 +1510,43 @@ class MediaSourceOrderRequest(BaseModel):
 
 def normalize_source_payload(payload: MediaSourceRequest) -> dict[str, Any]:
     base_url = payload.baseUrl.strip().rstrip("/")
+    if payload.provider == "tvbox":
+        if payload.section != "movie":
+            raise HTTPException(status_code=422, detail="TVBox 源只能在电影板块添加")
+        if not base_url:
+            raise HTTPException(status_code=422, detail="TVBox 配置必须是一个 URL 或 JSON")
+        parsed = urlsplit(base_url)
+        if parsed.scheme in {"http", "https"}:
+            if parsed.username:
+                raise HTTPException(status_code=422, detail="TVBox 地址必须是有效的 HTTP(S) 地址")
+            root_path, roots = "/", ["/"]
+        else:
+            try:
+                config = decode_config_payload(base_url)
+            except TVBoxError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            try:
+                parse_site(config)
+            except TVBoxError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            root_path, roots = "/", ["/"]
+        scan_mode = "tvbox"
+        excluded_paths = []
+        return {
+            "name": payload.name.strip(),
+            "provider": "tvbox",
+            "base_url": base_url,
+            "root_path": root_path,
+            "root_paths": roots,
+            "excluded_paths": excluded_paths,
+            "section": payload.section,
+            "scan_mode": scan_mode,
+            "anonymous": True,
+            "token": "",
+            "username": "",
+            "password": "",
+            "enabled": payload.enabled,
+        }
     parsed = urlsplit(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username:
         raise HTTPException(status_code=422, detail="AList 地址必须是有效的 HTTP(S) 地址")
@@ -1425,6 +1611,10 @@ def public_source(
         "videos": int(source.get("videos") or 0),
         "bytes": int(source.get("bytes") or 0),
         "scan": state,
+        "parentSourceId": source.get("parent_source_id") or None,
+        "virtualCategoryId": source.get("virtual_category_id") or None,
+        "virtualCategoryName": source.get("virtual_category_name") or None,
+        "virtualCategoryType": source.get("virtual_category_type") or None,
     }
     if movie_metadata is not None:
         payload["movieMetadata"] = movie_metadata
@@ -1713,6 +1903,7 @@ def public_drama_episode(video: dict[str, Any], position: int) -> dict[str, Any]
         "duration": video.get("duration_seconds"),
         "modified": video.get("modified"),
         "playUrl": f"/api/videos/{video_id}/play",
+        "episodeIndex": position - 1,
     }
 
 
@@ -2673,6 +2864,15 @@ async def start_scan(
         raise HTTPException(status_code=404, detail="媒体源不存在或已停用")
     if movie_metadata_state["running"] and movie_metadata_state["source"] == source:
         raise HTTPException(status_code=409, detail="电影资料正在刮削，请完成后再扫描")
+    config = await asyncio.to_thread(database.get_media_source, source)
+    if config and config["provider"] == "tvbox":
+        started = not scan_locks.setdefault(source, asyncio.Lock()).locked()
+        if started:
+            spawn_background(
+                scan_tvbox_source(source),
+                name=f"tvbox-{source}-scan",
+            )
+        return {"started": started, "scan": scan_state}
     # ``scan_source`` owns the running flag: it raises it once the lock is held
     # and always clears it in its ``finally``. Requesting a scan only decides
     # whether a worker is spawned, so the flag can never outlive the coroutine.
@@ -2700,6 +2900,11 @@ async def add_source(payload: MediaSourceRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="相同地址、目录和板块的媒体源已存在") from exc
     await source_registry.reload_source(source["id"])
     await asyncio.to_thread(refresh_source_states)
+    if source["provider"] == "tvbox":
+        spawn_background(
+            scan_tvbox_source(source["id"]),
+            name=f"tvbox-{source['id']}-scan",
+        )
     source = await asyncio.to_thread(database.get_media_source, source["id"])
     return public_source(source)
 
@@ -3413,19 +3618,26 @@ async def feed(
 
 
 @app.api_route("/api/videos/{video_id}/play", methods=["GET", "HEAD"])
-async def play(video_id: int, refresh: bool = False):
+async def play(video_id: int, refresh: bool = False, episode: int = 0):
     video = await asyncio.to_thread(database.get_video, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
     try:
         runtime = source_registry.get(video["source"])
-        raw_url, requires_headers = await runtime.direct_urls.get(
-            video_id,
-            video["path"],
-            refresh=refresh,
-        )
-    except (AListError, KeyError) as exc:
+        if runtime.config["provider"] == "tvbox":
+            remote_id = str(video["path"])
+            raw_url, requires_headers = await runtime.client.resolve(
+                remote_id,
+                episode,
+            )
+        else:
+            raw_url, requires_headers = await runtime.direct_urls.get(
+                video_id,
+                video["path"],
+                refresh=refresh,
+            )
+    except (AListError, TVBoxError, KeyError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if requires_headers:
         raise HTTPException(status_code=422, detail="This media source requires proxy headers")

@@ -7,12 +7,13 @@ from app.alist import AListClient
 from app.database import LibraryDatabase
 from app.direct_urls import DirectUrlCache
 from app.settings import Settings
+from app.tvbox import TVBoxClient
 
 
 @dataclass
 class SourceRuntime:
     config: dict[str, Any]
-    client: AListClient
+    client: AListClient | TVBoxClient
     direct_urls: DirectUrlCache
 
 
@@ -126,29 +127,37 @@ class MediaSourceRegistry:
             if config["section"] in ("movie", "drama")
             else self.settings.video_extensions
         )
-        # One client serves every folder this source was given: the scan steps
-        # and the direct-URL resolver always name an absolute path, so the
-        # "current" folder is only a fallback for callers that predate them.
-        roots = list(config.get("root_paths") or [config["root_path"]])
-        client = AListClient(
-            self.settings,
-            base_url=config["base_url"],
-            media_path=roots[0] if roots else "/",
-            extensions=extensions,
-            anonymous=config["anonymous"],
-            token=config["token"],
-            username=config["username"],
-            password=config["password"],
-            request_interval_seconds=(
-                self.settings.asmr_request_interval_seconds
-                if config["section"] == "asmr"
-                else 0.0
-            ),
-            # Only the movie wall tolerates unknown file types (sidecar
-            # artwork). A drama library is strictly video, so stray .html or
-            # .nfo files must never be indexed as an episode.
-            include_unknown_files=config["section"] == "movie",
-        )
+        if config["provider"] == "tvbox":
+            client = TVBoxClient(
+                self.settings,
+                config_url=config["base_url"],
+                config_json=config.get("config_json"),
+            )
+        else:
+            # One client serves every folder this source was given: the scan
+            # steps and the direct-URL resolver always name an absolute path, so
+            # the "current" folder is only a fallback for callers that predate
+            # them.
+            roots = list(config.get("root_paths") or [config["root_path"]])
+            client = AListClient(
+                self.settings,
+                base_url=config["base_url"],
+                media_path=roots[0] if roots else "/",
+                extensions=extensions,
+                anonymous=config["anonymous"],
+                token=config["token"],
+                username=config["username"],
+                password=config["password"],
+                request_interval_seconds=(
+                    self.settings.asmr_request_interval_seconds
+                    if config["section"] == "asmr"
+                    else 0.0
+                ),
+                # Only the movie wall tolerates unknown file types (sidecar
+                # artwork). A drama library is strictly video, so stray .html or
+                # .nfo files must never be indexed as an episode.
+                include_unknown_files=config["section"] == "movie",
+            )
         return SourceRuntime(
             config=config,
             client=client,

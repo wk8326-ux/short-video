@@ -59,6 +59,7 @@ import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.SwapVert
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
@@ -968,7 +969,9 @@ private fun MediaSourceDialog(
     var password by remember(source?.id) { mutableStateOf("") }
     var token by remember(source?.id) { mutableStateOf("") }
     var enabled by remember(source?.id) { mutableStateOf(source?.enabled ?: false) }
-    val valid = name.isNotBlank() && baseUrl.startsWith("http") && rootPaths.any { it.isNotBlank() }
+    val isTvBox = provider == "tvbox"
+    val valid = name.isNotBlank() && baseUrl.isNotBlank() &&
+        (isTvBox || (baseUrl.startsWith("http") && rootPaths.any { it.isNotBlank() }))
     val knownAddresses = history.map { it.first }.distinct().filter { it != baseUrl.trim() }
     val knownRoots = history
         .filter { it.first == baseUrl.trim() }
@@ -1024,7 +1027,11 @@ private fun MediaSourceDialog(
                 FieldGroup("服务", Icons.Outlined.Cloud) {
                     ChoiceRow(
                         label = "服务类型",
-                        choices = listOf("alist" to "AList", "openlist" to "OpenList"),
+                        choices = listOf(
+                            "alist" to "AList",
+                            "openlist" to "OpenList",
+                            "tvbox" to "TVBox",
+                        ),
                         selected = provider,
                         onSelected = { provider = it },
                     )
@@ -1052,7 +1059,7 @@ private fun MediaSourceDialog(
                         { baseUrl = it },
                         Modifier.fillMaxWidth(),
                         label = { Text("服务地址") },
-                        placeholder = { Text("https://example.com") },
+                        placeholder = { Text(if (isTvBox) "https://example.com/config.json" else "https://example.com") },
                         leadingIcon = { Icon(Icons.Outlined.Link, contentDescription = null, modifier = Modifier.size(18.dp)) },
                         singleLine = true,
                     )
@@ -1078,8 +1085,16 @@ private fun MediaSourceDialog(
                         minLines = 2,
                         maxLines = 5,
                     )
+                    if (isTvBox) {
+                        Text(
+                            "填写一个 TVBox JSON、Base64 或 HEX 配置链接；后端会自动生成分类媒体库",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                        )
+                    }
                 }
-                FieldGroup("鉴权", Icons.Outlined.Key) {
+                if (!isTvBox) {
+                    FieldGroup("鉴权", Icons.Outlined.Key) {
                     ChoiceRow(
                         label = "鉴权方式",
                         choices = listOf(
@@ -1121,6 +1136,10 @@ private fun MediaSourceDialog(
                         )
                     }
                     ToggleRow("启用媒体源", enabled) { enabled = it }
+                    }
+                }
+                FieldGroup("状态", Icons.Outlined.Settings) {
+                    ToggleRow("启用媒体源", enabled) { enabled = it }
                 }
             }
             Row(
@@ -1145,7 +1164,7 @@ private fun MediaSourceDialog(
                                     .distinct(),
                                 excludedPaths = excludedPaths,
                                 section = section,
-                                scanMode = if (section.usesTreeScan) "tree" else scanMode,
+                                scanMode = if (provider == "tvbox") "tvbox" else if (section.usesTreeScan) "tree" else scanMode,
                                 anonymous = authMode == "anonymous",
                                 token = token,
                                 username = username,
