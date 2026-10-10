@@ -6,6 +6,7 @@ from typing import Any
 from app.alist import AListClient
 from app.database import LibraryDatabase
 from app.direct_urls import DirectUrlCache
+from app.html_source import HtmlSourceClient
 from app.settings import Settings
 from app.tvbox import TVBoxClient
 
@@ -13,7 +14,7 @@ from app.tvbox import TVBoxClient
 @dataclass
 class SourceRuntime:
     config: dict[str, Any]
-    client: AListClient | TVBoxClient
+    client: AListClient | TVBoxClient | HtmlSourceClient
     direct_urls: DirectUrlCache
 
 
@@ -127,7 +128,9 @@ class MediaSourceRegistry:
             if config["section"] in ("movie", "drama")
             else self.settings.video_extensions
         )
-        if config["provider"] == "tvbox":
+        if config["provider"] == "html":
+            client = HtmlSourceClient(self.settings, config["base_url"])
+        elif config["provider"] == "tvbox":
             client = TVBoxClient(
                 self.settings,
                 config_url=config["base_url"],

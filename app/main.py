@@ -55,6 +55,7 @@ from app.tvbox import (
     decode_config_payload,
     parse_site,
 )
+from app.html_source import HtmlSourceClient, HtmlSourceError
 
 try:  # Pillow is a hard dependency of the image; the guard keeps imports working
     from PIL import Image  # in a bare interpreter used by tooling.
@@ -636,8 +637,123 @@ async def scan_library(sources: tuple[str, ...] | None = None) -> None:
         config = await asyncio.to_thread(database.get_media_source, source)
         if config and config["provider"] == "tvbox":
             await scan_tvbox_source(source)
+        elif config and config["provider"] == "html":
+            await scan_html_source(source)
         else:
             await scan_source(source)
+
+
+async def scan_html_source(source_id: str) -> bool:
+    """Synchronise one HTML scraper source and generate category libraries."""
+    try:
+        runtime = source_registry.get(source_id)
+    except KeyError:
+        return False
+    lock = scan_locks.setdefault(source_id, asyncio.Lock())
+    if lock.locked():
+        return False
+    async with lock:
+        config = runtime.config
+        source_state = scan_state["sources"].setdefault(
+            source_id, empty_source_scan_state()
+        )
+        source_state["running"] = True
+        source_state["pendingErrors"] = []
+        refresh_scan_summary()
+        try:
+            client = runtime.client
+            categories = await client.categories()
+            wanted_ids = set()
+            category_order = 0
+            for category in categories:
+                category_order += 1
+                items = await client.list_items(category.remote_id)
+                slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
+                child_id = f"html-{source_id}-{slug}"
+                wanted_ids.add(child_id)
+                child = await asyncio.to_thread(database.get_media_source, child_id)
+                values = {
+                    "id": child_id,
+                    "name": category.name,
+                    "provider": "html",
+                    "base_url": config["base_url"],
+                    "root_path": f"/html/{category.remote_id}",
+                    "root_paths": [f"/html/{category.remote_id}"],
+                    "excluded_paths": [],
+                    "section": "drama",
+                    "scan_mode": "tree",
+                    "anonymous": True,
+                    "token": "",
+                    "username": "",
+                    "password": "",
+                    "enabled": True,
+                    "parent_source_id": source_id,
+                    "virtual_category_id": category.remote_id,
+                    "virtual_category_name": category.name,
+                    "virtual_category_type": "html",
+                    "sort_order": category_order,
+                }
+                if child:
+                    await asyncio.to_thread(database.update_media_source, child_id, values)
+                else:
+                    await asyncio.to_thread(database.add_media_source, values)
+                marker = secrets.token_hex(16)
+                rows: list[dict[str, Any]] = []
+                for item in items:
+                    for number in range(1, item.episode_count + 1):
+                        episode_path = f"/html/{category.remote_id}/{item.remote_id}/{number}"
+                        rows.append(
+                            {
+                                "path": episode_path,
+                                "name": f"第{number}集.m3u8",
+                                "size": 0,
+                                "modified": None,
+                                "thumb": item.poster_url,
+                                "author": None,
+                                "duration_seconds": None,
+                                "media_format": "m3u8",
+                                "media_kind": "video",
+                            }
+                        )
+                await asyncio.to_thread(database.replace_scan, rows, source=child_id)
+            await asyncio.to_thread(
+                database.delete_tvbox_children_not_in,
+                source_id,
+                tuple(wanted_ids),
+            )
+            now = int(time.time())
+            source_state.update(
+                {
+                    "status": "completed",
+                    "lastSuccess": now,
+                    "lastError": None,
+                    "resumed": False,
+                    "pendingErrors": [],
+                }
+            )
+            await asyncio.to_thread(
+                database.update_source_scan_state,
+                source_id,
+                last_success=now,
+                last_error=None,
+                directories=len(categories),
+            )
+            return True
+        except Exception as exc:
+            source_state["status"] = "interrupted"
+            source_state["lastError"] = str(exc)
+            await asyncio.to_thread(
+                database.update_source_scan_state,
+                source_id,
+                last_success=source_state["lastSuccess"],
+                last_error=str(exc)[:400],
+                directories=source_state["directories"],
+            )
+            logger.exception("HTML source scan failed")
+            return False
+        finally:
+            source_state["running"] = False
+            refresh_scan_summary()
 
 
 async def scan_tvbox_source(source_id: str) -> bool:
@@ -1481,7 +1597,7 @@ class AppSettingsRequest(BaseModel):
 
 class MediaSourceRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    provider: Literal["alist", "openlist", "tvbox"] = "alist"
+    provider: Literal["alist", "openlist", "tvbox", "html"] = "alist"
     baseUrl: str = Field(default="", max_length=500)
     # A library is often spread over several folders, so the management screen
     # sends a list. The single-path field stays accepted because older installs
@@ -1510,6 +1626,27 @@ class MediaSourceOrderRequest(BaseModel):
 
 def normalize_source_payload(payload: MediaSourceRequest) -> dict[str, Any]:
     base_url = payload.baseUrl.strip().rstrip("/")
+    if payload.provider == "html":
+        if payload.section != "drama":
+            raise HTTPException(status_code=422, detail="HTML 源只能在短剧板块添加")
+        parsed = urlsplit(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username:
+            raise HTTPException(status_code=422, detail="HTML 源地址必须是有效的 HTTP(S) 地址")
+        return {
+            "name": payload.name.strip(),
+            "provider": "html",
+            "base_url": base_url,
+            "root_path": "/",
+            "root_paths": ["/"],
+            "excluded_paths": [],
+            "section": payload.section,
+            "scan_mode": "tree",
+            "anonymous": True,
+            "token": "",
+            "username": "",
+            "password": "",
+            "enabled": payload.enabled,
+        }
     if payload.provider == "tvbox":
         if payload.section != "movie":
             raise HTTPException(status_code=422, detail="TVBox 源只能在电影板块添加")
@@ -2873,6 +3010,14 @@ async def start_scan(
                 name=f"tvbox-{source}-scan",
             )
         return {"started": started, "scan": scan_state}
+    if config and config["provider"] == "html":
+        started = not scan_locks.setdefault(source, asyncio.Lock()).locked()
+        if started:
+            spawn_background(
+                scan_html_source(source),
+                name=f"html-{source}-scan",
+            )
+        return {"started": started, "scan": scan_state}
     # ``scan_source`` owns the running flag: it raises it once the lock is held
     # and always clears it in its ``finally``. Requesting a scan only decides
     # whether a worker is spawned, so the flag can never outlive the coroutine.
@@ -2904,6 +3049,11 @@ async def add_source(payload: MediaSourceRequest) -> dict[str, Any]:
         spawn_background(
             scan_tvbox_source(source["id"]),
             name=f"tvbox-{source['id']}-scan",
+        )
+    elif source["provider"] == "html":
+        spawn_background(
+            scan_html_source(source["id"]),
+            name=f"html-{source['id']}-scan",
         )
     source = await asyncio.to_thread(database.get_media_source, source["id"])
     return public_source(source)
@@ -3631,13 +3781,18 @@ async def play(video_id: int, refresh: bool = False, episode: int = 0):
                 remote_id,
                 episode,
             )
+        elif runtime.config["provider"] == "html":
+            raw_url, requires_headers = await runtime.client.resolve(
+                str(video["path"]),
+                episode,
+            )
         else:
             raw_url, requires_headers = await runtime.direct_urls.get(
                 video_id,
                 video["path"],
                 refresh=refresh,
             )
-    except (AListError, TVBoxError, KeyError) as exc:
+    except (AListError, TVBoxError, HtmlSourceError, KeyError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     if requires_headers:
         raise HTTPException(status_code=422, detail="This media source requires proxy headers")
