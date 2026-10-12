@@ -69,7 +69,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -1579,7 +1579,12 @@ app = FastAPI(
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    public_api_paths = {"/api/auth/login", "/api/auth/status"}
+    public_api_paths = {
+        "/api/auth/login",
+        "/api/auth/status",
+        "/api/app/update",
+        "/api/app/update/apk",
+    }
     requires_auth = request.url.path.startswith("/api/") and request.url.path not in public_api_paths
     if requires_auth and not session_manager.verify(request.cookies.get(SESSION_COOKIE)):
         response = JSONResponse(status_code=401, content={"detail": "Authentication required"})

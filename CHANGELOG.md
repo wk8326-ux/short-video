@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.8.2] - 2026-10-12
+
+### Fixed
+
+- 应用更新检查和 APK 下载不再要求登录，修复已登录状态下能检测到新版本但下载中断的问题；管理接口仍然要求鉴权。
+
 ## [1.8.1] - 2026-10-12
 
 ### Fixed

@@ -106,6 +106,7 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
         )
 
         update_without_auth = client.get("/api/app/update")
+        admin_without_auth = client.get("/api/admin/status")
         missing_update = client.get("/api/app/update", headers=headers)
         update_directory = tmp_path / "app-update"
         update_directory.mkdir()
@@ -242,7 +243,8 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     assert play.headers["location"] == "https://media.example/video.mp4"
     assert play.headers["cache-control"] == "private, max-age=300"
     assert play.headers["vary"] == "Cookie"
-    assert update_without_auth.status_code == 401
+    assert update_without_auth.status_code in (200, 404)
+    assert admin_without_auth.status_code == 401
     assert missing_update.status_code == 404
     assert invalid_update.status_code == 503
     assert update.status_code == 200
