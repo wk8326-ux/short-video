@@ -152,6 +152,16 @@ def normalize_cms_url(base_url: str, *, category: str | None = None, page: int =
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "&".join(f"{key}={quote(value)}" for key, value in query), parsed.fragment))
 
 
+def is_cms_api_url(value: str) -> bool:
+    """Accept standalone MacCMS-style APIs as single-site TVBox sources."""
+    parsed = urlsplit(value)
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.netloc)
+        and ("api.php" in parsed.path.lower() or "provide/vod" in parsed.path.lower())
+    )
+
+
 def parse_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
     value = payload.get("list")
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
@@ -248,12 +258,16 @@ class TVBoxClient:
         self._owns_client = client is None
         self._config: dict[str, Any] | None = None
         self._api: str | None = None
+        self._standalone_api = is_cms_api_url(self.config_url)
 
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
 
     async def _load_config(self) -> dict[str, Any]:
+        if self._standalone_api:
+            self._api = self.config_url
+            return {}
         if self._config is not None:
             return self._config
         if self.config_json is not None:
@@ -271,6 +285,12 @@ class TVBoxClient:
         return self._config
 
     async def categories(self) -> list[TVBoxCategory]:
+        if self._standalone_api:
+            payload = await self._request(normalize_cms_url(self._api or self.config_url, page=1))
+            categories = parse_categories(payload)
+            if not categories:
+                raise TVBoxError("TVBox 站点没有返回分类")
+            return categories
         config = await self._load_config()
         categories = parse_categories(config)
         if not categories:
@@ -283,12 +303,18 @@ class TVBoxClient:
 
     async def detail(self, remote_id: str) -> TVBoxItem:
         await self._load_config()
-        url = self._api + ("&" if "?" in self._api else "?") + f"ac=detail&ids={quote(remote_id)}"
+        if self._standalone_api:
+            url = normalize_cms_url(self._api or self.config_url) + f"&ac=detail&ids={quote(remote_id)}"
+        else:
+            url = self._api + ("&" if "?" in self._api else "?") + f"ac=detail&ids={quote(remote_id)}"
         return parse_detail(await self._request(url))
 
     async def search(self, query: str) -> list[dict[str, Any]]:
         await self._load_config()
-        url = self._api + ("&" if "?" in self._api else "?") + f"ac=detail&wd={quote(query)}"
+        if self._standalone_api:
+            url = normalize_cms_url(self._api or self.config_url) + f"&ac=detail&wd={quote(query)}"
+        else:
+            url = self._api + ("&" if "?" in self._api else "?") + f"ac=detail&wd={quote(query)}"
         return parse_list(await self._request(url))
 
     async def resolve(self, remote_id: str, episode_index: int = 0) -> tuple[str, bool]:

@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -52,6 +53,7 @@ from app.shared_metadata import (
 from app.tvbox import (
     TVBoxClient,
     TVBoxError,
+    is_cms_api_url,
     decode_config_payload,
     parse_site,
 )
@@ -855,6 +857,7 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     items,
                     f"/tvbox/{category.remote_id}",
                 )
+                await asyncio.to_thread(database.sync_movie_index, child_id, parse_movie_filename)
             await asyncio.to_thread(
                 database.delete_tvbox_children_not_in,
                 source_id,
@@ -3776,7 +3779,7 @@ async def play(video_id: int, refresh: bool = False, episode: int = 0):
     try:
         runtime = source_registry.get(video["source"])
         if runtime.config["provider"] == "tvbox":
-            remote_id = str(video["path"])
+            remote_id = str(video["path"]).rstrip("/").rsplit("/", 1)[-1]
             raw_url, requires_headers = await runtime.client.resolve(
                 remote_id,
                 episode,

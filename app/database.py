@@ -6,6 +6,7 @@ import json
 import os
 import posixpath
 import random
+import re
 import secrets
 import sqlite3
 import threading
@@ -208,6 +209,17 @@ class LibraryDatabase:
             }
             if "series_id" not in video_columns:
                 connection.execute("ALTER TABLE videos ADD COLUMN series_id TEXT")
+            for name, definition in (
+                ("display_title", "TEXT"),
+                ("original_title", "TEXT"),
+                ("year", "INTEGER"),
+                ("poster_url", "TEXT"),
+                ("backdrop_url", "TEXT"),
+            ):
+                if name not in video_columns:
+                    connection.execute(
+                        f"ALTER TABLE videos ADD COLUMN {name} {definition}"
+                    )
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS media_scan_jobs (
                     id TEXT PRIMARY KEY,
