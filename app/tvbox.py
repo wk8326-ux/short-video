@@ -162,6 +162,43 @@ def is_cms_api_url(value: str) -> bool:
     )
 
 
+def parse_total(payload: dict[str, Any]) -> int:
+    for key in ("total", "total_count", "count"):
+        try:
+            value = int(payload.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def parse_page_count(payload: dict[str, Any]) -> int:
+    for key in ("pagecount", "page_count", "total_page"):
+        try:
+            value = int(payload.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    total = parse_total(payload)
+    for key in ("limit", "page_size", "pageSize"):
+        try:
+            page_size = int(payload.get(key) or 0)
+        except (TypeError, ValueError):
+            page_size = 0
+        if total > 0 and page_size > 0:
+            return (total + page_size - 1) // page_size
+    return 0
+
+
+@dataclass(frozen=True)
+class TVBoxPage:
+    items: list[dict[str, Any]]
+    total: int
+    page_count: int
+
+
 def parse_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
     value = payload.get("list")
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
@@ -297,9 +334,40 @@ class TVBoxClient:
             raise TVBoxError("TVBox 站点没有返回分类")
         return categories
 
-    async def list_items(self, category: str, page: int = 1) -> list[dict[str, Any]]:
+    async def list_page(self, category: str, page: int = 1) -> TVBoxPage:
         await self._load_config()
-        return parse_list(await self._request(normalize_cms_url(self._api, category=category, page=page)))
+        payload = await self._request(normalize_cms_url(self._api, category=category, page=page))
+        items = parse_list(payload)
+        return TVBoxPage(
+            items=items,
+            total=parse_total(payload),
+            page_count=parse_page_count(payload),
+        )
+
+    async def list_items(self, category: str, page: int = 1) -> list[dict[str, Any]]:
+        return (await self.list_page(category, page)).items
+
+    async def list_items_all(
+        self,
+        category: str,
+        *,
+        on_progress: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        first = await self.list_page(category, page=1)
+        items = first.items
+        page_count = first.page_count
+        if not page_count and first.total and items:
+            page_count = (first.total + len(items) - 1) // len(items)
+        if on_progress is not None:
+            on_progress(1, page_count, len(items))
+        for page_number in range(2, max(page_count, 1) + 1):
+            page = await self.list_page(category, page=page_number)
+            if not page.items:
+                break
+            items.extend(page.items)
+            if on_progress is not None:
+                on_progress(page_number, page_count, len(items))
+        return items
 
     async def detail(self, remote_id: str) -> TVBoxItem:
         await self._load_config()

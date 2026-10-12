@@ -1364,7 +1364,7 @@ class LibraryDatabase:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, source, name
+                SELECT id, source, name, thumb
                 FROM videos
                 WHERE source = ? AND active = 1
                 ORDER BY id
@@ -1374,6 +1374,15 @@ class LibraryDatabase:
             parsed_rows = []
             for row in rows:
                 parsed = parser(str(row["name"]))
+                # TVBox and HTTP-backed scans carry playable cover URLs in
+                # ``videos.thumb``. Keep relative thumbnails out of ``movies``;
+                # their public API still falls back to the video poster route.
+                thumb = str(row["thumb"] or "").strip()
+                http_thumb = (
+                    thumb
+                    if thumb.lower().startswith(("http://", "https://"))
+                    else ""
+                )
                 parsed_rows.append(
                     {
                         "video_id": int(row["id"]),
@@ -1382,12 +1391,19 @@ class LibraryDatabase:
                         "normalized_title": parsed.normalized_title,
                         "year": parsed.year,
                         "code": parsed.code,
+                        "poster_url": http_thumb,
                     }
                 )
             connection.executemany(
                 """
-                INSERT INTO movies(video_id, source, display_title, normalized_title, year, code)
-                VALUES(:video_id, :source, :display_title, :normalized_title, :year, :code)
+                INSERT INTO movies(
+                    video_id, source, display_title, normalized_title, year, code,
+                    poster_url, backdrop_url
+                )
+                VALUES(
+                    :video_id, :source, :display_title, :normalized_title, :year, :code,
+                    :poster_url, :poster_url
+                )
                 ON CONFLICT(video_id) DO UPDATE SET
                     source = excluded.source,
                     display_title = CASE
@@ -1403,6 +1419,14 @@ class LibraryDatabase:
                         ELSE excluded.year
                     END,
                     code = COALESCE(excluded.code, movies.code),
+                    poster_url = CASE
+                        WHEN TRIM(COALESCE(movies.poster_url, '')) <> '' THEN movies.poster_url
+                        ELSE excluded.poster_url
+                    END,
+                    backdrop_url = CASE
+                        WHEN TRIM(COALESCE(movies.backdrop_url, '')) <> '' THEN movies.backdrop_url
+                        ELSE excluded.backdrop_url
+                    END,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 parsed_rows,

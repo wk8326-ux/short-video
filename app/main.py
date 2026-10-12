@@ -69,7 +69,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -782,7 +782,6 @@ async def scan_tvbox_source(source_id: str) -> bool:
             category_order = 0
             for category in categories:
                 category_order += 1
-                items = await client.list_items(category.remote_id, page=1)
                 slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
                 child_id = f"tvbox-{source_id}-{slug or hashlib.sha1(category.remote_id.encode()).hexdigest()[:8]}"
                 wanted_ids.add(child_id)
@@ -823,6 +822,22 @@ async def scan_tvbox_source(source_id: str) -> bool:
                         values,
                     )
                 marker = secrets.token_hex(16)
+                def update_category_progress(
+                    page_number: int,
+                    page_count: int,
+                    discovered: int,
+                ) -> None:
+                    source_state["filesDiscovered"] = discovered
+                    source_state["directories"] = page_number
+                    source_state["directoriesTotal"] = page_count
+
+                items = await client.list_items_all(
+                    category.remote_id,
+                    on_progress=update_category_progress,
+                )
+                source_state["filesDiscovered"] = len(items)
+                source_state["directories"] = category_order
+                source_state["directoriesTotal"] = len(categories)
                 rows: list[dict[str, Any]] = []
                 for item in items:
                     remote_id = str(item.get("vod_id") or item.get("id") or "").strip()

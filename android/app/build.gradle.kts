@@ -22,8 +22,8 @@ android {
         applicationId = "you.deepfuck.shortvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 201
-        versionName = "1.8.0"
+        versionCode = 202
+        versionName = "1.8.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -68,6 +68,10 @@ android {
         // Kotlin 2.0 UAST bundled by this toolchain and crashes lint itself.
         // Keep the remaining lint checks active until the dependency is aligned.
         disable += "NullSafeMutableLiveData"
+        // The Compose runtime RememberInComposition detector crashes with the
+        // Kotlin 2.x analysis API in this toolchain. Keep other lint checks
+        // active until the dependency versions are aligned.
+        disable += "RememberInComposition"
     }
 }
 

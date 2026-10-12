@@ -498,6 +498,68 @@ def test_movie_index_keeps_metadata_across_rescans_and_removes_missing_rows(tmp_
     assert database.movie_count(sources=("movies",)) == 1
 
 
+def test_movie_index_backfills_http_thumbnails_without_overwriting_covers(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    database.replace_scan(
+        [
+            {
+                "path": "/tvbox/1/101",
+                "name": "远程封面.m3u8",
+                "size": 0,
+                "modified": None,
+                "thumb": "https://images.example/remote.jpg",
+                "media_format": "m3u8",
+            },
+            {
+                "path": "/tvbox/1/102",
+                "name": "相对缩略图.m3u8",
+                "size": 0,
+                "modified": None,
+                "thumb": "/poster?path=relative.jpg",
+                "media_format": "m3u8",
+            },
+        ],
+        source="tvbox-child",
+    )
+    database.sync_movie_index("tvbox-child", parse_movie_filename)
+
+    rows = database.movies(sources=("tvbox-child",), limit=10)
+    by_path = {row["path"]: row for row in rows}
+    assert by_path["/tvbox/1/101"]["poster_url"] == "https://images.example/remote.jpg"
+    assert by_path["/tvbox/1/101"]["backdrop_url"] == "https://images.example/remote.jpg"
+    assert not by_path["/tvbox/1/102"]["poster_url"]
+
+    database.update_movie_metadata(
+        by_path["/tvbox/1/101"]["id"],
+        poster_url="https://metadata.example/curated.jpg",
+        match_status="matched",
+        metadata_provider="shared",
+    )
+    database.replace_scan(
+        [
+            {
+                "path": "/tvbox/1/101",
+                "name": "远程封面.m3u8",
+                "size": 0,
+                "modified": None,
+                "thumb": "https://images.example/updated.jpg",
+                "media_format": "m3u8",
+            }
+        ],
+        source="tvbox-child",
+    )
+    database.sync_tvbox_movie_index(
+        "tvbox-child",
+        [{"vod_id": "101", "vod_name": "远程封面", "vod_pic": "https://images.example/updated.jpg"}],
+        "/tvbox/1",
+    )
+    database.sync_movie_index("tvbox-child", parse_movie_filename)
+
+    stored = database.movies(sources=("tvbox-child",), limit=10)[0]
+    assert stored["poster_url"] == "https://metadata.example/curated.jpg"
+
+
 def test_hidden_movies_stay_hidden_across_scans(tmp_path):
     database = LibraryDatabase(str(tmp_path / "library.db"))
     database.initialize()
