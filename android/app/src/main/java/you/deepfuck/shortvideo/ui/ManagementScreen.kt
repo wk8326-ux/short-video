@@ -970,8 +970,9 @@ private fun MediaSourceDialog(
     var token by remember(source?.id) { mutableStateOf("") }
     var enabled by remember(source?.id) { mutableStateOf(source?.enabled ?: false) }
     val isTvBox = provider == "tvbox"
+    val isHtmlSource = provider == "html"
     val valid = name.isNotBlank() && baseUrl.isNotBlank() &&
-        (isTvBox || (baseUrl.startsWith("http") && rootPaths.any { it.isNotBlank() }))
+        (isTvBox || isHtmlSource || (baseUrl.startsWith("http") && rootPaths.any { it.isNotBlank() }))
     val knownAddresses = history.map { it.first }.distinct().filter { it != baseUrl.trim() }
     val knownRoots = history
         .filter { it.first == baseUrl.trim() }
@@ -1031,6 +1032,7 @@ private fun MediaSourceDialog(
                             "alist" to "AList",
                             "openlist" to "OpenList",
                             "tvbox" to "TVBox",
+                            "html" to "HTML 源",
                         ),
                         selected = provider,
                         onSelected = { provider = it },
@@ -1092,8 +1094,15 @@ private fun MediaSourceDialog(
                             color = TextSecondary,
                         )
                     }
+                    if (isHtmlSource) {
+                        Text(
+                            "填写一个网站地址；后端会解析站点结构，自动生成分类媒体库",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                        )
+                    }
                 }
-                if (!isTvBox) {
+                if (!isTvBox && !isHtmlSource) {
                     FieldGroup("鉴权", Icons.Outlined.Key) {
                     ChoiceRow(
                         label = "鉴权方式",
