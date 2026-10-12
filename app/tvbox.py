@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -13,6 +14,12 @@ import httpx
 
 class TVBoxError(RuntimeError):
     pass
+
+
+TVBOX_HTTP_RETRIES = 3
+TVBOX_TRANSIENT_STATUS = frozenset(
+    {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524, 529}
+)
 
 
 @dataclass(frozen=True)
@@ -283,10 +290,12 @@ class TVBoxClient:
         *,
         config_url: str | None = None,
         config_json: dict[str, Any] | None = None,
+        page_interval_seconds: float = 0.25,
     ):
         self.settings = settings
         self.config_url = (config_url or "").strip()
         self.config_json = config_json
+        self.page_interval_seconds = page_interval_seconds
         self._client = client or httpx.AsyncClient(
             follow_redirects=True,
             timeout=httpx.Timeout(20.0, connect=10.0),
@@ -360,13 +369,15 @@ class TVBoxClient:
             page_count = (first.total + len(items) - 1) // len(items)
         if on_progress is not None:
             on_progress(1, page_count, len(items))
-        for page_number in range(2, max(page_count, 1) + 1):
-            page = await self.list_page(category, page=page_number)
+        for next_page in range(2, max(page_count, 1) + 1):
+            if self.page_interval_seconds > 0:
+                await asyncio.sleep(self.page_interval_seconds)
+            page = await self.list_page(category, page=next_page)
             if not page.items:
                 break
             items.extend(page.items)
             if on_progress is not None:
-                on_progress(page_number, page_count, len(items))
+                on_progress(next_page, page_count, len(items))
         return items
 
     async def detail(self, remote_id: str) -> TVBoxItem:
@@ -396,12 +407,27 @@ class TVBoxClient:
         return url, False
 
     async def _request(self, url: str) -> dict[str, Any]:
-        try:
-            response = await self._client.get(url)
-            response.raise_for_status()
+        """Read one CMS response, retrying transient upstream failures.
+
+        Large scans are the first request load this CMS sees. Cloudflare-backed
+        hosts answer some pages with 520; a short backoff usually gets through
+        without turning one bad page into a failed category.
+        """
+        last_error: Exception | None = None
+        for attempt in range(TVBOX_HTTP_RETRIES):
             try:
-                return response.json()
-            except ValueError:
-                return decode_config_payload(response.content)
-        except httpx.HTTPError as exc:
-            raise TVBoxError(f"TVBox 站点请求失败: {exc}") from exc
+                response = await self._client.get(url)
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except ValueError:
+                    return decode_config_payload(response.content)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code not in TVBOX_TRANSIENT_STATUS:
+                    raise TVBoxError(f"TVBox 站点请求失败: {exc}") from exc
+                last_error = exc
+            except httpx.HTTPError as exc:
+                last_error = exc
+            if attempt + 1 < TVBOX_HTTP_RETRIES:
+                await asyncio.sleep(min(8.0, 2**attempt))
+        raise TVBoxError(f"TVBox 站点请求失败: {last_error}") from last_error

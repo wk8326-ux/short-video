@@ -69,7 +69,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.3"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -759,7 +759,12 @@ async def scan_html_source(source_id: str) -> bool:
 
 
 async def scan_tvbox_source(source_id: str) -> bool:
-    """Synchronise one TVBox source and generate its category libraries."""
+    """Synchronise one TVBox source and generate its category libraries.
+
+    When called on a virtual child library the scan targets only that
+    category; on a parent source it walks every category and skips the
+    ones whose database count already matches the upstream total.
+    """
     try:
         runtime = source_registry.get(source_id)
     except KeyError:
@@ -778,8 +783,18 @@ async def scan_tvbox_source(source_id: str) -> bool:
         try:
             client = runtime.client
             categories = await client.categories()
+            virtual_category_id = str(config.get("virtual_category_id") or "").strip()
+            if virtual_category_id:
+                categories = [
+                    cat for cat in categories if cat.remote_id == virtual_category_id
+                ]
+                if not categories:
+                    raise TVBoxError(
+                        f"TVBox 虚拟分类 {virtual_category_id} 不在当前配置中"
+                    )
             wanted_ids = set()
             category_order = 0
+            scan_errors: list[str] = []
             for category in categories:
                 category_order += 1
                 slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
@@ -817,11 +832,18 @@ async def scan_tvbox_source(source_id: str) -> bool:
                         values,
                     )
                 else:
-                    await asyncio.to_thread(
-                        database.add_media_source,
-                        values,
-                    )
-                marker = secrets.token_hex(16)
+                    try:
+                        await asyncio.to_thread(
+                            database.add_media_source,
+                            values,
+                        )
+                    except sqlite3.IntegrityError:
+                        await asyncio.to_thread(
+                            database.update_media_source,
+                            child_id,
+                            values,
+                        )
+
                 def update_category_progress(
                     page_number: int,
                     page_count: int,
@@ -831,70 +853,117 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     source_state["directories"] = page_number
                     source_state["directoriesTotal"] = page_count
 
-                items = await client.list_items_all(
-                    category.remote_id,
-                    on_progress=update_category_progress,
-                )
-                source_state["filesDiscovered"] = len(items)
-                source_state["directories"] = category_order
-                source_state["directoriesTotal"] = len(categories)
-                rows: list[dict[str, Any]] = []
-                for item in items:
-                    remote_id = str(item.get("vod_id") or item.get("id") or "").strip()
-                    name = str(item.get("vod_name") or item.get("name") or "").strip()
-                    if not remote_id or not name:
-                        continue
-                    path = f"/tvbox/{category.remote_id}/{remote_id}"
-                    pic = str(item.get("vod_pic") or item.get("pic") or "").strip()
-                    year_text = str(item.get("vod_year") or item.get("year") or "").strip()
-                    year_match = re.search(r"(19|20)\d{2}", year_text)
-                    rows.append(
-                        {
-                            "path": path,
-                            "name": f"{name}.m3u8",
-                            "size": 0,
-                            "modified": None,
-                            "thumb": pic,
-                            "author": None,
-                            "duration_seconds": None,
-                            "media_format": "m3u8",
-                            "media_kind": "video",
-                        }
+                try:
+                    first_page = await client.list_page(category.remote_id, page=1)
+                    upstream_total = first_page.total or len(first_page.items)
+                    existing_count = await asyncio.to_thread(
+                        database.movie_count,
+                        sources=(child_id,),
                     )
-                await asyncio.to_thread(
-                    database.replace_scan,
-                    rows,
-                    source=child_id,
-                )
-                await asyncio.to_thread(
-                    database.sync_tvbox_movie_index,
-                    child_id,
-                    items,
-                    f"/tvbox/{category.remote_id}",
-                )
-                await asyncio.to_thread(database.sync_movie_index, child_id, parse_movie_filename)
+                    if existing_count >= upstream_total and upstream_total > 0:
+                        logger.info(
+                            "TVBox category %s already has %d items (upstream %d), skipping",
+                            category.remote_id,
+                            existing_count,
+                            upstream_total,
+                        )
+                        continue
+
+                    items = await client.list_items_all(
+                        category.remote_id,
+                        on_progress=update_category_progress,
+                    )
+                    source_state["filesDiscovered"] = len(items)
+                    source_state["directories"] = category_order
+                    source_state["directoriesTotal"] = len(categories)
+                    rows: list[dict[str, Any]] = []
+                    for item in items:
+                        remote_id = str(item.get("vod_id") or item.get("id") or "").strip()
+                        name = str(item.get("vod_name") or item.get("name") or "").strip()
+                        if not remote_id or not name:
+                            continue
+                        path = f"/tvbox/{category.remote_id}/{remote_id}"
+                        pic = str(item.get("vod_pic") or item.get("pic") or "").strip()
+                        year_text = str(item.get("vod_year") or item.get("year") or "").strip()
+                        year_match = re.search(r"(19|20)\d{2}", year_text)
+                        rows.append(
+                            {
+                                "path": path,
+                                "name": f"{name}.m3u8",
+                                "size": 0,
+                                "modified": None,
+                                "thumb": pic,
+                                "author": None,
+                                "duration_seconds": None,
+                                "media_format": "m3u8",
+                                "media_kind": "video",
+                            }
+                        )
+                    await asyncio.to_thread(
+                        database.replace_scan,
+                        rows,
+                        source=child_id,
+                    )
+                    await asyncio.to_thread(
+                        database.sync_tvbox_movie_index,
+                        child_id,
+                        items,
+                        f"/tvbox/{category.remote_id}",
+                    )
+                    await asyncio.to_thread(database.sync_movie_index, child_id, parse_movie_filename)
+                except Exception as category_exc:
+                    scan_errors.append(
+                        f"{category.name}: {str(category_exc)[:200]}"
+                    )
+                    logger.warning(
+                        "TVBox category %s scan failed: %s",
+                        category.remote_id,
+                        category_exc,
+                    )
             await asyncio.to_thread(
                 database.delete_tvbox_children_not_in,
                 source_id,
                 tuple(wanted_ids),
             )
             now = int(time.time())
-            source_state.update(
-                {
-                    "status": "completed",
-                    "lastSuccess": now,
-                    "lastError": None,
-                    "resumed": False,
-                    "pendingErrors": [],
-                }
-            )
-            await asyncio.to_thread(
-                database.update_source_scan_state,
-                source_id,
-                last_success=now,
-                last_error=None,
-                directories=len(categories),
-            )
+            if scan_errors:
+                source_state.update(
+                    {
+                        "status": "partial",
+                        "lastSuccess": now,
+                        "lastError": "; ".join(scan_errors[:5]),
+                        "pendingErrors": scan_errors,
+                    }
+                )
+                await asyncio.to_thread(
+                    database.update_source_scan_state,
+                    source_id,
+                    last_success=now,
+                    last_error="; ".join(scan_errors[:5])[:400],
+                    directories=len(categories),
+                )
+                logger.warning(
+                    "TVBox source %s scan finished with %d errors",
+                    source_id,
+                    len(scan_errors),
+                )
+            else:
+                source_state.update(
+                    {
+                        "status": "completed",
+                        "lastSuccess": now,
+                        "lastError": None,
+                        "resumed": False,
+                        "pendingErrors": [],
+                    }
+                )
+                await asyncio.to_thread(
+                    database.update_source_scan_state,
+                    source_id,
+                    last_success=now,
+                    last_error=None,
+                    directories=len(categories),
+                )
             return True
         except Exception as exc:
             source_state["status"] = "interrupted"

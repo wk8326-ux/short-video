@@ -110,6 +110,76 @@ def test_client_reports_all_list_page_progress():
     assert asyncio.run(run()) == [(1, 3, 1), (2, 3, 2), (3, 3, 3)]
 
 
+def test_request_retries_transient_520(monkeypatch):
+    calls = {"count": 0}
+
+    def handler(request):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            return httpx.Response(520)
+        return httpx.Response(200, json={"list": []})
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("app.tvbox.asyncio.sleep", no_sleep)
+
+    async def run():
+        client = TVBoxClient(
+            None,
+            httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            config_url="https://example.com/api.php/provide/vod/?ac=list",
+        )
+        try:
+            return await client.list_page("1")
+        finally:
+            await client.close()
+
+    assert asyncio.run(run()).items == []
+    assert calls["count"] == 3
+
+
+def test_list_items_all_waits_between_pages(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("app.tvbox.asyncio.sleep", fake_sleep)
+
+    async def run():
+        client = TVBoxClient(
+            None,
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda request: httpx.Response(
+                        200,
+                        json={
+                            "pagecount": 3,
+                            "total": 45,
+                            "list": [
+                                {
+                                    "vod_id": f"id-{request.url.params['pg']}",
+                                    "vod_name": f"Page {request.url.params['pg']}",
+                                }
+                            ],
+                        },
+                    )
+                ),
+            ),
+            config_url="https://example.com/api.php/provide/vod/?ac=list",
+            page_interval_seconds=0.5,
+        )
+        try:
+            return await client.list_items_all("1")
+        finally:
+            await client.close()
+
+    items = asyncio.run(run())
+    assert [item["vod_id"] for item in items] == ["id-1", "id-2", "id-3"]
+    assert sleeps == [0.5, 0.5]
+
+
 def test_parse_detail_episode_groups():
     item = parse_detail(
         {
