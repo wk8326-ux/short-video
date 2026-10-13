@@ -3020,6 +3020,30 @@ class LibraryDatabase:
                 str(row["id"])
                 for row in connection.execute("SELECT id FROM deleted_media_sources").fetchall()
             }
+            seeded = [
+                self._source_record(source)
+                for source in records
+                if source["id"] not in deleted_ids
+            ]
+            # Seeding is keyed on the row id, but ``media_sources`` also carries
+            # a natural UNIQUE key over ``(base_url, root_paths, section)``. A
+            # default source the user already added under their own id - the 91
+            # drama site is the common case - therefore collided on every boot
+            # and took the whole application down. Skip a seed whose natural key
+            # is already owned by a different row instead of failing startup.
+            existing_keys = {
+                (str(row["base_url"]), str(row["root_paths"]), str(row["section"]))
+                for row in connection.execute(
+                    "SELECT base_url, root_paths, section FROM media_sources"
+                ).fetchall()
+            }
+            pending: list[dict[str, Any]] = []
+            for record in seeded:
+                key = (record["base_url"], record["root_paths"], record["section"])
+                if key in existing_keys:
+                    continue
+                existing_keys.add(key)
+                pending.append(record)
             connection.executemany(
                 """
                 INSERT INTO media_sources(
@@ -3033,7 +3057,7 @@ class LibraryDatabase:
                 )
                 ON CONFLICT(id) DO NOTHING
                 """,
-                [self._source_record(source) for source in records if source["id"] not in deleted_ids],
+                pending,
             )
             # The built-in ASMR source used the shallow ``authors`` traversal
             # before nested author folders were supported. Existing databases

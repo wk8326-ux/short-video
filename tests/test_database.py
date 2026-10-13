@@ -64,6 +64,31 @@ def test_scan_and_stable_shuffle_cursor(tmp_path):
     assert not ({row["id"] for row in first} & {row["id"] for row in second})
 
 
+def test_seed_skips_a_default_source_the_user_already_added_under_another_id(tmp_path):
+    """Boot must survive a default source that is already present by other key."""
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    seeded = {
+        "id": "91crdjai",
+        "name": "91crdjai 短剧",
+        "provider": "html",
+        "base_url": "https://91crdjai.com",
+        "root_path": "/",
+        "root_paths": ["/"],
+        "section": "drama",
+        "scan_mode": "remote_pages",
+        "anonymous": True,
+        "enabled": True,
+    }
+    # The user added the same site first, so it is stored under their own id.
+    database.add_media_source({**seeded, "id": "source-mine", "name": "91短剧"})
+
+    database.seed_media_sources([seeded])
+
+    assert database.get_media_source("91crdjai") is None
+    assert database.get_media_source("source-mine") is not None
+
+
 def test_sort_modes_and_removed_files(tmp_path):
     database = LibraryDatabase(str(tmp_path / "library.db"))
     database.initialize()
