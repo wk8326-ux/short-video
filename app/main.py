@@ -837,8 +837,16 @@ async def scan_tvbox_source(source_id: str) -> bool:
             for category in categories:
                 category_order += 1
                 slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
-                child_id = f"tvbox-{source_id}-{slug or hashlib.sha1(category.remote_id.encode()).hexdigest()[:8]}"
-                wanted_ids.add(child_id)
+                # Scanning one virtual library refreshes that library. Deriving a
+                # new child id from it produced a ``tvbox-tvbox-...`` source that
+                # duplicated every category on top of the real one.
+                child_id = (
+                    source_id
+                    if virtual_category_id
+                    else f"tvbox-{source_id}-{slug or hashlib.sha1(category.remote_id.encode()).hexdigest()[:8]}"
+                )
+                if not virtual_category_id:
+                    wanted_ids.add(child_id)
                 child = await asyncio.to_thread(
                     database.get_media_source,
                     child_id,
@@ -862,7 +870,11 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     "virtual_category_id": category.remote_id,
                     "virtual_category_name": category.name,
                     "virtual_category_type": "tvbox",
-                    "sort_order": category_order,
+                    "sort_order": (
+                        child.get("sort_order", category_order)
+                        if virtual_category_id and child
+                        else category_order
+                    ),
                 }
                 if child:
                     await asyncio.to_thread(
@@ -959,11 +971,12 @@ async def scan_tvbox_source(source_id: str) -> bool:
                         category.remote_id,
                         category_exc,
                     )
-            await asyncio.to_thread(
-                database.delete_tvbox_children_not_in,
-                source_id,
-                tuple(wanted_ids),
-            )
+            if not virtual_category_id:
+                await asyncio.to_thread(
+                    database.delete_tvbox_children_not_in,
+                    source_id,
+                    tuple(wanted_ids),
+                )
             now = int(time.time())
             if scan_errors:
                 source_state.update(

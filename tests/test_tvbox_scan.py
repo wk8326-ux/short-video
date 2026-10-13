@@ -84,7 +84,9 @@ def test_tvbox_virtual_child_scan_targets_only_its_category(monkeypatch, tmp_pat
     from app import main as main_module
 
     client = FakeClient({"1": 10899, "2": 4379})
-    database = FakeDatabase({"tvbox-parent-2": 4379})
+    # A virtual library scans itself, so the completed count is keyed by the
+    # library's own id rather than by a ``tvbox-<parent>-<slug>`` child id.
+    database = FakeDatabase({"parent": 4379})
     registry = type("Registry", (), {"get": lambda self, source_id: FakeRuntime(
         config={"base_url": "https://example.com/config.json", "virtual_category_id": "2"},
         client=client,
@@ -97,5 +99,7 @@ def test_tvbox_virtual_child_scan_targets_only_its_category(monkeypatch, tmp_pat
     assert asyncio.run(main_module.scan_tvbox_source("parent")) is True
     # Page one is read only to compare the database total with the upstream total.
     assert client.listed == [("2", 1)]
-    assert [row["id"] for row in database.added] == ["tvbox-parent-2"]
+    # The library refreshes itself instead of generating a ``tvbox-parent-2``
+    # duplicate on top of it.
+    assert [row["id"] for row in database.added] == ["parent"]
     assert database.scan_states and database.scan_states[-1][0] == "parent"
