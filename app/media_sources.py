@@ -65,6 +65,21 @@ def default_media_sources(settings: Settings) -> list[dict[str, Any]]:
             "password": "",
             "enabled": True,
         },
+        {
+            "id": "91crdjai",
+            "name": "91crdjai 短剧",
+            "provider": "html",
+            "base_url": "https://91crdjai.com",
+            "root_path": "/",
+            "root_paths": ["/"],
+            "section": "drama",
+            "scan_mode": "remote_pages",
+            "anonymous": True,
+            "token": "",
+            "username": "",
+            "password": "",
+            "enabled": True,
+        },
     ]
 
 
@@ -76,6 +91,7 @@ class MediaSourceRegistry:
 
     async def initialize(self) -> None:
         self.database.seed_media_sources(default_media_sources(self.settings))
+        self.database.remove_legacy_cr_drama_sources()
         await self.reload()
 
     async def reload(self) -> None:

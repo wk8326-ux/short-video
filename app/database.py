@@ -1581,6 +1581,139 @@ class LibraryDatabase:
             connection.commit()
         return len(series)
 
+    def sync_remote_drama_index(
+        self,
+        source: str,
+        category: str,
+        items: Sequence[dict[str, Any]],
+    ) -> int:
+        """Index a paginated remote drama category without filesystem semantics.
+
+        Remote sources already provide a stable series id and metadata.  The
+        episode rows remain ordinary ``videos`` so playback, favorites and
+        progress keep using the existing contracts; only their ``series_id``
+        and the corresponding drama rows are rebuilt here.
+        """
+        prefix = f"/html/{str(category).strip('/')}/"
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, path, active FROM videos
+                WHERE source = ? AND path LIKE ?
+                ORDER BY id
+                """,
+                (source, prefix + "%"),
+            ).fetchall()
+            by_remote: dict[str, list[sqlite3.Row]] = {}
+            for row in rows:
+                parts = str(row["path"]).strip("/").split("/")
+                if len(parts) != 4 or parts[0] != "html" or parts[1] != category:
+                    continue
+                by_remote.setdefault(parts[2], []).append(row)
+
+            connection.execute(
+                "UPDATE videos SET series_id = NULL WHERE source = ? AND path LIKE ?",
+                (source, prefix + "%"),
+            )
+            records: list[dict[str, Any]] = []
+            episode_links: list[tuple[str, int]] = []
+            for raw in items:
+                remote_id = str(raw.get("remote_id") or "").strip()
+                if not remote_id:
+                    continue
+                active_rows = [row for row in by_remote.get(remote_id, []) if int(row["active"] or 0)]
+                if not active_rows:
+                    continue
+                drama_id = f"html:{source}:{category}:{remote_id}"
+                title = str(raw.get("name") or remote_id).strip()
+                folder = f"{category}/{remote_id}"
+                tags = raw.get("tags") or []
+                if not isinstance(tags, list):
+                    tags = [tags]
+                tags_json = json.dumps(
+                    [str(tag).strip() for tag in tags if str(tag).strip()],
+                    ensure_ascii=False,
+                )
+                records.append(
+                    {
+                        "id": drama_id,
+                        "source": source,
+                        "root_path": prefix.rstrip("/"),
+                        "folder": folder,
+                        "title": title,
+                        "folder_title": title,
+                        "category": category,
+                        "code": remote_id,
+                        "poster_url": str(raw.get("poster_url") or "").strip() or None,
+                        "overview": str(raw.get("overview") or "").strip() or None,
+                        "tags": tags_json,
+                        "episode_count": len(active_rows),
+                        "metadata_status": "matched"
+                        if str(raw.get("overview") or "").strip() or tags
+                        else "pending",
+                    }
+                )
+                episode_links.extend((drama_id, int(row["id"])) for row in active_rows)
+
+            connection.executemany(
+                """
+                INSERT INTO dramas(
+                    id, source, root_path, folder, title, folder_title, category,
+                    code, poster_url, overview, tags, episode_count,
+                    metadata_status, scraped_at
+                )
+                VALUES(
+                    :id, :source, :root_path, :folder, :title, :folder_title,
+                    :category, :code, :poster_url, :overview, :tags,
+                    :episode_count, :metadata_status,
+                    CASE WHEN :metadata_status = 'matched' THEN CURRENT_TIMESTAMP ELSE NULL END
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    root_path = excluded.root_path,
+                    folder = excluded.folder,
+                    folder_title = excluded.folder_title,
+                    category = excluded.category,
+                    code = excluded.code,
+                    title = excluded.title,
+                    poster_url = COALESCE(excluded.poster_url, dramas.poster_url),
+                    overview = COALESCE(excluded.overview, dramas.overview),
+                    tags = CASE
+                        WHEN excluded.tags = '[]' THEN dramas.tags
+                        ELSE excluded.tags
+                    END,
+                    episode_count = excluded.episode_count,
+                    metadata_status = CASE
+                        WHEN excluded.metadata_status = 'matched' THEN 'matched'
+                        ELSE dramas.metadata_status
+                    END,
+                    scraped_at = CASE
+                        WHEN excluded.metadata_status = 'matched' THEN CURRENT_TIMESTAMP
+                        ELSE dramas.scraped_at
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                records,
+            )
+            if episode_links:
+                connection.executemany(
+                    "UPDATE videos SET series_id = ? WHERE id = ?",
+                    episode_links,
+                )
+            drama_ids = [record["id"] for record in records]
+            if drama_ids:
+                placeholders = ",".join("?" for _ in drama_ids)
+                connection.execute(
+                    f"DELETE FROM dramas WHERE source = ? AND category = ? AND id NOT IN ({placeholders})",
+                    [source, category, *drama_ids],
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM dramas WHERE source = ? AND category = ?",
+                    (source, category),
+                )
+            connection.commit()
+        return len(records)
+
     def dramas(
         self,
         *,
@@ -3183,6 +3316,45 @@ class LibraryDatabase:
                 if self.delete_media_source(child_id):
                     removed += 1
             return removed
+
+    def remove_legacy_cr_drama_sources(self) -> int:
+        """Remove the explicitly replaced CR short-drama libraries once.
+
+        This is intentionally narrow: a user-created drama source must remain
+        untouched unless its name or configured root identifies the old
+        ``CR短剧`` library that the 91crdjai source replaces.
+        """
+        migration_key = "migration:91crdjai_replace_legacy_cr_drama"
+        with self._lock, self._connect() as connection:
+            completed = connection.execute(
+                "SELECT 1 FROM app_settings WHERE key = ?", (migration_key,)
+            ).fetchone()
+            if completed:
+                return 0
+            rows = connection.execute(
+                """
+                SELECT id, name, root_path, root_paths
+                FROM media_sources
+                WHERE section = 'drama' AND provider IN ('alist', 'openlist')
+                """
+            ).fetchall()
+        removed = 0
+        for row in rows:
+            values = " ".join(
+                str(row[key] or "") for key in ("name", "root_path", "root_paths")
+            ).casefold()
+            if "cr短剧" not in values:
+                continue
+            if self.delete_media_source(str(row["id"])):
+                removed += 1
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO app_settings(key, value, updated_at) "
+                "VALUES(?, 'done', CURRENT_TIMESTAMP)",
+                (migration_key,),
+            )
+            connection.commit()
+        return removed
 
     def reorder_media_sources(self, order: Sequence[str]) -> int:
         """Apply a dragged order and return how many rows moved.

@@ -286,10 +286,20 @@ def candidate_keys(name: str, path: str = "") -> tuple[tuple[str, ...], tuple[st
     after every name key missed; a wrong cover is worse than no cover.
     """
     stem = _EXTENSION.sub("", str(name or ""))
+    path_parts = _path_segments(path)
     parent = PurePosixPath(str(path or "")).parent.name
+    # TVBox/HTML virtual libraries use synthetic paths such as
+    # ``/tvbox/15/191989``.  Treating ``15`` as a real media folder makes every
+    # item in that category resolve to an unrelated shared-metadata entry whose
+    # folder happens to be named ``15``.  Numeric parents and the virtual
+    # provider marker are structural identifiers, never title evidence.
+    virtual_parent = bool(path_parts) and fold_key(path_parts[0]) in {"tvbox", "html"}
     names: list[str] = []
     codes: list[str] = []
-    for value in (parent, stem.rsplit("@", 1)[-1], stem):
+    values = (
+        () if virtual_parent or str(parent).strip().isdigit() else (parent,)
+    ) + (stem.rsplit("@", 1)[-1], stem)
+    for value in values:
         folded = fold_key(value)
         if folded:
             names.append(folded)

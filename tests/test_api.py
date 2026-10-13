@@ -267,7 +267,8 @@ def test_feed_and_asmr_library_routes_are_source_scoped(monkeypatch, tmp_path):
     assert added_source.json()["tokenConfigured"] is True
     assert "token" not in added_source.json()
     assert "password" not in added_source.json()
-    assert len(source_list.json()["items"]) == 4
+    assert len(source_list.json()["items"]) == 5
+    assert any(item["id"] == "91crdjai" for item in source_list.json()["items"])
     assert disabled_source.json()["enabled"] is False
     assert disabled_scan.status_code == 404
     assert movie_source.status_code == 201

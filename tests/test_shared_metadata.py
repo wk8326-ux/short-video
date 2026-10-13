@@ -72,6 +72,50 @@ def test_candidate_keys_uses_the_containing_folder_not_the_file_path():
     assert "carib010225001fhd" in names
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/tvbox/15/191989",
+        "/html/duanju/3010/1",
+    ),
+)
+def test_candidate_keys_ignore_virtual_library_path_segments(path: str):
+    names, _ = candidate_keys("独立影片标题.m3u8", path)
+
+    assert "15" not in names
+    assert "3010" not in names
+    assert "1" not in names
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/tvbox/15/191989",
+        "/html/duanju/3010/1",
+    ),
+)
+async def test_lookup_does_not_match_a_virtual_library_id_as_a_movie_folder(path: str):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/index")
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "total": 1,
+                "items": [_entry("", "15", "反贪风暴2")],
+            },
+        )
+
+    http_client = _client(handler)
+    client = SharedMetadataClient(base_url=BASE, token="t", client=http_client)
+
+    match = await client.lookup("独立影片标题.m3u8", path)
+    await http_client.aclose()
+
+    assert match is None
+
+
 @pytest.mark.asyncio
 async def test_lookup_uses_the_complete_media_path_before_code_fallback():
     async def handler(request: httpx.Request) -> httpx.Response:

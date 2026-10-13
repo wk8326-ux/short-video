@@ -28,6 +28,10 @@ The application server never proxies or transcodes media bytes. Both Android and
 - Authenticated Android in-app updates with download progress and SHA-256 verification
 - Redacted on-device runtime logs with management-page view, clear, and export actions
 
+Network media source architecture and the repeatable website/TVBox onboarding
+playbook are documented in
+[`docs/network-media-source-architecture.md`](docs/network-media-source-architecture.md).
+
 Fast Start checks are manual and read at most the first 256 KiB of each MP4-family file. They do not rewrite or transcode media.
 
 Guangya duration classification runs in the background using small MP4 range reads. Each scan checks at most 30 pending files, largest first; browser metadata is also reported after successful playback. Existing files without known duration temporarily remain in the short-video feed so an upgrade never leaves the default screen empty.
@@ -53,7 +57,7 @@ cd android
 
 The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. The checked-in Gradle configuration uses Tencent mirrors first so builds do not depend on direct access to GitHub or Maven Central.
 
-Android updates are published from `/data/app-update`, which is inside the existing bind-mounted data directory. The API reads `manifest.json` for every check and serves the referenced APK only to an authenticated session. A private GitHub token is never bundled into the client.
+Android updates are published from `/data/app-update`, which is inside the existing bind-mounted data directory. The API reads `manifest.json` for every check and keeps the update manifest and APK download endpoints public so an installed client can update before login; management APIs remain authenticated. A private GitHub token is never bundled into the client.
 
 ```json
 {

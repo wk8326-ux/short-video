@@ -57,7 +57,7 @@ from app.tvbox import (
     decode_config_payload,
     parse_site,
 )
-from app.html_source import HtmlSourceClient, HtmlSourceError
+from app.html_source import HtmlSourceClient, HtmlSourceError, HtmlSourceItem
 
 try:  # Pillow is a hard dependency of the image; the guard keeps imports working
     from PIL import Image  # in a bare interpreter used by tooling.
@@ -69,7 +69,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.8.3"
+APP_VERSION = "1.8.4"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -665,14 +665,24 @@ async def scan_html_source(source_id: str) -> bool:
         try:
             client = runtime.client
             categories = await client.categories()
+            virtual_category_id = str(config.get("virtual_category_id") or "").strip()
+            if virtual_category_id:
+                categories = [
+                    category
+                    for category in categories
+                    if category.remote_id == virtual_category_id
+                ]
+                if not categories:
+                    raise HtmlSourceError("HTML 虚拟媒体库分类不存在")
             wanted_ids = set()
             category_order = 0
             for category in categories:
                 category_order += 1
                 items = await client.list_items(category.remote_id)
                 slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
-                child_id = f"html-{source_id}-{slug}"
-                wanted_ids.add(child_id)
+                child_id = source_id if virtual_category_id else f"html-{source_id}-{slug}"
+                if not virtual_category_id:
+                    wanted_ids.add(child_id)
                 child = await asyncio.to_thread(database.get_media_source, child_id)
                 values = {
                     "id": child_id,
@@ -689,11 +699,19 @@ async def scan_html_source(source_id: str) -> bool:
                     "username": "",
                     "password": "",
                     "enabled": True,
-                    "parent_source_id": source_id,
+                    # A category-only child keeps the parent it was generated
+                    # from. A standalone source materializes one child per
+                    # category, while a category-only source updates itself.
+                    "parent_source_id": config.get("parent_source_id")
+                    or (None if virtual_category_id else source_id),
                     "virtual_category_id": category.remote_id,
                     "virtual_category_name": category.name,
                     "virtual_category_type": "html",
-                    "sort_order": category_order,
+                    "sort_order": (
+                        child.get("sort_order", category_order)
+                        if virtual_category_id and child
+                        else category_order
+                    ),
                 }
                 if child:
                     await asyncio.to_thread(database.update_media_source, child_id, values)
@@ -707,9 +725,9 @@ async def scan_html_source(source_id: str) -> bool:
                         rows.append(
                             {
                                 "path": episode_path,
-                                "name": f"第{number}集.m3u8",
+                                "name": f"{item.name} 第{number:02d}集.m3u8",
                                 "size": 0,
-                                "modified": None,
+                                "modified": item.published_at,
                                 "thumb": item.poster_url,
                                 "author": None,
                                 "duration_seconds": None,
@@ -718,11 +736,32 @@ async def scan_html_source(source_id: str) -> bool:
                             }
                         )
                 await asyncio.to_thread(database.replace_scan, rows, source=child_id)
-            await asyncio.to_thread(
-                database.delete_tvbox_children_not_in,
-                source_id,
-                tuple(wanted_ids),
-            )
+                if client.is_91crdjai:
+                    await asyncio.to_thread(
+                        database.sync_remote_drama_index,
+                        child_id,
+                        category.remote_id,
+                        [
+                            {
+                                "remote_id": item.remote_id,
+                                "name": item.name,
+                                "poster_url": item.poster_url,
+                                "overview": item.overview,
+                                "tags": item.tags,
+                            }
+                            for item in items
+                        ],
+                    )
+            if not virtual_category_id:
+                await asyncio.to_thread(
+                    database.delete_tvbox_children_not_in,
+                    source_id,
+                    tuple(wanted_ids),
+                )
+            # Category libraries are materialised during the scan. Rebuild the
+            # registry only after all rows are committed so the current process
+            # exposes the same child sources the next process will load.
+            await source_registry.reload()
             now = int(time.time())
             source_state.update(
                 {
@@ -1844,12 +1883,52 @@ def public_source(
         "virtualCategoryId": source.get("virtual_category_id") or None,
         "virtualCategoryName": source.get("virtual_category_name") or None,
         "virtualCategoryType": source.get("virtual_category_type") or None,
+        "sourceGroupId": _source_group_id(source),
+        "sourceGroupName": _source_group_name(source),
     }
     if movie_metadata is not None:
         payload["movieMetadata"] = movie_metadata
     if drama_metadata is not None:
         payload["dramaMetadata"] = drama_metadata
     return payload
+
+
+def _source_group_id(source: dict[str, Any]) -> str:
+    parent_id = str(source.get("parent_source_id") or "")
+    if parent_id:
+        return f"parent:{parent_id}"
+    provider = str(source.get("provider") or "alist").lower()
+    if provider in {"alist", "openlist"}:
+        identity = json.dumps(
+            [
+                "alist",
+                str(source.get("section") or ""),
+                str(source.get("base_url") or "").rstrip("/"),
+                bool(source.get("anonymous")),
+                str(source.get("username") or ""),
+                str(source.get("token") or ""),
+                str(source.get("password") or ""),
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return "connection:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"source:{source['id']}"
+
+
+def _source_group_name(source: dict[str, Any]) -> str:
+    parent_id = str(source.get("parent_source_id") or "")
+    if parent_id:
+        parent = database.get_media_source(parent_id)
+        if parent:
+            return str(parent.get("name") or "媒体源")
+    provider = str(source.get("provider") or "alist").lower()
+    return {
+        "alist": "AList",
+        "openlist": "AList",
+        "tvbox": str(source.get("name") or "TVBox"),
+        "html": str(source.get("name") or "网络媒体源"),
+    }.get(provider, str(source.get("name") or "媒体源"))
 
 
 def _artwork_token(source_url: Any) -> str:
@@ -3893,7 +3972,10 @@ async def play(video_id: int, refresh: bool = False, episode: int = 0):
         raw_url,
         status_code=302,
         headers={
-            "Cache-Control": "private, max-age=300",
+            "Cache-Control": (
+                "no-store" if runtime.config["provider"] == "html"
+                else "private, max-age=300"
+            ),
             "Vary": "Cookie",
             "X-Robots-Tag": "noindex",
         },
@@ -4063,6 +4145,98 @@ def _movie_group_payload(
     }
 
 
+def _movie_source_catalog(
+    source_ids: tuple[str, ...],
+    counts: dict[str, int],
+) -> list[dict[str, Any]]:
+    """Collapse physical movie libraries into the source layer shown in UI.
+
+    A TVBox/HTML parent owns generated child libraries.  Legacy AList/OpenList
+    installs instead stored one row per root folder, so those rows are grouped
+    by connection identity without changing their database ids.
+    """
+    records = {
+        str(source["id"]): source
+        for source in database.list_media_sources(include_disabled=False)
+    }
+    children_by_parent: dict[str, set[str]] = {}
+    for source_id in source_ids:
+        parent_id = str(records.get(source_id, {}).get("parent_source_id") or "")
+        if parent_id:
+            children_by_parent.setdefault(parent_id, set()).add(source_id)
+
+    groups: dict[str, dict[str, Any]] = {}
+    for source_id in source_ids:
+        source = records.get(source_id)
+        if source is None:
+            continue
+        provider = str(source.get("provider") or "alist").lower()
+        parent_id = str(source.get("parent_source_id") or "")
+
+        # Generated parents are configuration containers, not selectable
+        # libraries. Their children are the actual media-library entries.
+        if not parent_id and provider in {"tvbox", "html"} and children_by_parent.get(source_id):
+            continue
+
+        parent = records.get(parent_id) if parent_id else None
+        if parent is not None:
+            group_id = _source_group_id(source)
+            group_provider = str(parent.get("provider") or provider).lower()
+            group_name = str(parent.get("name") or source.get("name") or "媒体源")
+        elif provider in {"alist", "openlist"}:
+            group_id = _source_group_id(source)
+            group_provider = "alist"
+            group_name = "AList"
+        else:
+            group_id = f"source:{source_id}"
+            group_provider = provider
+            group_name = str(source.get("name") or source_id)
+
+        group = groups.setdefault(
+            group_id,
+            {
+                "id": group_id,
+                "name": group_name,
+                "provider": group_provider,
+                "libraryIds": [],
+                "total": 0,
+            },
+        )
+        group["libraryIds"].append(source_id)
+        group["total"] += int(counts.get(source_id, 0) or 0)
+
+    for group in groups.values():
+        libraries = group["libraryIds"]
+        if len(libraries) > 1 and group["provider"] in {"alist", "openlist"}:
+            group["name"] = "AList" if group["provider"] == "alist" else "OpenList"
+        group["libraryCount"] = len(libraries)
+    return list(groups.values())
+
+
+def _section_source_selection(
+    section: str,
+    source_id: str | None,
+) -> tuple[tuple[str, ...], str | None, list[dict[str, Any]]]:
+    """Resolve a UI source id to its physical libraries for any section.
+
+    The source picker intentionally exposes one parent/connection entry while
+    the database keeps one row per virtual category or root folder. Keeping
+    this expansion in one helper prevents drama endpoints from accidentally
+    accepting only physical ids while movie endpoints accept grouped ids.
+    """
+    physical = source_registry.ids(section)
+    counts = {source: 0 for source in physical}
+    catalog = _movie_source_catalog(physical, counts)
+    if not source_id:
+        return physical, None, catalog
+    selected = next((item for item in catalog if item["id"] == source_id), None)
+    if selected is not None:
+        return tuple(selected["libraryIds"]), selected["id"], catalog
+    if source_id in physical:
+        return (source_id,), source_id, catalog
+    raise HTTPException(status_code=404, detail="Media source not found")
+
+
 @app.get("/api/movies/groups")
 async def movie_groups(
     q: str = Query(default="", max_length=100),
@@ -4070,6 +4244,7 @@ async def movie_groups(
     sort: str = Query(default="cover", pattern="^(cover|title|time)$"),
     dir: str = Query(default="", pattern="^(asc|desc|)$"),
     sorts: str = Query(default="", max_length=2000),
+    source_id: str | None = Query(default=None, alias="sourceId", max_length=160),
 ) -> dict[str, Any]:
     """Group the wall by media source so the UI mirrors how libraries are added.
 
@@ -4089,7 +4264,17 @@ async def movie_groups(
         search=search,
         sources=sources,
     )
-    ordered = [source for source in sources if counts.get(source, 0) > 0]
+    source_catalog = _movie_source_catalog(sources, counts)
+    selected_source = None
+    if source_id:
+        selected_source = next(
+            (item for item in source_catalog if item["id"] == source_id),
+            None,
+        )
+        if selected_source is None:
+            raise HTTPException(status_code=404, detail="Media source not found")
+    selected_ids = tuple(selected_source["libraryIds"]) if selected_source else sources
+    ordered = [source for source in selected_ids if counts.get(source, 0) > 0]
 
     def sort_for(source_id: str) -> tuple[str, str]:
         token = per_source_sort.get(source_id)
@@ -4130,10 +4315,12 @@ async def movie_groups(
         )
     return {
         "groups": groups,
-        "total": sum(counts.get(source, 0) for source in ordered),
+        "sources": source_catalog,
+        "selectedSourceId": selected_source["id"] if selected_source else None,
+        "total": sum(counts.get(source, 0) for source in selected_ids),
         "scan": {
             "running": any(
-                scan_state["sources"].get(source, {}).get("running") for source in sources
+                scan_state["sources"].get(source, {}).get("running") for source in selected_ids
             )
         },
     }
@@ -4451,6 +4638,7 @@ async def movie_backdrop(
 
 
 def _drama_group_payload(
+    source_id: str,
     category: str,
     rows: list[dict[str, Any]],
     *,
@@ -4459,7 +4647,12 @@ def _drama_group_payload(
 ) -> dict[str, Any]:
     loaded = offset + len(rows)
     return {
-        "groupId": category,
+        # The category name alone is not unique once two network sources are
+        # mounted. Keep the opaque group id stable for the client, while the
+        # physical source and category remain explicit query dimensions.
+        "groupId": f"{source_id}|{category}",
+        "sourceId": source_id,
+        "category": category,
         "name": category,
         "items": [public_drama(row) for row in rows],
         "total": total,
@@ -4471,22 +4664,52 @@ def _drama_group_payload(
 async def drama_groups(
     q: str = Query(default="", max_length=100),
     perGroup: int = Query(default=6, ge=1, le=24),
+    source_id: str | None = Query(default=None, alias="sourceId", max_length=160),
 ) -> dict[str, Any]:
-    """Group the drama wall by the downloader's first-level folders.
+    """Group the drama wall by source, then by the source's category folders.
 
     The short-drama source is one library of four categories ("短剧", "漫剧",
     …), so the wall mirrors those folders the way the movie wall mirrors the
     media sources. Counting first keeps a category without an indexed series
     out of the wall instead of rendering an empty section.
     """
-    sources = source_registry.ids("drama")
+    all_sources = source_registry.ids("drama")
+    sources = all_sources
     search = q.strip()
-    counts = await asyncio.to_thread(
-        database.drama_category_counts,
-        search=search,
-        sources=sources,
+    source_counts = await asyncio.gather(
+        *(
+            asyncio.to_thread(
+                database.drama_category_counts,
+                search=search,
+                sources=(source,),
+            )
+            for source in sources
+        )
     )
-    ordered = [category for category, total in counts.items() if total > 0]
+    counts_by_source = {
+        source: counts
+        for source, counts in zip(sources, source_counts)
+    }
+    totals = {
+        source: sum(counts.values())
+        for source, counts in counts_by_source.items()
+    }
+    source_catalog = _movie_source_catalog(all_sources, totals)
+    selected_source = None
+    if source_id:
+        selected_source = next(
+            (item for item in source_catalog if item["id"] == source_id),
+            None,
+        )
+        if selected_source is None:
+            raise HTTPException(status_code=404, detail="Media source not found")
+    selected_ids = tuple(selected_source["libraryIds"]) if selected_source else all_sources
+    groups_spec = [
+        (source, category, total)
+        for source in selected_ids
+        for category, total in counts_by_source.get(source, {}).items()
+        if total > 0
+    ]
     pages = await asyncio.gather(
         *(
             asyncio.to_thread(
@@ -4494,15 +4717,21 @@ async def drama_groups(
                 search=search,
                 limit=perGroup,
                 offset=0,
-                sources=sources,
+                sources=(source,),
                 category=category,
             )
-            for category in ordered
+            for source, category, _total in groups_spec
         )
     )
     groups = [
-        _drama_group_payload(category, rows, total=counts[category], offset=0)
-        for category, rows in zip(ordered, pages)
+        _drama_group_payload(
+            source,
+            category,
+            rows,
+            total=total,
+            offset=0,
+        )
+        for (source, category, total), rows in zip(groups_spec, pages)
     ]
     if groups:
         # Same reasoning as the movie wall: every category is warmed so a section
@@ -4518,11 +4747,13 @@ async def drama_groups(
         )
     return {
         "groups": groups,
-        "total": sum(counts.get(category, 0) for category in ordered),
+        "sources": source_catalog,
+        "selectedSourceId": selected_source["id"] if selected_source else None,
+        "total": sum(totals.get(source, 0) for source in selected_ids),
         "scan": {
             "running": any(
                 scan_state["sources"].get(source, {}).get("running")
-                for source in sources
+                for source in selected_ids
             )
         },
     }
@@ -4535,8 +4766,11 @@ async def dramas(
     offset: int = Query(default=0, ge=0),
     category: str = Query(default="", max_length=100),
     sort: Literal["cover", "newest", "oldest", "name"] = Query(default="cover"),
+    source_id: str | None = Query(default=None, alias="sourceId", max_length=160),
 ) -> dict[str, Any]:
-    sources = source_registry.ids("drama")
+    sources, _selected_source_id, _source_catalog = _section_source_selection(
+        "drama", source_id
+    )
     search = q.strip()
     scope = category.strip()
     rows, total = await asyncio.gather(
@@ -4594,13 +4828,16 @@ def next_drama_episode_id(drama_id: str, video_id: int) -> int | None:
 @app.get("/api/dramas/recent")
 async def recent_dramas(
     limit: int = Query(default=10, ge=1, le=24),
+    source_id: str | None = Query(default=None, alias="sourceId", max_length=160),
 ) -> dict[str, Any]:
     """The series to pick back up, one entry per show, newest watch first.
 
     Declared before ``/api/dramas/{drama_id}`` so the literal path is matched
     as a path rather than read as a series id.
     """
-    sources = source_registry.ids("drama")
+    sources, _selected_source_id, _source_catalog = _section_source_selection(
+        "drama", source_id
+    )
     rows = await asyncio.to_thread(
         database.recent_dramas,
         sources=sources,
@@ -4644,6 +4881,41 @@ async def drama_detail(drama_id: str) -> dict[str, Any]:
     )
     if not row:
         raise HTTPException(status_code=404, detail="Drama not found")
+    if row.get("metadata_status") != "matched":
+        try:
+            runtime = source_registry.get(str(row["source"]))
+            client = runtime.client
+            if (
+                runtime.config["provider"] == "html"
+                and client.is_91crdjai
+                and str(row.get("code") or "").isdigit()
+            ):
+                fallback = HtmlSourceItem(
+                    remote_id=str(row["code"]),
+                    name=str(row.get("title") or row.get("folder_title") or ""),
+                    poster_url=str(row.get("poster_url") or ""),
+                    year=None,
+                    overview=str(row.get("overview") or ""),
+                    tags=_metadata_list(row.get("tags")),
+                    episode_count=int(row.get("episode_count") or 0),
+                )
+                metadata = await client.video_metadata(str(row["code"]), fallback)
+                await asyncio.to_thread(
+                    database.update_drama_metadata,
+                    drama_id,
+                    title=metadata.name,
+                    overview=metadata.overview,
+                    tags=json.dumps(metadata.tags, ensure_ascii=False),
+                    poster_url=metadata.poster_url,
+                    metadata_status="matched",
+                )
+                row = await asyncio.to_thread(
+                    database.get_drama,
+                    drama_id,
+                    sources=source_registry.ids("drama"),
+                ) or row
+        except (HtmlSourceError, KeyError) as exc:
+            logger.info("Could not refresh 91crdjai metadata for %s: %s", drama_id, exc)
     episodes = await asyncio.to_thread(database.drama_episodes, drama_id)
     # Order at read time with the same key the index used, so a rescan and a
     # running client can never disagree about what "next episode" means.
@@ -4677,11 +4949,58 @@ async def drama_poster(
     )
     if not row or not str(row.get("poster_url") or "").strip():
         raise HTTPException(status_code=404, detail="Drama poster not found")
-    return await _proxy_movie_image(
-        row["poster_url"],
-        request.headers.get("if-none-match"),
-        _requested_image_width(w),
-    )
+    source_url = row["poster_url"]
+    try:
+        return await _proxy_movie_image(
+            source_url,
+            request.headers.get("if-none-match"),
+            _requested_image_width(w),
+        )
+    except HTTPException as exc:
+        # 91crdj artwork URLs are signed just like its playback URLs. The
+        # cached bytes remain useful, but once a cache miss meets an expired
+        # signature, refresh the cover through the site's metadata API and
+        # retry once. This keeps the client-facing poster URL stable without
+        # making every poster request hit the remote API.
+        if exc.status_code not in {404, 502}:
+            raise
+        try:
+            runtime = source_registry.get(str(row["source"]))
+            client = runtime.client
+            if not (
+                runtime.config["provider"] == "html"
+                and client.is_91crdjai
+                and str(row.get("code") or "").isdigit()
+            ):
+                raise exc
+            fallback = HtmlSourceItem(
+                remote_id=str(row["code"]),
+                name=str(row.get("title") or row.get("folder_title") or ""),
+                poster_url=str(source_url),
+                year=None,
+                overview=str(row.get("overview") or ""),
+                tags=_metadata_list(row.get("tags")),
+                episode_count=int(row.get("episode_count") or 0),
+            )
+            metadata = await client.video_metadata(str(row["code"]), fallback)
+            if not metadata.poster_url:
+                raise exc
+            await asyncio.to_thread(
+                database.update_drama_metadata,
+                drama_id,
+                title=metadata.name,
+                overview=metadata.overview,
+                tags=json.dumps(metadata.tags, ensure_ascii=False),
+                poster_url=metadata.poster_url,
+                metadata_status="matched",
+            )
+            return await _proxy_movie_image(
+                metadata.poster_url,
+                request.headers.get("if-none-match"),
+                _requested_image_width(w),
+            )
+        except (HtmlSourceError, KeyError):
+            raise exc
 
 
 @app.get("/api/videos/{video_id}/poster")

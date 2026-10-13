@@ -59,6 +59,24 @@ class PlaybackPreferences(context: Context) {
         get() = MovieWallView.fromValue(preferences.getString(KEY_MOVIE_WALL_VIEW, null))
         set(value) = preferences.edit().putString(KEY_MOVIE_WALL_VIEW, value.apiValue).apply()
 
+    var movieSourceId: String?
+        get() = preferences.getString(KEY_MOVIE_SOURCE_ID, null)?.takeIf { it.isNotBlank() }
+        set(value) {
+            preferences.edit().apply {
+                if (value.isNullOrBlank()) remove(KEY_MOVIE_SOURCE_ID)
+                else putString(KEY_MOVIE_SOURCE_ID, value)
+            }.apply()
+        }
+
+    var dramaSourceId: String?
+        get() = preferences.getString(KEY_DRAMA_SOURCE_ID, null)?.takeIf { it.isNotBlank() }
+        set(value) {
+            preferences.edit().apply {
+                if (value.isNullOrBlank()) remove(KEY_DRAMA_SOURCE_ID)
+                else putString(KEY_DRAMA_SOURCE_ID, value)
+            }.apply()
+        }
+
     /**
      * The order the wall itself is browsed in. It survives a restart so the
      * wall comes back the way the user left it.
@@ -376,6 +394,8 @@ class PlaybackPreferences(context: Context) {
         const val KEY_MODE = "mode"
         const val KEY_SKIN = "skin"
         const val KEY_MOVIE_WALL_VIEW = "movie_wall_view"
+        const val KEY_MOVIE_SOURCE_ID = "movie_source_id"
+        const val KEY_DRAMA_SOURCE_ID = "drama_source_id"
         const val KEY_MOVIE_WALL_SORT = "movie_wall_sort"
         const val KEY_MUTED = "muted"
         const val KEY_ASMR_VIDEO_BACKGROUND = "asmr_video_background"

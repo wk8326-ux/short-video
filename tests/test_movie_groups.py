@@ -75,6 +75,18 @@ async def test_the_wall_is_split_into_one_section_per_media_source(monkeypatch, 
     assert len(second["items"]) == 2
     assert second["total"] == 2
     assert second["nextOffset"] is None
+    assert len(body["sources"]) == 1
+    assert body["sources"][0]["libraryCount"] == 2
+    assert set(body["sources"][0]["libraryIds"]) == {big, small}
+
+    with TestClient(main.app) as client:
+        selected = client.get(
+            "/api/movies/groups",
+            params={"sourceId": body["sources"][0]["id"]},
+            headers=headers_for(main),
+        ).json()
+    assert [group["sourceId"] for group in selected["groups"]] == [big, small]
+    assert selected["selectedSourceId"] == body["sources"][0]["id"]
 
 
 @pytest.mark.asyncio

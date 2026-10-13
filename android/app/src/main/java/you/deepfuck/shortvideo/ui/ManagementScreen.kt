@@ -399,20 +399,80 @@ private fun SourceList(
     onEdit: (MediaLibrarySource) -> Unit,
     onDelete: (MediaLibrarySource) -> Unit,
 ) {
+    val grouped = sources.groupBy { it.sourceGroupId ?: it.parentSourceId ?: it.id }
+    val order = sources.map { it.sourceGroupId ?: it.parentSourceId ?: it.id }.distinct()
     Column(Modifier.fillMaxWidth()) {
-        sources.forEachIndexed { index, source ->
+        order.forEachIndexed { index, groupId ->
+            val members = grouped[groupId].orEmpty()
+            if (members.isEmpty()) return@forEachIndexed
+            val parent = members.firstOrNull { candidate ->
+                candidate.parentSourceId.isNullOrBlank() &&
+                    members.any { child -> child.parentSourceId == candidate.id }
+            }
+            val libraries = members.filterNot { it.id == parent?.id }
             if (index > 0) Spacer(Modifier.height(8.dp))
-            key(source.id) {
-                MediaSourceRow(
-                    source = source,
-                    starting = "scan-${source.id}" in adminActions,
-                    deleting = "delete-source-${source.id}" in adminActions,
-                    onScan = onScan,
-                    onEdit = { onEdit(source) },
-                    onDelete = { onDelete(source) },
+            if (parent != null && (parent.provider == "tvbox" || parent.provider == "html")) {
+                key(parent.id) {
+                    MediaSourceRow(
+                        source = parent,
+                        starting = "scan-${parent.id}" in adminActions,
+                        deleting = "delete-source-${parent.id}" in adminActions,
+                        onScan = onScan,
+                        onEdit = { onEdit(parent) },
+                        onDelete = { onDelete(parent) },
+                    )
+                }
+            } else {
+                SourceGroupHeader(
+                    name = members.firstNotNullOfOrNull { it.sourceGroupName }
+                        ?: members.first().name,
+                    provider = members.first().provider,
+                    libraryCount = members.size,
+                    itemCount = members.sumOf { it.videos },
                 )
             }
+            libraries.forEach { child ->
+                Spacer(Modifier.height(4.dp))
+                key(child.id) {
+                    MediaSourceRow(
+                        source = child,
+                        starting = "scan-${child.id}" in adminActions,
+                        deleting = "delete-source-${child.id}" in adminActions,
+                        onScan = onScan,
+                        onEdit = { onEdit(child) },
+                        onDelete = { onDelete(child) },
+                        nested = true,
+                    )
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun SourceGroupHeader(
+    name: String,
+    provider: String,
+    libraryCount: Int,
+    itemCount: Int,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .glassSurface(fill = RaisedStrong, line = Line)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Outlined.Cloud, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(20.dp))
+        Column(Modifier.weight(1f).padding(start = 10.dp)) {
+            Text(name, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+            Text(
+                "${sourceProviderLabel(provider)} · $libraryCount 个媒体库",
+                color = TextFaint,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        Text("$itemCount 条", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -643,6 +703,7 @@ private fun MediaSourceRow(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
     dragHandle: (@Composable () -> Unit)? = null,
+    nested: Boolean = false,
 ) {
     val busy = source.scan.running || starting
     // The folder count answers "how many roots does this library carry", but the
@@ -657,6 +718,7 @@ private fun MediaSourceRow(
     Column(
         Modifier
             .fillMaxWidth()
+            .padding(start = if (nested) 20.dp else 0.dp)
             .glassSurface(fill = Raised, line = Line)
             // The root chip sets the name row at 32dp instead of the 20dp a bare
             // text line took, so the top inset gives back the difference and the
@@ -719,7 +781,8 @@ private fun MediaSourceRow(
             }
             Spacer(Modifier.width(8.dp))
             Text(
-                source.section.label,
+                source.virtualCategoryName
+                    ?: if (nested) "媒体库" else sourceProviderLabel(source.provider),
                 color = AccentSoft,
                 style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
                 maxLines = 1,
@@ -821,6 +884,14 @@ private fun MediaSourceRow(
             }
         }
     }
+}
+
+private fun sourceProviderLabel(provider: String): String = when (provider.lowercase()) {
+    "alist" -> "AList 源"
+    "openlist" -> "OpenList 源"
+    "tvbox" -> "TVBox 源"
+    "html" -> "网络媒体源"
+    else -> "媒体源"
 }
 
 // The question this list has to answer at a glance is "which library is stale",
@@ -1012,12 +1083,16 @@ private fun MediaSourceDialog(
                 FieldGroup("归属板块", Icons.Outlined.Category) {
                     ChoiceRow(
                         label = "归属板块",
-                        choices = listOf(
+                        choices = when (provider) {
+                            "tvbox" -> listOf("movie" to "电影")
+                            "html" -> listOf("drama" to "短剧")
+                            else -> listOf(
                             "feed" to "短视频 / 长视频",
                             "asmr" to "ASMR",
                             "movie" to "电影",
                             "drama" to "短剧",
-                        ),
+                            )
+                        },
                         selected = section.apiValue,
                     ) { value ->
                         val picked = LibrarySection.entries.first { it.apiValue == value }
@@ -1035,7 +1110,11 @@ private fun MediaSourceDialog(
                             "html" to "HTML 源",
                         ),
                         selected = provider,
-                        onSelected = { provider = it },
+                        onSelected = {
+                            provider = it
+                            if (it == "tvbox") section = LibrarySection.MOVIE
+                            if (it == "html") section = LibrarySection.DRAMA
+                        },
                     )
                     if (section == LibrarySection.ASMR) {
                         ChoiceRow(
@@ -1070,23 +1149,25 @@ private fun MediaSourceDialog(
                         options = knownAddresses,
                         onPick = { baseUrl = it },
                     )
-                    RootPathFields(
-                        roots = rootPaths,
-                        onRoots = { rootPaths = it },
-                        knownRoots = knownRoots,
-                    )
-                    OutlinedTextField(
-                        value = excludedPaths.joinToString("\n"),
-                        onValueChange = { value ->
-                            excludedPaths = value.lines().map(String::trim).filter(String::isNotBlank).distinct()
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("排除路径（每行一条）") },
-                        placeholder = { Text("/asmr/中文音声/小元") },
-                        leadingIcon = { Icon(Icons.Outlined.Block, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                        minLines = 2,
-                        maxLines = 5,
-                    )
+                    if (!isTvBox && !isHtmlSource) {
+                        RootPathFields(
+                            roots = rootPaths,
+                            onRoots = { rootPaths = it },
+                            knownRoots = knownRoots,
+                        )
+                        OutlinedTextField(
+                            value = excludedPaths.joinToString("\n"),
+                            onValueChange = { value ->
+                                excludedPaths = value.lines().map(String::trim).filter(String::isNotBlank).distinct()
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("排除路径（每行一条）") },
+                            placeholder = { Text("/asmr/中文音声/小元") },
+                            leadingIcon = { Icon(Icons.Outlined.Block, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            minLines = 2,
+                            maxLines = 5,
+                        )
+                    }
                     if (isTvBox) {
                         Text(
                             "填写一个 TVBox JSON、Base64 或 HEX 配置链接；后端会自动生成分类媒体库",

@@ -42,8 +42,10 @@ import androidx.compose.material.icons.automirrored.outlined.Sort
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.LiveTv
+import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -110,6 +112,7 @@ internal fun DramaScreen(
     onToggleFavorite: (DramaItem) -> Unit,
     onStopPlayback: () -> Unit,
     onOpenGroup: (String) -> Unit,
+    onDramaSource: (String) -> Unit,
     onCloseGroup: () -> Unit,
     onLoadMoreGroup: () -> Unit,
     onSortGroup: (String) -> Unit,
@@ -215,6 +218,7 @@ internal fun DramaScreen(
         onSelect = onSelect,
         onResume = onResume,
         onOpenGroup = onOpenGroup,
+        onDramaSource = onDramaSource,
         onRetry = onRetry,
     )
 }
@@ -248,9 +252,79 @@ private fun DramaWall(
     onSelect: (DramaItem) -> Unit,
     onResume: (DramaItem) -> Unit,
     onOpenGroup: (String) -> Unit,
+    onDramaSource: (String) -> Unit,
     onRetry: () -> Unit,
 ) {
     AppScreenScaffold {
+        var sourceMenuOpen by remember { mutableStateOf(false) }
+        if (state.dramaSources.isNotEmpty()) {
+            var libraryMenuOpen by remember { mutableStateOf(false) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box {
+                    GlassIconButton(label = "切换短剧媒体源", onClick = { sourceMenuOpen = true }) {
+                        Icon(Icons.Outlined.Cloud, contentDescription = null)
+                    }
+                    DropdownMenu(
+                        expanded = sourceMenuOpen,
+                        onDismissRequest = { sourceMenuOpen = false },
+                        containerColor = RaisedStrong,
+                        shape = GlassPanelShape,
+                        shadowElevation = 0.dp,
+                    ) {
+                        state.dramaSources.forEach { source ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(source.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text(
+                                            "${source.libraryCount} 个媒体库 · ${source.total} 部",
+                                            color = TextFaint,
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                    }
+                                },
+                                trailingIcon = if (source.id == state.selectedDramaSourceId) {
+                                    { Icon(Icons.Outlined.Check, contentDescription = "当前媒体源") }
+                                } else null,
+                                onClick = {
+                                    sourceMenuOpen = false
+                                    onDramaSource(source.id)
+                                },
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.weight(1f))
+                Box {
+                    GlassIconButton(label = "短剧媒体库导航", onClick = { libraryMenuOpen = true }) {
+                        Icon(Icons.Outlined.Menu, contentDescription = null)
+                    }
+                    DropdownMenu(
+                        expanded = libraryMenuOpen,
+                        onDismissRequest = { libraryMenuOpen = false },
+                        containerColor = RaisedStrong,
+                        shape = GlassPanelShape,
+                        shadowElevation = 0.dp,
+                    ) {
+                        state.dramaGroups.forEach { group ->
+                            DropdownMenuItem(
+                                text = { Text("${group.name} · ${group.total}") },
+                                onClick = {
+                                    libraryMenuOpen = false
+                                    onOpenGroup(group.groupId)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
         when {
             state.dramaGroups.isEmpty() && state.dramaError != null -> DramaWallState(
                 title = state.dramaError,

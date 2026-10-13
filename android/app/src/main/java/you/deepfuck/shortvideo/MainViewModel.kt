@@ -31,6 +31,7 @@ import you.deepfuck.shortvideo.data.DramaDetail
 import you.deepfuck.shortvideo.data.DramaEpisode
 import you.deepfuck.shortvideo.data.DramaGroup
 import you.deepfuck.shortvideo.data.DramaItem
+import you.deepfuck.shortvideo.data.DramaSource
 import you.deepfuck.shortvideo.data.FeedMode
 import you.deepfuck.shortvideo.data.LibraryScanStatus
 import you.deepfuck.shortvideo.data.LibraryResult
@@ -46,6 +47,7 @@ import you.deepfuck.shortvideo.data.MovieBrowseNavigation
 import you.deepfuck.shortvideo.data.MovieItem
 import you.deepfuck.shortvideo.data.MovieMetadataEntity
 import you.deepfuck.shortvideo.data.MovieMetadataPage
+import you.deepfuck.shortvideo.data.MovieSource
 import you.deepfuck.shortvideo.data.MovieWallView
 import you.deepfuck.shortvideo.data.MOVIE_SORT_DEFAULT
 import you.deepfuck.shortvideo.data.PlaybackPreferences
@@ -118,6 +120,8 @@ data class AppUiState(
     val movieQuery: String = "",
     val movieSort: String = "cover",
     val movieGroups: List<MovieGroup> = emptyList(),
+    val movieSources: List<MovieSource> = emptyList(),
+    val selectedMovieSourceId: String? = null,
     val movieGroupsLoading: Boolean = false,
     val movieWallView: MovieWallView = MovieWallView.SHELVES,
     val recentMovies: List<MovieItem> = emptyList(),
@@ -159,10 +163,14 @@ data class AppUiState(
     val dramaError: String? = null,
     val dramaQuery: String = "",
     val dramaGroups: List<DramaGroup> = emptyList(),
+    val dramaSources: List<DramaSource> = emptyList(),
+    val selectedDramaSourceId: String? = null,
     val dramaGroupsLoading: Boolean = false,
     // One drama category opened full-screen ("加载更多"): its own cursor, so the
     // wall behind it keeps whatever it had loaded.
     val openDramaGroupId: String? = null,
+    val openDramaGroupSourceId: String = "",
+    val openDramaGroupCategory: String = "",
     val openDramaGroupName: String = "",
     val openDramaGroupItems: List<DramaItem> = emptyList(),
     val openDramaGroupTotal: Int = 0,
@@ -212,6 +220,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             searchHistory = preferences.searchHistory(),
             muted = preferences.muted(initialSurface),
             movieWallView = preferences.movieWallView,
+            selectedMovieSourceId = preferences.movieSourceId,
+            selectedDramaSourceId = preferences.dramaSourceId,
             movieSort = preferences.movieWallSort.ifBlank { MOVIE_SORT_DEFAULT },
             asmrVideoBackgroundPlayback = preferences.asmrVideoBackgroundPlayback,
             selectedAuthor = preferences.selectedAsmrAuthor,
@@ -1025,6 +1035,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = mutableState.value.copy(movieWallView = view)
     }
 
+    fun setMovieSource(sourceId: String) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.MOVIE || state.selectedMovieSourceId == sourceId) return
+        if (state.movieSources.none { it.id == sourceId }) return
+        preferences.movieSourceId = sourceId
+        movieJob?.cancel()
+        movieRequestGeneration += 1L
+        movieCatalogDirty = true
+        mutableState.value = state.copy(
+            selectedMovieSourceId = sourceId,
+            movieGroups = emptyList(),
+            movieTotal = 0,
+            movieGroupsLoading = false,
+            movieLoading = false,
+            movieError = null,
+        )
+        loadMovieGroups(reset = true)
+    }
+
+    fun setDramaSource(sourceId: String) {
+        val state = mutableState.value
+        if (state.surface != MediaSurface.DRAMA || state.selectedDramaSourceId == sourceId) return
+        if (state.dramaSources.none { it.id == sourceId }) return
+        preferences.dramaSourceId = sourceId
+        dramaJob?.cancel()
+        dramaSearchJob?.cancel()
+        dramaRequestGeneration += 1L
+        dramaCatalogDirty = true
+        mutableState.value = state.copy(
+            selectedDramaSourceId = sourceId,
+            dramaGroups = emptyList(),
+            dramaItems = emptyList(),
+            dramaTotal = 0,
+            dramaNextOffset = 0,
+            dramaGroupsLoading = false,
+            dramaLoading = false,
+            dramaError = null,
+        )
+        loadDramas(reset = true)
+        loadRecentDramas()
+    }
+
     fun setMovieQuery(query: String) {
         if (query == mutableState.value.movieQuery) return
         movieJob?.cancel()
@@ -1707,6 +1759,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val prefetched = group.items
         mutableState.value = state.copy(
             openDramaGroupId = groupId,
+            openDramaGroupSourceId = group.sourceId,
+            openDramaGroupCategory = group.category.ifBlank { group.name },
             openDramaGroupName = group.name,
             openDramaGroupItems = prefetched,
             openDramaGroupTotal = group.total,
@@ -1724,6 +1778,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         dramaGroupPageGeneration += 1L
         mutableState.value = mutableState.value.copy(
             openDramaGroupId = null,
+            openDramaGroupSourceId = "",
+            openDramaGroupCategory = "",
             openDramaGroupName = "",
             openDramaGroupItems = emptyList(),
             openDramaGroupTotal = 0,
@@ -1759,6 +1815,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = mutableState.value
         if (state.surface != MediaSurface.DRAMA) return
         val groupId = state.openDramaGroupId ?: return
+        val sourceId = state.openDramaGroupSourceId
+        val category = state.openDramaGroupCategory
         val offset = if (reset) 0 else state.openDramaGroupNextOffset ?: return
         cancelDramaGroupPageLoad()
         val generation = ++dramaGroupPageGeneration
@@ -1766,7 +1824,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         dramaGroupPageJob = viewModelScope.launch {
             runApi {
                 api.dramas(
-                    category = groupId,
+                    category = category,
+                    sourceId = sourceId,
                     offset = offset,
                     limit = MediaApi.DRAMA_LIBRARY_PAGE_SIZE,
                     sort = state.openDramaGroupSort,
@@ -2640,6 +2699,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             nowPlaying = null,
             dramaError = null,
             openDramaGroupId = null,
+            openDramaGroupSourceId = "",
+            openDramaGroupCategory = "",
             openDramaGroupName = "",
             openDramaGroupItems = emptyList(),
             openDramaGroupTotal = 0,
@@ -2670,7 +2731,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val requestGeneration = ++dramaRequestGeneration
         mutableState.value = state.copy(dramaLoading = true, dramaError = null)
         dramaJob = viewModelScope.launch {
-            runApi { api.dramas(query = requestedQuery, offset = offset) }
+            runApi {
+                api.dramas(
+                    query = requestedQuery,
+                    offset = offset,
+                    sourceId = state.selectedDramaSourceId
+                        ?.takeIf { id -> state.dramaSources.any { it.id == id } }
+                        .orEmpty(),
+                )
+            }
                 .onSuccess { page ->
                     val current = mutableState.value
                     if (
@@ -2727,7 +2796,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         dramaJob?.cancel()
         mutableState.value = state.copy(dramaGroupsLoading = true, dramaError = null)
         dramaJob = viewModelScope.launch {
-            runApi { api.dramaGroups(query = requestedQuery) }
+            runApi {
+                api.dramaGroups(
+                    query = requestedQuery,
+                    sourceId = state.selectedDramaSourceId
+                        ?.takeIf { id -> state.dramaSources.any { it.id == id } }
+                        .orEmpty(),
+                )
+            }
                 .onSuccess { page ->
                     val current = mutableState.value
                     if (
@@ -2736,14 +2812,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         requestedQuery != current.dramaQuery.trim()
                     ) return@onSuccess
                     dramaCatalogDirty = false
+                    val selectedSourceId = current.selectedDramaSourceId
+                        ?.takeIf { id -> page.sources.any { it.id == id } }
+                        ?: page.selectedSourceId
+                        ?: page.sources.firstOrNull { source ->
+                            source.libraryIds.any { libraryId ->
+                                page.groups.any { group -> group.sourceId == libraryId }
+                            }
+                        }?.id
+                        ?: page.sources.firstOrNull()?.id
+                    val selectedSource = page.sources.firstOrNull { it.id == selectedSourceId }
+                    preferences.dramaSourceId = selectedSourceId
+                    val visibleGroups = if (selectedSource == null) {
+                        page.groups
+                    } else {
+                        page.groups.filter { it.sourceId in selectedSource.libraryIds }
+                    }
+                    val sourceChanged = current.selectedDramaSourceId != selectedSourceId
                     mutableState.value = current.copy(
-                        dramaGroups = page.groups.map { group ->
+                        dramaSources = page.sources,
+                        selectedDramaSourceId = selectedSourceId,
+                        dramaGroups = visibleGroups.map { group ->
                             group.copy(items = group.items.map { it.withAbsolutePoster() })
                         },
-                        dramaTotal = page.total,
+                        dramaTotal = selectedSource?.total ?: page.total,
                         dramaGroupsLoading = false,
                         dramaError = null,
                     )
+                    if (sourceChanged) loadRecentDramas()
                     if (reset && page.groups.isEmpty() && page.scanRunning) {
                         delay(1_500)
                         loadDramas(reset = true)
@@ -2865,7 +2961,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         movieJob = viewModelScope.launch {
             runApi {
-                api.movieGroups(sort = requestedSort, perSourceSorts = perSourceSorts)
+                api.movieGroups(
+                    sort = requestedSort,
+                    perSourceSorts = perSourceSorts,
+                    sourceId = state.selectedMovieSourceId?.takeIf { id ->
+                        state.movieSources.any { it.id == id }
+                    },
+                )
             }
                 .onSuccess { page ->
                     val current = mutableState.value
@@ -2881,14 +2983,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     ) return@onSuccess
                     movieCatalogDirty = false
+                    val sources = page.sources
+                    val selectedSourceId = current.selectedMovieSourceId
+                        ?.takeIf { id -> sources.any { it.id == id } }
+                        ?: page.selectedSourceId
+                        ?: sources.firstOrNull { source ->
+                            source.libraryIds.any { libraryId ->
+                                page.groups.any { group -> group.sourceId == libraryId }
+                            }
+                        }?.id
+                        ?: sources.firstOrNull()?.id
+                    val selectedSource = sources.firstOrNull { it.id == selectedSourceId }
+                    preferences.movieSourceId = selectedSourceId
+                    val visibleGroups = if (selectedSource == null) {
+                        page.groups
+                    } else {
+                        page.groups.filter { it.sourceId in selectedSource.libraryIds }
+                    }
                     mutableState.value = current.copy(
-                        movieGroups = page.groups.map { group ->
+                        movieSources = sources,
+                        selectedMovieSourceId = selectedSourceId,
+                        movieGroups = visibleGroups.map { group ->
                             group.replaceItems(
                                 items = group.items.map { it.withResumePosition() },
                                 nextOffset = group.nextOffset,
                             )
                         },
-                        movieTotal = page.total,
+                        movieTotal = selectedSource?.total ?: page.total,
                         movieGroupsLoading = false,
                         movieLoading = false,
                         movieError = null,
@@ -2975,7 +3096,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // last is how a strip ended up one entry short of what was just watched.
         recentDramaJob?.cancel()
         recentDramaJob = viewModelScope.launch {
-            runApi { api.recentDramas() }
+            runApi {
+                api.recentDramas(
+                    sourceId = mutableState.value.selectedDramaSourceId
+                        ?.takeIf { id -> mutableState.value.dramaSources.any { it.id == id } }
+                        .orEmpty(),
+                )
+            }
                 .onSuccess { items ->
                     mutableState.value = mutableState.value.copy(
                         recentDramas = items.map { it.withAbsolutePoster() },

@@ -205,39 +205,28 @@ sudo docker compose up -d --build
 
 ## 上线验收
 
-### 1. 使用认证会话检查接口
+### 1. 检查健康和更新接口
 
-`/api/health`、`/api/app/update` 和 APK 下载接口都需要登录。不要把密码写进脚本或提交到 Git；验收时临时输入或从受保护的环境变量读取：
+`/api/app/update` 和 APK 下载接口不需要登录，保证旧版客户端在登录前也能完成更新。健康和管理接口仍需要认证：
 
 ```bash
 base=https://short.deepfuck.you
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-read -rsp 'App password: ' APP_PASSWORD
-printf '\n'
-curl -fsS -c "$tmp/cookies" \
-  -H 'Content-Type: application/json' \
-  --data "{\"password\":\"$APP_PASSWORD\"}" \
-  "$base/api/auth/login"
-unset APP_PASSWORD
-
-curl -fsS -b "$tmp/cookies" "$base/api/health"
-curl -fsS -b "$tmp/cookies" "$base/api/app/update"
+curl -fsS "$base/api/app/update"
 ```
 
 ### 2. 检查 APK 完整下载和断点下载
 
 ```bash
-curl -fsSI -b "$tmp/cookies" \
+curl -fsSI \
   "$base/api/app/update/apk?versionCode=<versionCode>"
 
 curl -fsS -D - -o /dev/null \
   -H 'Range: bytes=0-1023' \
-  -b "$tmp/cookies" \
   "$base/api/app/update/apk?versionCode=<versionCode>"
 
 curl -sS -o /tmp/stale-update-body -w 'HTTP %{http_code}\n' \
-  -b "$tmp/cookies" \
   "$base/api/app/update/apk?versionCode=<旧版versionCode>"
 cat /tmp/stale-update-body
 rm -f /tmp/stale-update-body

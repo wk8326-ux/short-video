@@ -53,6 +53,7 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Movie
@@ -136,6 +137,7 @@ internal fun MovieScreen(
     onBack: () -> Unit,
     onPlay: (MovieItem) -> Unit,
     onOpenGroup: (String) -> Unit,
+    onMovieSource: (String) -> Unit,
     onCloseGroup: () -> Unit,
     onGroupSort: (String) -> Unit,
     onLoadMoreGroup: () -> Unit,
@@ -279,6 +281,7 @@ internal fun MovieScreen(
         wallState = wallState,
         onSelect = onSelect,
         onOpenGroup = onOpenGroup,
+        onMovieSource = onMovieSource,
         onOpenFavorites = onOpenFavorites,
         onWallView = onWallView,
         onRetry = onRetry,
@@ -338,13 +341,19 @@ private fun MovieCatalog(
     wallState: LazyListState,
     onSelect: (MovieItem) -> Unit,
     onOpenGroup: (String) -> Unit,
+    onMovieSource: (String) -> Unit,
     onOpenFavorites: () -> Unit,
     onWallView: (MovieWallView) -> Unit,
     onRetry: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var jumpMenuOpen by remember { mutableStateOf(false) }
-    var viewMenuOpen by remember { mutableStateOf(false) }
+    var sourceMenuOpen by remember { mutableStateOf(false) }
+    val nextWallView = when (state.movieWallView) {
+        MovieWallView.SHELVES -> MovieWallView.ROWS
+        MovieWallView.ROWS -> MovieWallView.LIBRARIES
+        MovieWallView.LIBRARIES -> MovieWallView.SHELVES
+    }
     AppScreenScaffold {
         Row(
             modifier = Modifier
@@ -352,41 +361,57 @@ private fun MovieCatalog(
                 .padding(start = 12.dp, end = 12.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // How the wall draws itself. Mirrors the library menu on the right
-            // so the header reads as one symmetrical pair of controls.
+            // The left control changes the source; its library children are
+            // rendered by the menu on the right.
             Box {
                 GlassIconButton(
-                    label = "电影墙展示方式",
-                    onClick = { viewMenuOpen = true },
+                    label = "切换媒体源",
+                    onClick = { sourceMenuOpen = true },
                 ) {
-                    Icon(Icons.Outlined.GridView, contentDescription = null)
+                    Icon(Icons.Outlined.Cloud, contentDescription = null)
                 }
                 DropdownMenu(
-                    expanded = viewMenuOpen,
-                    onDismissRequest = { viewMenuOpen = false },
+                    expanded = sourceMenuOpen,
+                    onDismissRequest = { sourceMenuOpen = false },
                     containerColor = RaisedStrong,
                     shape = GlassPanelShape,
                     shadowElevation = 0.dp,
                 ) {
-                    MovieWallView.entries.forEach { option ->
+                    state.movieSources.forEach { source ->
                         DropdownMenuItem(
-                            text = { Text(option.label) },
+                            text = {
+                                Column {
+                                    Text(source.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        "${source.libraryCount} 个媒体库 · ${source.total} 部",
+                                        color = TextFaint,
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                }
+                            },
                             trailingIcon = {
-                                if (state.movieWallView == option) {
+                                if (state.selectedMovieSourceId == source.id) {
                                     Icon(Icons.Outlined.Check, contentDescription = null)
                                 }
                             },
                             onClick = {
-                                viewMenuOpen = false
-                                onWallView(option)
+                                sourceMenuOpen = false
+                                onMovieSource(source.id)
                             },
                         )
                     }
                 }
             }
             Spacer(Modifier.weight(1f))
+            GlassIconButton(
+                label = "电影墙：${state.movieWallView.label}，点击切换为${nextWallView.label}",
+                onClick = { onWallView(nextWallView) },
+            ) {
+                Icon(Icons.Outlined.GridView, contentDescription = null)
+            }
+            Spacer(Modifier.weight(1f))
             // Quick jump between libraries: the wall is grouped by media source,
-            // so the menu mirrors that order.
+            // so the menu only shows the active source's libraries.
             Box {
                 GlassIconButton(
                     label = "媒体库导航",

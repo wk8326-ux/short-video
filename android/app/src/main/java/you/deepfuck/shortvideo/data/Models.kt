@@ -387,10 +387,33 @@ data class MovieGroup(
     }
 }
 
+/** A user-facing source that owns one or more physical movie libraries. */
+data class MovieSource(
+    val id: String,
+    val name: String,
+    val provider: String,
+    val libraryIds: List<String>,
+    val libraryCount: Int,
+    val total: Int,
+) {
+    companion object {
+        fun fromJson(value: JSONObject): MovieSource = MovieSource(
+            id = value.optString("id"),
+            name = value.optString("name"),
+            provider = value.optString("provider"),
+            libraryIds = value.optStringList("libraryIds"),
+            libraryCount = value.optInt("libraryCount"),
+            total = value.optInt("total"),
+        )
+    }
+}
+
 data class MovieGroupPage(
     val groups: List<MovieGroup>,
     val total: Int,
     val scanRunning: Boolean,
+    val sources: List<MovieSource> = emptyList(),
+    val selectedSourceId: String? = null,
 )
 
 data class MovieGroupItems(
@@ -467,6 +490,8 @@ internal fun DramaItem.normalizedPosterPath(): String? {
  */
 data class DramaGroup(
     val groupId: String,
+    val sourceId: String = "",
+    val category: String = "",
     val name: String,
     val total: Int,
     val items: List<DramaItem>,
@@ -477,6 +502,8 @@ data class DramaGroup(
     companion object {
         fun fromJson(value: JSONObject): DramaGroup = DramaGroup(
             groupId = value.optString("groupId"),
+            sourceId = value.optString("sourceId"),
+            category = value.optString("category", value.optString("name")),
             name = value.optString("name"),
             total = value.optInt("total"),
             items = value.optObjectList("items", DramaItem::fromJson),
@@ -489,7 +516,30 @@ data class DramaGroupPage(
     val groups: List<DramaGroup>,
     val total: Int,
     val scanRunning: Boolean,
+    val sources: List<DramaSource> = emptyList(),
+    val selectedSourceId: String? = null,
 )
+
+/** A user-facing drama source owning one or more category libraries. */
+data class DramaSource(
+    val id: String,
+    val name: String,
+    val provider: String,
+    val libraryIds: List<String>,
+    val libraryCount: Int,
+    val total: Int,
+) {
+    companion object {
+        fun fromJson(value: JSONObject): DramaSource = DramaSource(
+            id = value.optString("id"),
+            name = value.optString("name"),
+            provider = value.optString("provider"),
+            libraryIds = value.optStringList("libraryIds"),
+            libraryCount = value.optInt("libraryCount"),
+            total = value.optInt("total"),
+        )
+    }
+}
 
 data class DramaEpisode(
     val videoId: Long,
@@ -647,6 +697,12 @@ data class MediaLibrarySource(
     val scan: LibraryScanStatus,
     val movieMetadata: MovieMetadataSummary?,
     val dramaMetadata: MovieMetadataSummary?,
+    val parentSourceId: String?,
+    val virtualCategoryId: String?,
+    val virtualCategoryName: String?,
+    val virtualCategoryType: String?,
+    val sourceGroupId: String?,
+    val sourceGroupName: String?,
 ) {
     /** Folders to show in the manager, tolerating payloads that predate [rootPaths]. */
     val effectiveRootPaths: List<String>
@@ -677,6 +733,12 @@ data class MediaLibrarySource(
             scan = LibraryScanStatus.fromJson(value.optJSONObject("scan")),
             movieMetadata = MovieMetadataSummary.fromJson(value.optJSONObject("movieMetadata")),
             dramaMetadata = MovieMetadataSummary.fromJson(value.optJSONObject("dramaMetadata")),
+            parentSourceId = value.optNullableString("parentSourceId"),
+            virtualCategoryId = value.optNullableString("virtualCategoryId"),
+            virtualCategoryName = value.optNullableString("virtualCategoryName"),
+            virtualCategoryType = value.optNullableString("virtualCategoryType"),
+            sourceGroupId = value.optNullableString("sourceGroupId"),
+            sourceGroupName = value.optNullableString("sourceGroupName"),
             )
         }
     }

@@ -228,6 +228,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         perGroup: Int = MOVIE_GROUP_SIZE,
         sort: String = MOVIE_SORT_DEFAULT,
         perSourceSorts: Map<String, String> = emptyMap(),
+        sourceId: String? = null,
     ): MovieGroupPage {
         val (field, direction) = movieSortQuery(sort)
         val target = url("/api/movies/groups").newBuilder()
@@ -245,12 +246,15 @@ class MediaApi(private val preferences: PlaybackPreferences) {
                 }
             }
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
+            .apply { if (!sourceId.isNullOrBlank()) addQueryParameter("sourceId", sourceId) }
             .build()
         val payload = getJson(target.toString())
         return MovieGroupPage(
             groups = payload.optObjectList("groups", MovieGroup::fromJson),
             total = payload.optInt("total"),
             scanRunning = payload.optJSONObject("scan")?.optBoolean("running") == true,
+            sources = payload.optObjectList("sources", MovieSource::fromJson),
+            selectedSourceId = payload.optNullableString("selectedSourceId"),
         )
     }
 
@@ -402,6 +406,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         offset: Int = 0,
         category: String = "",
         sort: String = "cover",
+        sourceId: String = "",
     ): DramaPage {
         val target = url("/api/dramas").newBuilder()
             .addQueryParameter("limit", limit.toString())
@@ -409,6 +414,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .addQueryParameter("sort", sort)
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
             .apply { if (category.isNotBlank()) addQueryParameter("category", category) }
+            .apply { if (sourceId.isNotBlank()) addQueryParameter("sourceId", sourceId) }
             .build()
         val payload = getJson(target.toString())
         val items = payload.optJSONArray("items")
@@ -433,16 +439,20 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     fun dramaGroups(
         query: String = "",
         perGroup: Int = DRAMA_GROUP_SIZE,
+        sourceId: String = "",
     ): DramaGroupPage {
         val target = url("/api/dramas/groups").newBuilder()
             .addQueryParameter("perGroup", perGroup.toString())
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
+            .apply { if (sourceId.isNotBlank()) addQueryParameter("sourceId", sourceId) }
             .build()
         val payload = getJson(target.toString())
         return DramaGroupPage(
             groups = payload.optObjectList("groups", DramaGroup::fromJson),
             total = payload.optInt("total"),
             scanRunning = payload.optJSONObject("scan")?.optBoolean("running") == true,
+            sources = payload.optObjectList("sources", DramaSource::fromJson),
+            selectedSourceId = payload.optNullableString("selectedSourceId"),
         )
     }
 
@@ -458,8 +468,14 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .optObjectList("items", MovieItem::fromJson)
 
     /** Series with an unfinished episode, newest watch first. */
-    fun recentDramas(limit: Int = RECENT_LIMIT): List<DramaItem> =
-        getJson("/api/dramas/recent?limit=$limit")
+    fun recentDramas(limit: Int = RECENT_LIMIT, sourceId: String = ""): List<DramaItem> =
+        getJson(
+            url("/api/dramas/recent").newBuilder()
+                .addQueryParameter("limit", limit.toString())
+                .apply { if (sourceId.isNotBlank()) addQueryParameter("sourceId", sourceId) }
+                .build()
+                .toString(),
+        )
             .optObjectList("items", DramaItem::fromJson)
 
     /** Fire-and-forget report of where playback stopped. */

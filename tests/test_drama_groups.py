@@ -56,7 +56,7 @@ async def test_the_wall_splits_into_one_section_per_category_folder(monkeypatch,
     assert body["total"] == 3
     assert [group["name"] for group in body["groups"]] == [SHORT, MANGA]
     short, manga = body["groups"]
-    assert short["groupId"] == SHORT
+    assert short["groupId"] == f"{source}|{SHORT}"
     assert len(short["items"]) == 1
     assert short["total"] == 2
     assert short["nextOffset"] == 1
