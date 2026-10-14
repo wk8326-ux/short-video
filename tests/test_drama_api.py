@@ -27,6 +27,12 @@ from test_drama_scan import (
 from test_scan import FakeAList, boot, serve
 
 POSTER_URL = "https://pic.tuafjz.cn/upload_01/drama/poster.jpeg?auth_key=abc"
+# The site rotates its own picture CDN; the new host serves the same AES-CBC
+# wrapper, so the proxy has to decrypt it too or it rejects the ciphertext as a
+# non-image body and every cover answers 502.
+ROTATED_POSTER_URL = (
+    "https://pic.drleao.cn/upload_01/xiao/poster.jpeg?auth_key=abc"
+)
 
 
 def _aes_cbc(payload: bytes) -> bytes:
@@ -209,6 +215,44 @@ async def test_the_poster_route_decrypts_the_picture_cdn(monkeypatch, tmp_path):
         broken = client.get(f"/api/dramas/{swap['id']}/poster", headers=headers)
         assert broken.status_code == 502
         assert len(requested) == 2
+
+        main.movie_image_client = None
+    await upstream.aclose()
+    await main.source_registry.close()
+
+
+@pytest.mark.asyncio
+async def test_the_poster_route_decrypts_the_rotated_picture_cdn(monkeypatch, tmp_path):
+    """The CDN the site moved to must be served, not answered with a 502."""
+    main = await boot(monkeypatch, tmp_path)
+    source = await scanned_drama_source(main)
+    swap = drama_rows(main, source)[SERIES_SWAP]
+    main.database.update_drama_metadata(
+        str(swap["id"]),
+        title="交换游戏",
+        poster_url=ROTATED_POSTER_URL,
+        metadata_status="matched",
+    )
+
+    jpeg = _padded_jpeg()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-type": "image/jpeg"}, content=_aes_cbc(jpeg)
+        )
+
+    upstream = httpx.AsyncClient(
+        follow_redirects=True, transport=httpx.MockTransport(handler)
+    )
+    with TestClient(main.app) as client:
+        main.movie_image_client = upstream
+        response = client.get(
+            f"/api/dramas/{swap['id']}/poster", headers=headers_for(main)
+        )
+
+        assert response.status_code == 200
+        assert response.headers["x-movie-image-cache"] == "miss"
+        assert response.content[: len(jpeg)] == jpeg
 
         main.movie_image_client = None
     await upstream.aclose()

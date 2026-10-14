@@ -93,6 +93,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
@@ -224,34 +225,7 @@ internal fun ManagementScreen(
                         Spacer(Modifier.height(8.dp))
                         Text(formatBytes(status.totalBytes), color = TextFaint)
                         Spacer(Modifier.height(18.dp))
-                        // Only the movie board has an order to edit: the server
-                        // stores one position per section, and the clip, ASMR
-                        // and drama walls do not present their sources in a
-                        // fixed sequence.
-                        if (status.sources.any { it.section == LibrarySection.MOVIE }) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    "电影板块按调整后的顺序展示",
-                                    modifier = Modifier.weight(1f),
-                                    color = TextFaint,
-                                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                                )
-                                OutlinedButton(
-                                    onClick = { ordering = true },
-                                    modifier = Modifier.heightIn(min = 40.dp),
-                                    shape = ControlShape,
-                                ) {
-                                    Icon(Icons.Outlined.SwapVert, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(Modifier.size(6.dp))
-                                    Text("调整顺序")
-                                }
-                            }
-                            Spacer(Modifier.height(12.dp))
-                        }
-                        SourceList(
+                        SectionLibraryBrowser(
                             sources = status.sources,
                             adminActions = state.adminActions,
                             onScan = onScanSource,
@@ -260,6 +234,7 @@ internal fun ManagementScreen(
                                 sourceDialogOpen = true
                             },
                             onDelete = { deletingSource = it },
+                            onOrderMovieSources = { ordering = true },
                         )
                         if (status.sources.isEmpty()) {
                             Text("尚未添加媒体源", color = TextFaint)
@@ -392,57 +367,89 @@ internal fun ManagementScreen(
 }
 
 @Composable
-private fun SourceList(
+private fun SectionLibraryBrowser(
     sources: List<MediaLibrarySource>,
     adminActions: Set<String>,
     onScan: (String) -> Unit,
     onEdit: (MediaLibrarySource) -> Unit,
     onDelete: (MediaLibrarySource) -> Unit,
+    onOrderMovieSources: () -> Unit,
 ) {
-    val grouped = sources.groupBy { it.sourceGroupId ?: it.parentSourceId ?: it.id }
-    val order = sources.map { it.sourceGroupId ?: it.parentSourceId ?: it.id }.distinct()
+    // Board tabs, then the sources of the selected board, then that source's
+    // own libraries. Three levels, so nothing has to be flattened into one
+    // long list where a TVBox source's twenty libraries would bury an AList
+    // connection underneath.
+    var section by remember { mutableStateOf(LibrarySection.entries.first()) }
+    val sectionSources = remember(sources, section) {
+        sources.filter { it.section == section }
+    }
+    val groups = remember(sectionSources) { groupSourcesForManager(sectionSources) }
+    var selectedGroupId by remember(groups) {
+        mutableStateOf(groups.firstOrNull()?.groupId)
+    }
+    val selected = groups.firstOrNull { it.groupId == selectedGroupId } ?: groups.firstOrNull()
+
     Column(Modifier.fillMaxWidth()) {
-        order.forEachIndexed { index, groupId ->
-            val members = grouped[groupId].orEmpty()
-            if (members.isEmpty()) return@forEachIndexed
-            val parent = members.firstOrNull { candidate ->
-                candidate.parentSourceId.isNullOrBlank() &&
-                    members.any { child -> child.parentSourceId == candidate.id }
-            }
-            val libraries = members.filterNot { it.id == parent?.id }
-            if (index > 0) Spacer(Modifier.height(8.dp))
-            if (parent != null && (parent.provider == "tvbox" || parent.provider == "html")) {
-                key(parent.id) {
-                    MediaSourceRow(
-                        source = parent,
-                        starting = "scan-${parent.id}" in adminActions,
-                        deleting = "delete-source-${parent.id}" in adminActions,
-                        onScan = onScan,
-                        onEdit = { onEdit(parent) },
-                        onDelete = { onDelete(parent) },
-                    )
+        ManagerSectionTabs(
+            selected = section,
+            counts = LibrarySection.entries.associateWith { entry ->
+                sources.count { it.section == entry }
+            },
+            onSelect = { section = it },
+        )
+        Spacer(Modifier.height(14.dp))
+        if (groups.isEmpty()) {
+            Text("该板块尚未添加媒体源", color = TextFaint)
+            return@Column
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.Top,
+        ) {
+            ManagerSourceRail(
+                groups = groups,
+                selectedGroupId = selected?.groupId,
+                onSelect = { selectedGroupId = it },
+                onOrder = if (section == LibrarySection.MOVIE) onOrderMovieSources else null,
+                modifier = Modifier.width(132.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                selected?.libraries?.takeIf { it.isNotEmpty() }?.let { libraries ->
+                    libraries.forEach { child ->
+                        key(child.id) {
+                            MediaSourceRow(
+                                source = child,
+                                starting = "scan-${child.id}" in adminActions,
+                                deleting = "delete-source-${child.id}" in adminActions,
+                                onScan = onScan,
+                                onEdit = { onEdit(child) },
+                                onDelete = { onDelete(child) },
+                            )
+                            Spacer(Modifier.height(6.dp))
+                        }
+                    }
                 }
-            } else {
-                SourceGroupHeader(
-                    name = members.firstNotNullOfOrNull { it.sourceGroupName }
-                        ?: members.first().name,
-                    provider = members.first().provider,
-                    libraryCount = members.size,
-                    itemCount = members.sumOf { it.videos },
-                )
-            }
-            libraries.forEach { child ->
-                Spacer(Modifier.height(4.dp))
-                key(child.id) {
-                    MediaSourceRow(
-                        source = child,
-                        starting = "scan-${child.id}" in adminActions,
-                        deleting = "delete-source-${child.id}" in adminActions,
-                        onScan = onScan,
-                        onEdit = { onEdit(child) },
-                        onDelete = { onDelete(child) },
-                        nested = true,
-                    )
+                // A TVBox or network source owns its generated libraries, so its
+                // own row - the address, the scan and the delete that takes the
+                // children with it - has to stay reachable from this list.
+                selected?.parent?.let { parent ->
+                    key(parent.id) {
+                        Spacer(Modifier.height(4.dp))
+                        Text("媒体源本身", color = TextFaint, style = MaterialTheme.typography.labelSmall)
+                        Spacer(Modifier.height(6.dp))
+                        MediaSourceRow(
+                            source = parent,
+                            starting = "scan-${parent.id}" in adminActions,
+                            deleting = "delete-source-${parent.id}" in adminActions,
+                            onScan = onScan,
+                            onEdit = { onEdit(parent) },
+                            onDelete = { onDelete(parent) },
+                        )
+                    }
+                }
+                if ((selected?.libraries.isNullOrEmpty()) && selected?.parent == null) {
+                    Text("该媒体源下没有媒体库", color = TextFaint)
                 }
             }
         }
@@ -450,29 +457,174 @@ private fun SourceList(
 }
 
 @Composable
-private fun SourceGroupHeader(
-    name: String,
-    provider: String,
-    libraryCount: Int,
-    itemCount: Int,
+private fun ManagerSectionTabs(
+    selected: LibrarySection,
+    counts: Map<LibrarySection, Int>,
+    onSelect: (LibrarySection) -> Unit,
 ) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .glassSurface(fill = RaisedStrong, line = Line)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(Icons.Outlined.Cloud, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(20.dp))
-        Column(Modifier.weight(1f).padding(start = 10.dp)) {
-            Text(name, color = TextPrimary, fontWeight = FontWeight.SemiBold)
-            Text(
-                "${sourceProviderLabel(provider)} · $libraryCount 个媒体库",
-                color = TextFaint,
-                style = MaterialTheme.typography.labelSmall,
-            )
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        LibrarySection.entries.forEach { section ->
+            val active = selected == section
+            Column(
+                Modifier.weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                TextButton(
+                    onClick = { onSelect(section) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .semantics { this.selected = active },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = if (active) TextPrimary else TextFaint,
+                    ),
+                ) {
+                    Text(
+                        section.label,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1,
+                    )
+                }
+                Box(
+                    Modifier
+                        .width(24.dp)
+                        .height(2.dp)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(if (active) Accent else Color.Transparent),
+                )
+            }
         }
-        Text("$itemCount 条", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+/**
+ * The left column: one entry per playback source of the selected board.
+ *
+ * The rail is a fixed-width strip rather than a dropdown so switching source
+ * is one tap instead of two, and the selected entry is the one with the accent
+ * line; the library count rides along as the only number it shows.
+ */
+@Composable
+private fun ManagerSourceRail(
+    groups: List<ManagerSourceGroup>,
+    selectedGroupId: String?,
+    onSelect: (String) -> Unit,
+    onOrder: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier
+            .verticalScroll(rememberScrollState())
+            .heightIn(max = 420.dp),
+    ) {
+        groups.forEach { group ->
+            val active = group.groupId == selectedGroupId
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp)
+                    .clip(ControlShape)
+                    .background(if (active) RaisedStrong else Color.Transparent)
+                    .clickable { onSelect(group.groupId) }
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        group.name,
+                        color = if (active) TextPrimary else TextSecondary,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "${group.libraries.size} 个媒体库",
+                        color = TextFaint,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                    )
+                }
+                if (active) {
+                    Box(
+                        Modifier
+                            .width(3.dp)
+                            .height(24.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(Accent),
+                    )
+                }
+            }
+        }
+        if (onOrder != null) {
+            Spacer(Modifier.height(4.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(UiDimens.TouchTarget)
+                    .clip(ControlShape)
+                    .clickable(onClick = onOrder)
+                    .semantics { contentDescription = "调整电影媒体源顺序" },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.SwapVert,
+                    contentDescription = null,
+                    tint = TextSecondary,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * One playback source and the libraries it generated, as the manager shows them.
+ *
+ * A TVBox or network source owns a parent row whose children are the virtual
+ * libraries it split itself into, so the pair has to stay together: dropping
+ * the parent would lose the source's own name, address and delete action, and
+ * an AList connection has no parent row and is shown as a plain header.
+ */
+internal data class ManagerSourceGroup(
+    val groupId: String,
+    val name: String,
+    val provider: String,
+    val parent: MediaLibrarySource?,
+    val libraries: List<MediaLibrarySource>,
+)
+
+internal fun groupSourcesForManager(
+    sources: List<MediaLibrarySource>,
+): List<ManagerSourceGroup> {
+    // A TVBox or network source that generated libraries is the source *of*
+    // that group, so it belongs with them even though the server files its own
+    // row under its id. Left in a group of its own it would have no libraries
+    // beside it, and its address, scan and delete would be a row nobody could
+    // reach from the library list.
+    val parents = sources.mapNotNull { it.id }.toSet()
+    val grouped = sources.groupBy { source ->
+        source.sourceGroupId
+            ?: source.parentSourceId
+            ?: if (parents.any { it == source.id } && sources.any { it.parentSourceId == source.id }) {
+                "parent:${source.id}"
+            } else {
+                source.id
+            }
+    }
+    return grouped.entries.map { (groupId, members) ->
+        val parent = members.firstOrNull { candidate ->
+            candidate.parentSourceId.isNullOrBlank() &&
+                members.any { child -> child.parentSourceId == candidate.id }
+        }
+        ManagerSourceGroup(
+            groupId = groupId,
+            name = members.firstNotNullOfOrNull { it.sourceGroupName }
+                ?: members.first().name,
+            provider = members.first().provider,
+            parent = parent,
+            libraries = members.filterNot { it.id == parent?.id },
+        )
     }
 }
 

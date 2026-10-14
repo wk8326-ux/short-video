@@ -277,6 +277,45 @@ def test_asmr_authors_and_kind_filters(tmp_path):
     assert database.asmr_item_count(author="A") == 2
 
 
+def test_asmr_authors_skip_folders_without_media(tmp_path):
+    """An author folder with no active media is not a browseable author.
+
+    Author folders and the media rows under them are written by separate scan
+    steps, so an interrupted scan leaves the folder behind. Listing it would
+    show a 0/0/0 author whose page can only ever be empty.
+    """
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    database.replace_scan(
+        [
+            {
+                "path": "/asmr6/A/session.m3u8",
+                "name": "session.m3u8",
+                "size": 10,
+                "modified": "2026-08-17",
+                "thumb": "",
+                "author": "A",
+                "media_format": "m3u8",
+                "media_kind": "video",
+            }
+        ],
+        source="asmr",
+    )
+    with database._connect() as connection:
+        connection.execute(
+            "INSERT INTO asmr_author_directories(source, path, author) "
+            "VALUES('asmr', '/asmr6/B', 'B')"
+        )
+        connection.commit()
+
+    authors = database.asmr_authors()
+
+    assert [row["author"] for row in authors] == ["A"]
+    assert database.asmr_author_count() == 1
+    assert database.asmr_author_count(search="B") == 0
+    assert [row["author"] for row in database.asmr_authors(limit=1)] == ["A"]
+
+
 def test_m3u8_cannot_be_reclassified_as_audio_by_browser_metadata(tmp_path):
     database = LibraryDatabase(str(tmp_path / "library.db"))
     database.initialize()

@@ -39,7 +39,17 @@ CATEGORY_SLUGS = {
 }
 
 # 91crdj ships its artwork as AES-CBC encrypted blobs behind a picture CDN.
-ENCRYPTED_IMAGE_HOSTS = frozenset({"pic.tuafjz.cn"})
+# The site rotates its own image host (pic.tuafjz.cn -> pic.drleao.cn) while
+# keeping the same key, so a host not in this set is served as ciphertext and
+# the artwork proxy rejects it as a non-image body.
+ENCRYPTED_IMAGE_HOSTS = frozenset({"pic.tuafjz.cn", "pic.drleao.cn"})
+# Matching the rotating hosts by name keeps the page scrape working when the
+# site moves its artwork CDN, instead of pinning one host into a regex.
+_ENCRYPTED_IMAGE_URL_PATTERN = (
+    r"https?://(?:[a-z0-9-]+\.)*"
+    r"(?:" + "|".join(re.escape(host) for host in sorted(ENCRYPTED_IMAGE_HOSTS)) + r")"
+    r"/[^\"'\s\\<>()]+\.(?:jpe?g|png|webp)[^\"'\s\\<>()]*"
+)
 _MEDIA_KEY = b"f5d965df75336270"
 _MEDIA_IV = b"97b60394abc2fbe1"
 
@@ -275,7 +285,7 @@ def parse_series_metadata(code: str, page: str, page_url: str = "") -> SeriesMet
     # while the picture CDN used by the page itself is the one that works. The
     # page escapes its JSON, so unescape before scanning for the real cover.
     cover = re.search(
-        r"https://pic\.tuafjz\.cn/[^\"'\s\\<>()]+\.(?:jpe?g|png|webp)[^\"'\s\\<>()]*",
+        _ENCRYPTED_IMAGE_URL_PATTERN,
         html.unescape(page),
     )
     if cover:

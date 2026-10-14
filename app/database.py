@@ -3808,6 +3808,10 @@ class LibraryDatabase:
         if search:
             conditions.append("a.author LIKE ? ESCAPE '\\'")
             params.append(f"%{self._escape_like(search)}%")
+        # An author folder without active media is not browseable: the author
+        # page behind it would answer 0/0/0. Author folders and the media rows
+        # under them are written by separate scan steps, so an interrupted scan
+        # leaves folders behind - list what actually has media instead.
         with self._lock, self._connect() as connection:
             pagination = ""
             query_params = list(params)
@@ -3835,6 +3839,7 @@ class LibraryDatabase:
                     AND v.source IN ({placeholders})
                 {f"WHERE {' AND '.join(conditions)}" if conditions else ""}
                 GROUP BY a.author
+                HAVING COUNT(v.id) > 0
                 ORDER BY a.author COLLATE NOCASE{pagination}
                 """,
                 query_params,
@@ -3859,11 +3864,20 @@ class LibraryDatabase:
         with self._lock, self._connect() as connection:
             row = connection.execute(
                 f"""
-                SELECT COUNT(DISTINCT author) FROM asmr_author_directories
-                WHERE source IN ({placeholders})
-                {f"AND {' AND '.join(conditions)}" if conditions else ""}
+                SELECT COUNT(*) FROM (
+                    SELECT d.author
+                    FROM asmr_author_directories d
+                    WHERE d.source IN ({placeholders})
+                    {f"AND {' AND '.join(conditions)}" if conditions else ""}
+                    GROUP BY d.author
+                    HAVING EXISTS (
+                        SELECT 1 FROM videos v
+                        WHERE v.author = d.author AND v.active = 1
+                            AND v.source IN ({placeholders})
+                    )
+                )
                 """,
-                params,
+                [*params, *selected],
             ).fetchone()
         return int(row[0] or 0)
 

@@ -69,7 +69,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.8.4"
+APP_VERSION = "1.8.5"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
