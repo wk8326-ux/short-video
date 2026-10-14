@@ -151,7 +151,10 @@ MOVIE_IMAGE_USER_AGENT = "deepfuck-movie-library/1"
 # re-fetches them next time round. The ceiling therefore sits above the working
 # set, and the free-space floor below stays the real guard: the cache may never
 # be the reason the disk fills up.
-MOVIE_IMAGE_CACHE_MAX_BYTES = 10 * 1024 * 1024 * 1024
+# The host has a small root disk and the catalogue database grows while TVBox
+# sources are imported. Keep enough room for the database and containers, while
+# allowing the newly added TVBox libraries to warm their artwork first.
+MOVIE_IMAGE_CACHE_MAX_BYTES = 6 * 1024 * 1024 * 1024
 # Below this the cache stops growing and starts evicting, whatever the ceiling
 # says. The database, the app and Docker all live on the same filesystem, so the
 # ceiling alone is not enough to keep the host healthy. Keep the floor modest:
@@ -1632,6 +1635,10 @@ async def lifespan(_: FastAPI):
         limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
         headers={"User-Agent": MOVIE_IMAGE_USER_AGENT},
     )
+    # Apply the lower ceiling before the background warmer starts writing new
+    # artwork. This turns the policy change into an immediate disk reclaim on
+    # an existing installation rather than waiting for the next cache write.
+    await asyncio.to_thread(_prune_movie_image_cache)
     if settings.shared_metadata_base_url:
         # The catalogue takes tens of seconds to walk, and the disk mirror only
         # covers a restart inside the TTL. Warming it here means the first scan
@@ -3603,6 +3610,10 @@ async def sweep_movie_cover_cache() -> None:
     """
     await asyncio.sleep(MOVIE_IMAGE_WARM_START_DELAY_SECONDS)
     cursor = 0
+    priority_sources: tuple[str, ...] = ()
+    priority_index = 0
+    priority_cursor = 0
+    priority_round_complete = False
     while True:
         try:
             reason = await _movie_cover_sweep_stop_reason()
@@ -3610,17 +3621,63 @@ async def sweep_movie_cover_cache() -> None:
                 logger.info("Movie cover sweep paused: %s", reason)
                 await asyncio.sleep(MOVIE_IMAGE_WARM_PAUSE_SECONDS)
                 continue
-            rows = await asyncio.to_thread(
-                database.movie_artwork_batch,
-                after_id=cursor,
-                limit=MOVIE_IMAGE_WARM_BATCH,
-            )
+            if not priority_round_complete:
+                if not priority_sources:
+                    priority_sources = await asyncio.to_thread(
+                        database.tvbox_child_source_ids_by_priority
+                    )
+                if priority_index < len(priority_sources):
+                    priority_source = priority_sources[priority_index]
+                    rows = await asyncio.to_thread(
+                        database.movie_artwork_batch,
+                        after_id=priority_cursor,
+                        limit=MOVIE_IMAGE_WARM_BATCH,
+                        sources=(priority_source,),
+                    )
+                    if not rows:
+                        priority_index += 1
+                        priority_cursor = 0
+                        continue
+                else:
+                    priority_round_complete = True
+                    logger.info(
+                        "Movie cover sweep finished TVBox priority pass for %s libraries",
+                        len(priority_sources),
+                    )
+                    continue
+            else:
+                rows = await asyncio.to_thread(
+                    database.movie_artwork_batch,
+                    after_id=cursor,
+                    limit=MOVIE_IMAGE_WARM_BATCH,
+                )
             if not rows:
                 cursor = 0
+                priority_sources = ()
+                priority_index = 0
+                priority_cursor = 0
+                priority_round_complete = False
                 await asyncio.to_thread(_collect_movie_image_orphans)
-                await asyncio.sleep(MOVIE_IMAGE_WARM_PAUSE_SECONDS)
+                # An idle pass must not spin: with a zero pause it would rewalk
+                # the catalogue as fast as the disk can be listed.
+                await asyncio.sleep(max(MOVIE_IMAGE_WARM_PAUSE_SECONDS, 1.0))
                 continue
-            cursor = int(rows[-1]["id"])
+            last_id = int(rows[-1]["id"])
+            previous = priority_cursor if not priority_round_complete else cursor
+            if last_id <= previous:
+                # A page that does not move the cursor would be read for ever.
+                # It is a broken batch, not work: stand down instead of
+                # spinning on it, and pick the catalogue up again next pass.
+                logger.warning(
+                    "Movie cover sweep batch did not advance past id %s",
+                    previous,
+                )
+                await asyncio.sleep(max(MOVIE_IMAGE_WARM_PAUSE_SECONDS, 1.0))
+                continue
+            if priority_round_complete:
+                cursor = last_id
+            else:
+                priority_cursor = last_id
             cold = [
                 row
                 for row in rows
@@ -3657,6 +3714,8 @@ async def sweep_movie_cover_cache() -> None:
             raise
         except Exception as exc:
             logger.warning("Movie cover sweep failed: %s", exc)
+            # The loop must not spin on a repeatable failure: a bad batch or a
+            # schema mismatch would otherwise log forever and burn the box.
             await asyncio.sleep(MOVIE_IMAGE_WARM_PAUSE_SECONDS)
 
 

@@ -48,6 +48,21 @@ async def seed_movies(main, *, names: list[str]) -> dict[str, dict]:
     }
 
 
+async def _drain_background_tasks() -> None:
+    """Cancel whatever the app's background loops still own.
+
+    A sweeper started inside a test keeps its own task, and a loop whose pause is
+    configured to zero will spin on it for as long as the session lasts. Draining
+    here is what keeps one test from starving the rest of the file.
+    """
+    current = asyncio.current_task()
+    for task in asyncio.all_tasks():
+        if task is current or task.done():
+            continue
+        task.cancel()
+    await asyncio.sleep(0)
+
+
 @pytest.mark.asyncio
 async def test_the_ladder_is_the_one_the_android_client_mirrors(monkeypatch, tmp_path):
     """Three rungs, and every request lands on one of them.
@@ -325,6 +340,11 @@ async def test_a_finished_pass_warms_every_cover_and_only_then_sweeps(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+    # The loop keeps going after its first pass, so the cancelled task above is
+    # not the only one the event loop still owns once the test ends. Draining
+    # what is left keeps a spinning sweeper from eating a core for the rest of
+    # the session while the other cache tests run.
+    await _drain_background_tasks()
 
     # A pass walks the whole catalogue before it sweeps, so the sweep can only
     # be reached once both covers have been asked for, in id order. The loop
@@ -396,7 +416,7 @@ async def drive_one_pass(main, monkeypatch, rows, *, refuses: dict[str, int] | N
     monkeypatch.setattr(main, "MOVIE_IMAGE_WARM_BATCH", max(1, len(rows)))
     monkeypatch.setattr(main, "MOVIE_IMAGE_CACHE_MIN_FREE_BYTES", 0)
 
-    def batch(*, after_id, limit):
+    def batch(*, after_id, limit, sources=()):
         return rows if not after_id else []
 
     finished: list[int] = []

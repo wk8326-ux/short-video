@@ -2681,6 +2681,7 @@ class LibraryDatabase:
         *,
         after_id: int,
         limit: int,
+        sources: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
         """The next slice of catalogued covers, in id order, for a cache sweep.
 
@@ -2689,19 +2690,28 @@ class LibraryDatabase:
         gains rows while it runs is picked up on the next pass instead of
         invalidating the cursor.
         """
+        source_clause = ""
+        params: list[Any] = [int(after_id)]
+        selected_sources = tuple(dict.fromkeys(str(source) for source in sources if source))
+        if selected_sources:
+            placeholders = ", ".join("?" for _ in selected_sources)
+            source_clause = f" AND m.source IN ({placeholders})"
+            params.extend(selected_sources)
+        params.append(max(1, int(limit)))
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT m.id, m.poster_url, m.backdrop_url
                 FROM movies m
                 JOIN videos v ON v.id = m.video_id
                 WHERE v.active = 1 AND m.id > ?
+                  {source_clause}
                   AND (COALESCE(m.poster_url, '') <> ''
                        OR COALESCE(m.backdrop_url, '') <> '')
                 ORDER BY m.id
                 LIMIT ?
                 """,
-                (int(after_id), max(1, int(limit))),
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -3320,6 +3330,32 @@ class LibraryDatabase:
                 """
             ).fetchall()
         return frozenset(str(row["id"]) for row in rows)
+
+    def tvbox_child_source_ids_by_priority(self) -> tuple[str, ...]:
+        """Return TVBox libraries newest source group first.
+
+        A cover warmer must give recently added network sources a chance before
+        revisiting an older TVBox source. Sorting by the parent source creation
+        time keeps all categories of one source together while still allowing a
+        new source to reach the front of the queue without hard-coded IDs.
+        """
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT child.id
+                FROM media_sources child
+                JOIN media_sources parent ON parent.id = child.parent_source_id
+                WHERE child.parent_source_id IS NOT NULL
+                  AND child.parent_source_id != ''
+                  AND child.section = 'movie'
+                ORDER BY parent.created_at DESC,
+                         parent.sort_order DESC,
+                         child.sort_order,
+                         child.created_at,
+                         child.rowid
+                """
+            ).fetchall()
+        return tuple(str(row["id"]) for row in rows)
 
     def delete_tvbox_children_not_in(
         self,
