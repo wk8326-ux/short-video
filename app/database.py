@@ -1933,6 +1933,128 @@ class LibraryDatabase:
             )
             connection.commit()
 
+    def stats_by_source(self) -> dict[str, dict[str, int]]:
+        """Return active file counts and byte totals in one aggregate query.
+
+        The management screen needs the same totals scoped to several sections.
+        Five separate scans of ``videos`` turn into lock contention when large
+        TVBox libraries are indexed, so this gives the caller the raw values to
+        aggregate in memory.
+        """
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source,
+                       COUNT(*) AS active,
+                       COALESCE(SUM(size), 0) AS bytes
+                FROM videos
+                WHERE active = 1
+                GROUP BY source
+                """
+            ).fetchall()
+        return {
+            str(row["source"]): {
+                "videos": int(row["active"]),
+                "bytes": int(row["bytes"]),
+            }
+            for row in rows
+        }
+
+    def movie_metadata_summaries(
+        self,
+        *,
+        sources: Sequence[str],
+    ) -> dict[str, dict[str, int | None]]:
+        """Summarise movie metadata status for every requested source."""
+        summary = {
+            str(source): {
+                "total": 0,
+                "pending": 0,
+                "matched": 0,
+                "ambiguous": 0,
+                "unmatched": 0,
+                "lastSuccess": None,
+            }
+            for source in sources
+        }
+        if not sources:
+            return summary
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "m.source IN")
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT m.source,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN m.match_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                       SUM(CASE WHEN m.match_status IN ('matched', 'manual') THEN 1 ELSE 0 END) AS matched,
+                       SUM(CASE WHEN m.match_status = 'ambiguous' THEN 1 ELSE 0 END) AS ambiguous,
+                       SUM(CASE WHEN m.match_status = 'unmatched' THEN 1 ELSE 0 END) AS unmatched,
+                       MAX(CAST(strftime('%s', m.scraped_at) AS INTEGER)) AS last_success
+                FROM movies m
+                JOIN videos v ON v.id = m.video_id
+                WHERE v.active = 1 AND {source_clause}
+                GROUP BY m.source
+                """,
+                source_params,
+            ).fetchall()
+        for row in rows:
+            source = str(row["source"])
+            summary[source] = {
+                key: int(row[key] or 0)
+                for key in ("total", "pending", "matched", "ambiguous", "unmatched")
+            }
+            summary[source]["lastSuccess"] = (
+                int(row["last_success"]) if row["last_success"] else None
+            )
+        return summary
+
+    def drama_metadata_summaries(
+        self,
+        *,
+        sources: Sequence[str],
+    ) -> dict[str, dict[str, int | None]]:
+        """Summarise drama metadata status for every requested source."""
+        summary = {
+            str(source): {
+                "total": 0,
+                "pending": 0,
+                "matched": 0,
+                "unmatched": 0,
+                "lastSuccess": None,
+            }
+            for source in sources
+        }
+        if not sources:
+            return summary
+        source_clause, source_params = self._sources_clause(sources)
+        source_clause = source_clause.replace("source IN", "d.source IN")
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT d.source,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN d.metadata_status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                       SUM(CASE WHEN d.metadata_status = 'matched' THEN 1 ELSE 0 END) AS matched,
+                       SUM(CASE WHEN d.metadata_status = 'unmatched' THEN 1 ELSE 0 END) AS unmatched,
+                       MAX(CAST(strftime('%s', d.scraped_at) AS INTEGER)) AS last_success
+                FROM dramas d
+                WHERE d.episode_count > 0 AND {source_clause}
+                GROUP BY d.source
+                """,
+                source_params,
+            ).fetchall()
+        for row in rows:
+            source = str(row["source"])
+            summary[source] = {
+                key: int(row[key] or 0)
+                for key in ("total", "pending", "matched", "unmatched")
+            }
+            summary[source]["lastSuccess"] = (
+                int(row["last_success"]) if row["last_success"] else None
+            )
+        return summary
+
     def movies(
         self,
         *,
@@ -3208,6 +3330,31 @@ class LibraryDatabase:
                     )
             connection.commit()
         return self.get_media_source(source_id)
+
+    def find_media_source_by_key(
+        self,
+        base_url: str,
+        root_paths: Any,
+        section: str,
+    ) -> dict[str, Any] | None:
+        """Resolve a source by its natural UNIQUE key, not by generated id.
+
+        TVBox child ids are derived from category slugs, so an upstream rename
+        can produce a fresh id for a category whose ``(base_url, root_paths,
+        section)`` row already exists under the old id. Without this lookup the
+        retry INSERT hits the UNIQUE constraint and the whole scan aborts.
+        """
+        roots = json.dumps(normalize_root_paths(root_paths))
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM media_sources
+                WHERE base_url = ? AND root_paths = ? AND section = ?
+                LIMIT 1
+                """,
+                (base_url, roots, section),
+            ).fetchone()
+        return dict(row) if row else None
 
     def delete_media_source(self, source_id: str) -> bool:
         with self._lock, self._connect() as connection:

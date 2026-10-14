@@ -15,7 +15,7 @@ import time
 from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 from urllib.parse import urlsplit
 
 import httpx
@@ -837,9 +837,26 @@ async def scan_tvbox_source(source_id: str) -> bool:
             wanted_ids = set()
             category_order = 0
             scan_errors: list[str] = []
+            # Upstream configs sometimes list the same category twice, or two
+            # categories whose slugs normalise to the same token. The first
+            # occurrence owns the library; a duplicate would either overwrite
+            # the first's rows or trip the natural UNIQUE key.
+            seen_categories: set[tuple[str, str]] = set()
+            deduped_categories = []
+            for category in categories:
+                slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
+                category_key = (category.remote_id, slug)
+                if category_key in seen_categories:
+                    logger.info(
+                        "TVBox category %s duplicates an earlier entry, skipping",
+                        category.remote_id,
+                    )
+                    continue
+                seen_categories.add(category_key)
+                deduped_categories.append(category)
+            categories = deduped_categories
             for category in categories:
                 category_order += 1
-                slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
                 # Scanning one virtual library refreshes that library. Deriving a
                 # new child id from it produced a ``tvbox-tvbox-...`` source that
                 # duplicated every category on top of the real one.
@@ -852,6 +869,20 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     database.get_media_source,
                     child_id,
                 )
+                if child is None and not virtual_category_id:
+                    # An upstream rename can change the derived id while the
+                    # natural key stays the same. Adopt the existing row so
+                    # the retry INSERT does not hit
+                    # UNIQUE(base_url, root_paths, section).
+                    existing_by_key = await asyncio.to_thread(
+                        database.find_media_source_by_key,
+                        config["base_url"],
+                        [f"/tvbox/{category.remote_id}"],
+                        "movie",
+                    )
+                    if existing_by_key:
+                        child_id = str(existing_by_key["id"])
+                        child = existing_by_key
                 # Probe the category before it becomes a library. Plenty of
                 # TVBox sites advertise a category that upstream never fills,
                 # and an empty library is just a dead row in the picker, so a
@@ -937,9 +968,15 @@ async def scan_tvbox_source(source_id: str) -> bool:
                             values,
                         )
                     except sqlite3.IntegrityError:
+                        existing_by_key = await asyncio.to_thread(
+                            database.find_media_source_by_key,
+                            config["base_url"],
+                            values["root_paths"],
+                            values["section"],
+                        )
                         await asyncio.to_thread(
                             database.update_media_source,
-                            child_id,
+                            str(existing_by_key["id"]) if existing_by_key else child_id,
                             values,
                         )
 
@@ -3153,57 +3190,33 @@ async def admin_status() -> dict[str, Any]:
     asmr_sources = source_registry.ids("asmr")
     movie_sources = source_registry.ids("movie")
     drama_sources = source_registry.ids("drama")
+
+    def stats_for(source_ids: Sequence[str]) -> dict[str, int]:
+        return {
+            "videos": sum(source_stats.get(id, {}).get("videos", 0) for id in source_ids),
+            "bytes": sum(source_stats.get(id, {}).get("bytes", 0) for id in source_ids),
+        }
+
     (
-        library,
-        feed_library,
-        asmr_library,
-        movie_library,
-        drama_library,
         sources,
         summary,
         issues,
+        source_stats,
+        movie_source_summaries,
+        drama_source_summaries,
     ) = await asyncio.gather(
-        asyncio.to_thread(database.stats),
-        asyncio.to_thread(database.stats, sources=feed_sources),
-        asyncio.to_thread(database.stats, sources=asmr_sources),
-        asyncio.to_thread(database.stats, sources=movie_sources),
-        asyncio.to_thread(database.stats, sources=drama_sources),
         asyncio.to_thread(database.list_media_sources),
         asyncio.to_thread(database.fast_start_summary, sources=feed_sources),
         asyncio.to_thread(database.fast_start_issues, limit=20, sources=feed_sources),
+        asyncio.to_thread(database.stats_by_source),
+        asyncio.to_thread(database.movie_metadata_summaries, sources=movie_sources),
+        asyncio.to_thread(database.drama_metadata_summaries, sources=drama_sources),
     )
-    movie_sources_with_config = [source for source in sources if source["section"] == "movie"]
-    movie_source_summaries = {
-        source["id"]: source_summary
-        for source, source_summary in zip(
-            movie_sources_with_config,
-            await asyncio.gather(
-                *(
-                    asyncio.to_thread(
-                        database.movie_metadata_summary,
-                        sources=(source["id"],),
-                    )
-                    for source in movie_sources_with_config
-                )
-            ),
-        )
-    }
-    drama_sources_with_config = [source for source in sources if source["section"] == "drama"]
-    drama_source_summaries = {
-        source["id"]: source_summary
-        for source, source_summary in zip(
-            drama_sources_with_config,
-            await asyncio.gather(
-                *(
-                    asyncio.to_thread(
-                        database.drama_metadata_summary,
-                        sources=(source["id"],),
-                    )
-                    for source in drama_sources_with_config
-                )
-            ),
-        )
-    }
+    library = stats_for(list(source_stats))
+    feed_library = stats_for(feed_sources)
+    asmr_library = stats_for(asmr_sources)
+    movie_library = stats_for(movie_sources)
+    drama_library = stats_for(drama_sources)
     return {
         "library": {
             **library,
@@ -4390,6 +4403,15 @@ async def movie_groups(
         )
         if selected_source is None:
             raise HTTPException(status_code=404, detail="Media source not found")
+    else:
+        # First load without an explicit source: preview only the first source
+        # that actually has content. The client filters the wall to one source
+        # anyway, so fetching 70+ library previews here was the main reason a
+        # large catalog took five to seven seconds on the movie wall.
+        selected_source = next(
+            (item for item in source_catalog if item.get("total", 0) > 0),
+            source_catalog[0] if source_catalog else None,
+        )
     selected_ids = tuple(selected_source["libraryIds"]) if selected_source else sources
     ordered = [source for source in selected_ids if counts.get(source, 0) > 0]
 
@@ -4820,6 +4842,14 @@ async def drama_groups(
         )
         if selected_source is None:
             raise HTTPException(status_code=404, detail="Media source not found")
+    else:
+        # Same as the movie wall: the client only shows one source at a time,
+        # so defaulting to the first source with content keeps the first paint
+        # from previewing every drama library in the catalog.
+        selected_source = next(
+            (item for item in source_catalog if item.get("total", 0) > 0),
+            source_catalog[0] if source_catalog else None,
+        )
     selected_ids = tuple(selected_source["libraryIds"]) if selected_source else all_sources
     groups_spec = [
         (source, category, total)
