@@ -38,8 +38,12 @@ class FakeDatabase:
         self.added: list[dict] = []
         self.updated: list[str] = []
         self.scan_states: list[tuple] = []
+        self.last_values: dict = {}
+        self.existing_source: dict | None = None
 
     def get_media_source(self, source_id: str):
+        if self.existing_source and self.existing_source["id"] == source_id:
+            return self.existing_source
         return self.added[-1] if self.added and source_id.endswith("-2") else None
 
     def add_media_source(self, values: dict):
@@ -48,6 +52,7 @@ class FakeDatabase:
 
     def update_media_source(self, source_id: str, values: dict):
         self.updated.append(source_id)
+        self.last_values = values
         return values
 
     def movie_count(self, *, sources):
@@ -102,4 +107,53 @@ def test_tvbox_virtual_child_scan_targets_only_its_category(monkeypatch, tmp_pat
     # The library refreshes itself instead of generating a ``tvbox-parent-2``
     # duplicate on top of it.
     assert [row["id"] for row in database.added] == ["parent"]
+    # Re-scanning a library must not make it its own parent: it kept the TVBox
+    # source that owns the configuration, so it stays inside that group in the
+    # management screen instead of turning into a standalone source.
+    assert database.added[0]["parent_source_id"] == "parent"
     assert database.scan_states and database.scan_states[-1][0] == "parent"
+
+
+def test_tvbox_virtual_child_rescan_keeps_its_real_parent(monkeypatch, tmp_path):
+    """A library that already belongs to a TVBox source keeps that parent.
+
+    Scanning the library reuses its own id as the child id, so the parent
+    cannot be derived from the id the scan was called with.
+    """
+    monkeypatch.setenv("ALIST_BASE_URL", "https://guangya.example")
+    monkeypatch.setenv("ALIST_MEDIA_PATH", "/media")
+    monkeypatch.setenv("ASMR_BASE_URL", "https://asmr.example")
+    monkeypatch.setenv("ASMR_MEDIA_PATH", "/asmr6")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "library.db"))
+    monkeypatch.setenv("STATIC_DIR", str(tmp_path / "static"))
+    monkeypatch.setenv("AUTH_PASSWORD_HASH", "scrypt:test")
+    monkeypatch.setenv("SESSION_SECRET", "test-session-secret-with-at-least-32-characters")
+    monkeypatch.setenv("SHARED_METADATA_BASE_URL", "http://shared.test/api/shared-metadata")
+    monkeypatch.setenv("SHARED_METADATA_TOKEN", "test-token")
+
+    from app import main as main_module
+
+    library_id = "tvbox-source-abc-2"
+    client = FakeClient({"1": 10899, "2": 4379})
+    database = FakeDatabase({library_id: 4379})
+    # The library already exists and is owned by the TVBox source ``source-abc``.
+    database.existing_source = {
+        "id": library_id,
+        "name": "麻豆传媒",
+        "parent_source_id": "source-abc",
+        "sort_order": 2,
+    }
+    registry = type("Registry", (), {"get": lambda self, source_id: FakeRuntime(
+        config={"base_url": "https://example.com/api.php", "virtual_category_id": "2"},
+        client=client,
+    )})()
+
+    monkeypatch.setattr(main_module, "source_registry", registry)
+    monkeypatch.setattr(main_module, "database", database)
+    monkeypatch.setattr(main_module, "refresh_scan_summary", lambda: None)
+
+    assert asyncio.run(main_module.scan_tvbox_source(library_id)) is True
+    assert database.updated == [library_id]
+    # The row that was written back still points at the owning TVBox source.
+    assert database.last_values["parent_source_id"] == "source-abc"
+    assert database.last_values["id"] == library_id

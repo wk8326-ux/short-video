@@ -845,12 +845,46 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     if virtual_category_id
                     else f"tvbox-{source_id}-{slug or hashlib.sha1(category.remote_id.encode()).hexdigest()[:8]}"
                 )
-                if not virtual_category_id:
-                    wanted_ids.add(child_id)
                 child = await asyncio.to_thread(
                     database.get_media_source,
                     child_id,
                 )
+                # Probe the category before it becomes a library. Plenty of
+                # TVBox sites advertise a category that upstream never fills,
+                # and an empty library is just a dead row in the picker, so a
+                # category that has nothing to list is never created and an
+                # existing empty one is dropped.
+                try:
+                    probe_page = await client.list_page(
+                        category.remote_id,
+                        page=1,
+                    )
+                except Exception as probe_exc:
+                    scan_errors.append(
+                        f"{category.name}: {str(probe_exc)[:200]}"
+                    )
+                    logger.warning(
+                        "TVBox category %s probe failed: %s",
+                        category.remote_id,
+                        probe_exc,
+                    )
+                    continue
+                upstream_total = probe_page.total or len(probe_page.items)
+                if upstream_total <= 0:
+                    logger.info(
+                        "TVBox category %s (%s) is empty upstream, not creating a library",
+                        category.name,
+                        category.remote_id,
+                    )
+                    if child:
+                        await asyncio.to_thread(
+                            database.delete_media_source,
+                            child_id,
+                        )
+                        await source_registry.reload_source(source_id)
+                    continue
+                if not virtual_category_id:
+                    wanted_ids.add(child_id)
                 values = {
                     "id": child_id,
                     "name": category.name,
@@ -866,7 +900,18 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     "username": "",
                     "password": "",
                     "enabled": True,
-                    "parent_source_id": source_id,
+                    # Scanning a virtual library reuses its own id as the
+                    # child id (see ``child_id`` above), so writing the id we
+                    # were called with here made the library its own parent:
+                    # it dropped out of the TVBox group and showed up in the
+                    # management screen as a standalone source. The parent of
+                    # a category is the source that owns the configuration, and
+                    # a re-scan never changes it.
+                    "parent_source_id": (
+                        (child or {}).get("parent_source_id") or source_id
+                        if virtual_category_id and child
+                        else source_id
+                    ),
                     "virtual_category_id": category.remote_id,
                     "virtual_category_name": category.name,
                     "virtual_category_type": "tvbox",
@@ -905,8 +950,8 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     source_state["directoriesTotal"] = page_count
 
                 try:
-                    first_page = await client.list_page(category.remote_id, page=1)
-                    upstream_total = first_page.total or len(first_page.items)
+                    first_page = probe_page
+                    upstream_total = probe_page.total or len(probe_page.items)
                     existing_count = await asyncio.to_thread(
                         database.movie_count,
                         sources=(child_id,),
