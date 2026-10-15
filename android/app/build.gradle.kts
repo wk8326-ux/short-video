@@ -22,8 +22,8 @@ android {
         applicationId = "you.deepfuck.shortvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 207
-        versionName = "1.8.6"
+        versionCode = 208
+        versionName = "1.8.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -72,6 +72,12 @@ android {
         // Kotlin 2.x analysis API in this toolchain. Keep other lint checks
         // active until the dependency versions are aligned.
         disable += "RememberInComposition"
+        // The companion Compose detector has the same Kotlin analysis API
+        // incompatibility and crashes lint before reporting source findings.
+        disable += "FrequentlyChangingValue"
+        // Compose's primitive-state detector currently crashes on the same
+        // Kotlin analysis API mismatch (KaFunctionCall interface error).
+        disable += "AutoboxingStateCreation"
     }
 }
 

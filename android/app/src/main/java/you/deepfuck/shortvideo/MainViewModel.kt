@@ -868,6 +868,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = state.copy(activeIndex = index, nowPlaying = entry)
         if (!playback.play(entry, preferences.position(entry.id), autoPlay = autoPlay)) {
             mutableState.value = mutableState.value.copy(feedError = "无法准备该视频")
+            // A restored session may still point at media that was moved or
+            // removed. Rebuilding the feed is safer than leaving a stale queue.
+            if (state.feedItems.isNotEmpty()) requestFeed(reset = true)
             return
         }
         playback.prefetch(state.surface, feedPrefetchCandidates(state.feedItems, index))
@@ -2964,9 +2967,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 api.movieGroups(
                     sort = requestedSort,
                     perSourceSorts = perSourceSorts,
-                    sourceId = state.selectedMovieSourceId?.takeIf { id ->
-                        state.movieSources.any { it.id == id }
-                    },
+                    // The persisted source id may belong to an older catalog.
+                    // Until the current source list has loaded, let the server
+                    // choose its default instead of filtering on a stale id.
+                    sourceId = state.movieSources
+                        .takeIf { sources -> sources.isNotEmpty() }
+                        ?.let { sources ->
+                            state.selectedMovieSourceId?.takeIf { id ->
+                                sources.any { source -> source.id == id }
+                            }
+                        },
                 )
             }
                 .onSuccess { page ->
@@ -2984,14 +2994,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ) return@onSuccess
                     movieCatalogDirty = false
                     val sources = page.sources
-                    val selectedSourceId = current.selectedMovieSourceId
-                        ?.takeIf { id -> sources.any { it.id == id } }
-                        ?: page.selectedSourceId
-                        ?: sources.firstOrNull { source ->
-                            source.libraryIds.any { libraryId ->
-                                page.groups.any { group -> group.sourceId == libraryId }
-                            }
-                        }?.id
+                    val sourceWithGroups = sources.firstOrNull { source ->
+                        source.libraryIds.any { libraryId ->
+                            page.groups.any { group -> group.sourceId == libraryId }
+                        }
+                    }
+                    val selectedSourceId = sourceWithGroups?.id
+                        ?: page.selectedSourceId?.takeIf { id -> sources.any { it.id == id } }
+                        ?: current.selectedMovieSourceId?.takeIf { id -> sources.any { it.id == id } }
                         ?: sources.firstOrNull()?.id
                     val selectedSource = sources.firstOrNull { it.id == selectedSourceId }
                     preferences.movieSourceId = selectedSourceId

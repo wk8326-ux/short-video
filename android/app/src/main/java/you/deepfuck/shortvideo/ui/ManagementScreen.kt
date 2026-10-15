@@ -514,8 +514,8 @@ private fun ManagerSourceRail(
 ) {
     Column(
         modifier
-            .verticalScroll(rememberScrollState())
-            .heightIn(max = 420.dp),
+            .heightIn(max = 420.dp)
+            .verticalScroll(rememberScrollState()),
     ) {
         groups.forEach { group ->
             val active = group.groupId == selectedGroupId

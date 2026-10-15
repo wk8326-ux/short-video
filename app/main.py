@@ -69,7 +69,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.8.5"
+APP_VERSION = "1.8.7"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -90,6 +90,20 @@ scan_state: dict[str, Any] = {
     "sources": {},
 }
 scan_locks: dict[str, asyncio.Lock] = {}
+
+
+def retain_source_runtime(runtime: Any) -> None:
+    retain = getattr(source_registry, "retain", None)
+    if retain is not None:
+        retain(runtime)
+
+
+def release_source_runtime(runtime: Any) -> None:
+    release = getattr(source_registry, "release", None)
+    if release is not None:
+        release(runtime)
+
+
 metadata_state: dict[str, Any] = {
     "running": False,
     "checked": 0,
@@ -418,6 +432,7 @@ async def scan_source(source: str) -> bool:
     lock = scan_locks.setdefault(source, asyncio.Lock())
     if lock.locked():
         return False
+    retain_source_runtime(runtime)
     async with lock:
         config = runtime.config
         source_state = scan_state["sources"].setdefault(
@@ -636,6 +651,7 @@ async def scan_source(source: str) -> bool:
         finally:
             source_state["running"] = False
             refresh_scan_summary()
+            release_source_runtime(runtime)
 
 async def scan_library(sources: tuple[str, ...] | None = None) -> None:
     for source in sources if sources is not None else source_registry.ids():
@@ -657,6 +673,7 @@ async def scan_html_source(source_id: str) -> bool:
     lock = scan_locks.setdefault(source_id, asyncio.Lock())
     if lock.locked():
         return False
+    retain_source_runtime(runtime)
     async with lock:
         config = runtime.config
         source_state = scan_state["sources"].setdefault(
@@ -798,6 +815,7 @@ async def scan_html_source(source_id: str) -> bool:
         finally:
             source_state["running"] = False
             refresh_scan_summary()
+            release_source_runtime(runtime)
 
 
 async def scan_tvbox_source(source_id: str) -> bool:
@@ -814,6 +832,7 @@ async def scan_tvbox_source(source_id: str) -> bool:
     lock = scan_locks.setdefault(source_id, asyncio.Lock())
     if lock.locked():
         return False
+    retain_source_runtime(runtime)
     async with lock:
         config = runtime.config
         source_state = scan_state["sources"].setdefault(
@@ -841,11 +860,11 @@ async def scan_tvbox_source(source_id: str) -> bool:
             # categories whose slugs normalise to the same token. The first
             # occurrence owns the library; a duplicate would either overwrite
             # the first's rows or trip the natural UNIQUE key.
-            seen_categories: set[tuple[str, str]] = set()
+            seen_categories: set[str] = set()
             deduped_categories = []
             for category in categories:
                 slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
-                category_key = (category.remote_id, slug)
+                category_key = category.remote_id
                 if category_key in seen_categories:
                     logger.info(
                         "TVBox category %s duplicates an earlier entry, skipping",
@@ -857,6 +876,7 @@ async def scan_tvbox_source(source_id: str) -> bool:
             categories = deduped_categories
             for category in categories:
                 category_order += 1
+                slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
                 # Scanning one virtual library refreshes that library. Deriving a
                 # new child id from it produced a ``tvbox-tvbox-...`` source that
                 # duplicated every category on top of the real one.
@@ -869,11 +889,12 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     database.get_media_source,
                     child_id,
                 )
-                if child is None and not virtual_category_id:
-                    # An upstream rename can change the derived id while the
-                    # natural key stays the same. Adopt the existing row so
-                    # the retry INSERT does not hit
-                    # UNIQUE(base_url, root_paths, section).
+                # Natural keys are authoritative. A derived id can go stale
+                # after an upstream rename, while another row still owns
+                # ``(base_url, root_paths, section)``; adopting that row before
+                # writing prevents the scan from tripping the UNIQUE constraint.
+                existing_by_key = None
+                if not virtual_category_id:
                     existing_by_key = await asyncio.to_thread(
                         database.find_media_source_by_key,
                         config["base_url"],
@@ -883,6 +904,12 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     if existing_by_key:
                         child_id = str(existing_by_key["id"])
                         child = existing_by_key
+                    elif child:
+                        # The derived id exists under a different natural key.
+                        # It becomes an obsolete child and the end-of-scan
+                        # cleanup removes it once the current category owns the
+                        # key under the canonical id.
+                        child = None
                 # Probe the category before it becomes a library. Plenty of
                 # TVBox sites advertise a category that upstream never fills,
                 # and an empty library is just a dead row in the picker, so a
@@ -915,7 +942,7 @@ async def scan_tvbox_source(source_id: str) -> bool:
                             database.delete_media_source,
                             child_id,
                         )
-                        await source_registry.reload_source(source_id)
+                        await source_registry.reload_source(child_id)
                     continue
                 if not virtual_category_id:
                     wanted_ids.add(child_id)
@@ -1117,6 +1144,7 @@ async def scan_tvbox_source(source_id: str) -> bool:
         finally:
             source_state["running"] = False
             refresh_scan_summary()
+            release_source_runtime(runtime)
 
 
 async def check_fast_start(*, force: bool) -> None:

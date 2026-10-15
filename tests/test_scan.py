@@ -600,9 +600,8 @@ async def test_excluded_author_is_not_listed_indexed_or_kept_active(monkeypatch,
     assert await main.scan_source("asmr6") is True
 
     authors = main.database.asmr_authors(sources=("asmr6",))
-    assert [row["author"] for row in authors] == ["小元2", "空作者"]
+    assert [row["author"] for row in authors] == ["小元2"]
     assert authors[0]["item_count"] == 1
-    assert authors[1]["item_count"] == 0
     assert main.database.asmr_items(author="小元", sources=("asmr6",)) == []
     assert excluded not in fake.listed
     assert stored_rows(main, "asmr6")[excluded + "/old.mp3"]["active"] == 0

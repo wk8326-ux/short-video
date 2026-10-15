@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +17,9 @@ class SourceRuntime:
     config: dict[str, Any]
     client: AListClient | TVBoxClient | HtmlSourceClient
     direct_urls: DirectUrlCache
+    active_users: int = 0
+    retired: bool = False
+    closed: bool = False
 
 
 def default_media_sources(settings: Settings) -> list[dict[str, Any]]:
@@ -112,7 +116,7 @@ class MediaSourceRegistry:
             if runtime is not None:
                 runtimes[source_id] = runtime
         for runtime in previous_runtimes.values():
-            await runtime.client.close()
+            await self._retire_runtime(runtime)
 
     async def reload_source(self, source_id: str) -> None:
         """Rebuild one source without disturbing where it sits in the order.
@@ -129,7 +133,7 @@ class MediaSourceRegistry:
         if source_id in self._runtimes:
             previous = self._runtimes[source_id]
             self._runtimes[source_id] = runtime
-            await previous.client.close()
+            await self._retire_runtime(previous)
         else:
             self._runtimes[source_id] = runtime
 
@@ -192,6 +196,27 @@ class MediaSourceRegistry:
             raise KeyError(source_id)
         return runtime
 
+    def retain(self, runtime: SourceRuntime) -> None:
+        """Keep a runtime alive while a long-running operation uses it."""
+        runtime.active_users += 1
+
+    def release(self, runtime: SourceRuntime) -> None:
+        """Release a use and close a retired runtime after its last user exits."""
+        runtime.active_users = max(0, runtime.active_users - 1)
+        if runtime.active_users == 0 and runtime.retired and not runtime.closed:
+            asyncio.create_task(self._close_runtime(runtime))
+
+    async def _retire_runtime(self, runtime: SourceRuntime) -> None:
+        runtime.retired = True
+        if runtime.active_users == 0:
+            await self._close_runtime(runtime)
+
+    async def _close_runtime(self, runtime: SourceRuntime) -> None:
+        if runtime.closed:
+            return
+        runtime.closed = True
+        await runtime.client.close()
+
     def ids(self, section: str | None = None) -> tuple[str, ...]:
         return tuple(
             source_id
@@ -211,4 +236,4 @@ class MediaSourceRegistry:
     async def _close(self, source_id: str) -> None:
         runtime = self._runtimes.pop(source_id, None)
         if runtime:
-            await runtime.client.close()
+            await self._retire_runtime(runtime)

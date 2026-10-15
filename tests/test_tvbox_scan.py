@@ -40,14 +40,19 @@ class FakeDatabase:
         self.scan_states: list[tuple] = []
         self.last_values: dict = {}
         self.existing_source: dict | None = None
+        self.by_key: dict[tuple[str, str, str], dict] = {}
 
     def get_media_source(self, source_id: str):
         if self.existing_source and self.existing_source["id"] == source_id:
             return self.existing_source
         return self.added[-1] if self.added and source_id.endswith("-2") else None
 
+    def find_media_source_by_key(self, base_url, root_paths, section):
+        return self.by_key.get((base_url, ",".join(root_paths), section))
+
     def add_media_source(self, values: dict):
         self.added.append(values)
+        self.by_key[(values["base_url"], ",".join(values["root_paths"]), values["section"])] = values
         return values
 
     def update_media_source(self, source_id: str, values: dict):
@@ -157,3 +162,49 @@ def test_tvbox_virtual_child_rescan_keeps_its_real_parent(monkeypatch, tmp_path)
     # The row that was written back still points at the owning TVBox source.
     assert database.last_values["parent_source_id"] == "source-abc"
     assert database.last_values["id"] == library_id
+
+
+def test_tvbox_rescan_adopts_the_natural_key_owner(monkeypatch, tmp_path):
+    """A stale derived id must not overwrite the row that owns the key.
+
+    Upstream renamed a category after the first import. The new derived id did
+    not exist, but the natural key did; updating the derived id again is what
+    produced the UNIQUE error and stopped the rest of the scan.
+    """
+    monkeypatch.setenv("ALIST_BASE_URL", "https://guangya.example")
+    monkeypatch.setenv("ALIST_MEDIA_PATH", "/media")
+    monkeypatch.setenv("ASMR_BASE_URL", "https://asmr.example")
+    monkeypatch.setenv("ASMR_MEDIA_PATH", "/asmr6")
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "library.db"))
+    monkeypatch.setenv("STATIC_DIR", str(tmp_path / "static"))
+    monkeypatch.setenv("AUTH_PASSWORD_HASH", "scrypt:test")
+    monkeypatch.setenv("SESSION_SECRET", "test-session-secret-with-at-least-32-characters")
+    monkeypatch.setenv("SHARED_METADATA_BASE_URL", "http://shared.test/api/shared-metadata")
+    monkeypatch.setenv("SHARED_METADATA_TOKEN", "test-token")
+
+    from app import main as main_module
+
+    client = FakeClient({"1": 4379})
+    database = FakeDatabase({"old-id": 0})
+    database.by_key[(
+        "https://example.com/api.php",
+        "/tvbox/1",
+        "movie",
+    )] = {
+        "id": "old-id",
+        "parent_source_id": "parent",
+        "sort_order": 1,
+    }
+    registry = type("Registry", (), {"get": lambda self, source_id: FakeRuntime(
+        config={"base_url": "https://example.com/api.php"},
+        client=client,
+    )})()
+
+    monkeypatch.setattr(main_module, "source_registry", registry)
+    monkeypatch.setattr(main_module, "database", database)
+    monkeypatch.setattr(main_module, "refresh_scan_summary", lambda: None)
+
+    assert asyncio.run(main_module.scan_tvbox_source("parent")) is True
+    assert database.added == []
+    assert database.updated == ["old-id"]
+    assert database.last_values["id"] == "old-id"
