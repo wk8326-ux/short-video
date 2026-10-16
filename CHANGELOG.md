@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.8.9] - 2026-10-16
+
+### Fixed
+- 修复大媒体库电影详情页的相似推荐因 SQLite 参数数量超限而返回 500 的问题；推荐仍按番号、演员、关键词的 OR 规则执行。
+
 ## [1.8.8] - 2026-10-16
 
 ### Fixed

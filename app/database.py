@@ -2474,19 +2474,23 @@ class LibraryDatabase:
                 """,
                 [int(movie_id), *source_params],
             ).fetchall()
-            candidate_ids = [int(row["id"]) for row in candidates]
-            links: list[sqlite3.Row] = []
-            if candidate_ids:
-                placeholders = ", ".join("?" for _ in candidate_ids)
-                links = connection.execute(
-                    f"""
-                    SELECT l.movie_id, e.type, e.normalized_name
-                    FROM movie_metadata_links l
-                    JOIN movie_metadata_entities e ON e.id = l.entity_id
-                    WHERE l.movie_id IN ({placeholders})
-                    """,
-                    candidate_ids,
-                ).fetchall()
+            # Join the link table back to the same candidate filter instead of
+            # expanding every candidate id into an ``IN`` list. Large TVBox
+            # sources can contain more ids than SQLite's variable limit; the
+            # old query then failed the entire recommendation request with
+            # ``too many SQL variables``.
+            links = connection.execute(
+                f"""
+                SELECT l.movie_id, e.type, e.normalized_name
+                FROM movie_metadata_links l
+                JOIN movie_metadata_entities e ON e.id = l.entity_id
+                JOIN movies candidate ON candidate.id = l.movie_id
+                JOIN videos candidate_video ON candidate_video.id = candidate.video_id
+                    AND candidate_video.active = 1
+                WHERE candidate.id <> ? AND {source_clause}
+                """,
+                [int(movie_id), *source_params],
+            ).fetchall()
 
         current_code = str(current["code"] or "") or parse_movie_filename(str(current["name"])).code or ""
         current_prefix = current_code.rsplit("-", 1)[0].casefold() if "-" in current_code else ""
