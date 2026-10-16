@@ -414,7 +414,16 @@ private fun SectionLibraryBrowser(
                 modifier = Modifier.width(132.dp),
             )
             Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
+            // Keep a source with dozens of TVBox categories from expanding the
+            // outer management LazyColumn into one enormous item. The source
+            // rail and the library list scroll independently inside the same
+            // bounded work area.
+            Column(
+                Modifier
+                    .weight(1f)
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
                 selected?.libraries?.takeIf { it.isNotEmpty() }?.let { libraries ->
                     libraries.forEach { child ->
                         key(child.id) {

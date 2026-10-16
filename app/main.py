@@ -69,7 +69,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.8.7"
+APP_VERSION = "1.8.8"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -3219,6 +3219,11 @@ async def admin_status() -> dict[str, Any]:
     movie_sources = source_registry.ids("movie")
     drama_sources = source_registry.ids("drama")
 
+    # ``stats_by_source`` scans the whole catalogue, so ask for it once and
+    # hand the result to ``list_media_sources`` rather than letting that
+    # function repeat the same grouped scan on the same request.
+    source_stats = await asyncio.to_thread(database.stats_by_source)
+
     def stats_for(source_ids: Sequence[str]) -> dict[str, int]:
         return {
             "videos": sum(source_stats.get(id, {}).get("videos", 0) for id in source_ids),
@@ -3229,14 +3234,12 @@ async def admin_status() -> dict[str, Any]:
         sources,
         summary,
         issues,
-        source_stats,
         movie_source_summaries,
         drama_source_summaries,
     ) = await asyncio.gather(
-        asyncio.to_thread(database.list_media_sources),
+        asyncio.to_thread(database.list_media_sources, stats=source_stats),
         asyncio.to_thread(database.fast_start_summary, sources=feed_sources),
         asyncio.to_thread(database.fast_start_issues, limit=20, sources=feed_sources),
-        asyncio.to_thread(database.stats_by_source),
         asyncio.to_thread(database.movie_metadata_summaries, sources=movie_sources),
         asyncio.to_thread(database.drama_metadata_summaries, sources=drama_sources),
     )
@@ -4675,7 +4678,9 @@ async def movie_metadata_movies(
 async def _set_movie_favorite(movie_id: int, favorite: bool) -> dict[str, Any]:
     """Heart or un-heart one title and hand the caller the updated record."""
     sources = source_registry.ids("movie")
-    row = await asyncio.to_thread(database.get_movie, movie_id, sources=sources)
+    row = await asyncio.to_thread(
+        database.get_movie, movie_id, sources=sources, with_entities=True
+    )
     if not row:
         raise HTTPException(status_code=404, detail="Movie not found")
     await asyncio.to_thread(
@@ -4704,6 +4709,7 @@ async def movie_detail(movie_id: int) -> dict[str, Any]:
         database.get_movie,
         movie_id,
         sources=source_registry.ids("movie"),
+        with_entities=True,
     )
     if not row:
         raise HTTPException(status_code=404, detail="Movie not found")

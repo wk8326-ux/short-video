@@ -123,7 +123,9 @@ async def test_shared_metadata_is_used_without_any_local_scraper(monkeypatch, tm
     assert movie["poster_url"] == "https://c0.jdbstatic.com/covers/ve/veyGnb.jpg"
     assert movie["match_confidence"] == pytest.approx(0.98)
 
-    detail = main.database.get_movie(int(movie["id"]), sources=("movies",))
+    detail = main.database.get_movie(
+        int(movie["id"]), sources=("movies",), with_entities=True
+    )
     assert detail is not None
     payload = main.public_movie(detail, detail=True)
     assert payload["metadataProvider"] == "shared"

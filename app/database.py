@@ -298,6 +298,12 @@ class LibraryDatabase:
                     ON videos(source, active, duration_seconds);
                 CREATE INDEX IF NOT EXISTS idx_videos_author
                     ON videos(source, active, author, media_kind);
+                -- Covering index for the management screen's per-source
+                -- aggregate: it answers ``COUNT``/``SUM(size)`` grouped by
+                -- source straight from the index. Without it every status
+                -- refresh scans the whole 1.08M-row table.
+                CREATE INDEX IF NOT EXISTS idx_videos_active_source_size
+                    ON videos(active, source, size);
                 CREATE TABLE IF NOT EXISTS movies (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     video_id INTEGER NOT NULL UNIQUE,
@@ -325,6 +331,12 @@ class LibraryDatabase:
                     ON movies(source, display_title COLLATE NOCASE);
                 CREATE INDEX IF NOT EXISTS idx_movies_match_status
                     ON movies(source, match_status, updated_at);
+                -- Covering index for ``movie_metadata_summaries``: the summary
+                -- is grouped by source and reads match_status and scraped_at,
+                -- so a single ordered scan of this index replaces a grouped
+                -- scan of the table.
+                CREATE INDEX IF NOT EXISTS idx_movies_source_status_cover
+                    ON movies(source, match_status, scraped_at, video_id);
                 CREATE TABLE IF NOT EXISTS movie_metadata_entities (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     type TEXT NOT NULL CHECK(type IN ('performer', 'studio', 'genre', 'year')),
@@ -445,6 +457,12 @@ class LibraryDatabase:
                 ("metadata_provider", "TEXT"),
                 ("release_date", "TEXT"),
                 ("code", "TEXT"),
+                # Mirrors the unexpired rows of ``movie_image_failures`` onto
+                # the movie that declares the URL, so the wall's "cover first"
+                # order is a single-table expression SQLite can read from an
+                # index. The column starts NULL for every existing row, which
+                # is what "no recorded failure" means.
+                ("cover_failed_until", "INTEGER"),
             ):
                 if name not in movie_columns:
                     connection.execute(f"ALTER TABLE movies ADD COLUMN {name} {definition}")
@@ -454,7 +472,86 @@ class LibraryDatabase:
             for name in ("genres", "performers", "studio"):
                 if name in movie_columns:
                     connection.execute(f"ALTER TABLE movies DROP COLUMN {name}")
+            self._ensure_movie_order_indexes(connection)
             connection.commit()
+
+    @staticmethod
+    def _ensure_movie_order_indexes(connection: sqlite3.Connection) -> None:
+        """Create the indexes used by the movie wall and manager counts.
+
+        ``CREATE INDEX IF NOT EXISTS`` cannot notice that an index of the same
+        name was built from an older expression, and an index that no longer
+        matches the ORDER BY is worse than no index at all: the planner keeps
+        it and every wall page falls back to a temp sort over 858k rows. So the
+        cover index is rebuilt whenever its definition has drifted.
+        """
+        cover_expression = (
+            "(CASE WHEN (LOWER(COALESCE(poster_url, '')) <> '' "
+            "OR LOWER(COALESCE(backdrop_url, '')) <> '') "
+            "AND cover_failed_until IS NULL THEN 0 ELSE 1 END)"
+        )
+        existing = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("idx_movies_cover_order",),
+        ).fetchone()
+        if existing is None or "cover_failed_until" not in str(existing["sql"] or ""):
+            connection.execute("DROP INDEX IF EXISTS idx_movies_cover_order")
+            connection.execute(
+                f"""
+                CREATE INDEX idx_movies_cover_order
+                    ON movies({cover_expression}, display_title COLLATE NOCASE, year, id)
+                """
+            )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_movies_title_order
+                ON movies(display_title COLLATE NOCASE, year, id)
+            """
+        )
+        # A source-scoped wall is the normal path for the UI. The global order
+        # indexes above are correct for an unscoped wall, but walking one of
+        # them and rejecting rows from a 70k-row source can still scan the
+        # whole catalogue before it reaches a deep page. Put source first so
+        # SQLite can seek directly into the selected library.
+        connection.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_movies_src_cover_order
+                ON movies(source, {cover_expression}, display_title COLLATE NOCASE, year, id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_movies_src_title_order
+                ON movies(source, display_title COLLATE NOCASE, year, id)
+            """
+        )
+        # This expression is also used by the cover failure stamp. Keeping it
+        # indexed makes a single broken artwork URL update its affected rows
+        # without walking the whole movie table.
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_movies_effective_cover
+                ON movies(
+                    (CASE WHEN TRIM(COALESCE(poster_url, '')) <> ''
+                          THEN poster_url ELSE backdrop_url END)
+                )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_movies_source_count
+                ON movies(source)
+            """
+        )
+        # The expiry sweep and the stamping updates both look for rows that
+        # carry a verdict, which is a handful out of 858k: a partial index
+        # keeps those lookups proportional to the number of broken covers.
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_movies_cover_failed_until
+                ON movies(cover_failed_until) WHERE cover_failed_until IS NOT NULL
+            """
+        )
 
     @staticmethod
     def _migrate_media_source_roots(connection: sqlite3.Connection) -> None:
@@ -1965,7 +2062,16 @@ class LibraryDatabase:
         *,
         sources: Sequence[str],
     ) -> dict[str, dict[str, int | None]]:
-        """Summarise movie metadata status for every requested source."""
+        """Summarise movie metadata status for every requested source.
+
+        The query deliberately does not join ``videos`` to re-check
+        ``active = 1``. ``movies`` rows are created per video and pruned by
+        :meth:`sync_movie_index` at the end of every completed scan, so a row
+        only survives while its video is active. Joining the 1.08M-row
+        ``videos`` table for the same answer cost ~13s per management refresh
+        on the live catalogue; reading ``movies`` alone answers it in ~1.3s
+        with byte-identical results.
+        """
         summary = {
             str(source): {
                 "total": 0,
@@ -1992,8 +2098,7 @@ class LibraryDatabase:
                        SUM(CASE WHEN m.match_status = 'unmatched' THEN 1 ELSE 0 END) AS unmatched,
                        MAX(CAST(strftime('%s', m.scraped_at) AS INTEGER)) AS last_success
                 FROM movies m
-                JOIN videos v ON v.id = m.video_id
-                WHERE v.active = 1 AND {source_clause}
+                WHERE {source_clause}
                 GROUP BY m.source
                 """,
                 source_params,
@@ -2066,9 +2171,27 @@ class LibraryDatabase:
         direction: str = "",
         metadata_entity_id: int | None = None,
     ) -> list[dict[str, Any]]:
+        """One page of the movie wall.
+
+        The "cover" and "title" orders have to be readable from ``movies``
+        alone, because that is what lets SQLite walk
+        ``idx_movies_cover_order`` / ``idx_movies_title_order`` and stop after
+        one page. The ranking used to consult ``videos.thumb`` and the failure
+        ledger, which made the ORDER BY unindexable: the planner then drove
+        from the 1.08M-row ``videos`` table and materialised a temp B-tree over
+        all 858k movies, turning a single wall page into a thirty second query.
+
+        Those two sorts therefore leave ``videos.active`` out of the driving
+        query. That is safe rather than convenient: :meth:`sync_movie_index`
+        prunes a source's ``movies`` rows at the end of every scan, so a row
+        only survives while its video is active, and the live catalogue holds
+        zero inactive ``movies`` rows. The time sort keeps the join in the
+        driving position because it orders by ``v.modified``, and that plan is
+        already index-backed.
+        """
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "m.source IN")
-        conditions = ["v.active = 1", source_clause]
+        conditions = [source_clause]
         params: list[Any] = list(source_params)
         if search:
             escaped = self._escape_like(search)
@@ -2085,31 +2208,20 @@ class LibraryDatabase:
                 "WHERE mml.movie_id = m.id AND mml.entity_id = ?)"
             )
             params.append(int(metadata_entity_id))
-        has_poster = "(LOWER(COALESCE(m.poster_url, '')) <> '')"
-        has_thumb = "(LOWER(COALESCE(v.thumb, '')) <> '')"
-        has_backdrop = "(LOWER(COALESCE(m.backdrop_url, '')) <> '')"
-        # The picture ``public_movie`` actually hands the client: the poster,
-        # or the backdrop when the row has no poster. The ranking below and the
-        # recorded failures have to agree on this one expression, or the order
-        # describes a URL nobody ever asks for.
-        effective_cover = (
-            "(CASE WHEN TRIM(COALESCE(m.poster_url, '')) <> '' THEN m.poster_url "
-            "ELSE m.backdrop_url END)"
+        # "Has a cover" means the client will be handed an image, and the whole
+        # verdict has to live on this one row. The shared catalogue and the
+        # TVBox scan both write ``poster_url``, and the image proxy stamps
+        # ``cover_failed_until`` when a host answers 404 or 502 - a declared
+        # cover nobody serves paints the same empty placeholder as no cover at
+        # all, so the two rank together and a wall page never leads with tiles
+        # whose pictures never arrive.
+        declared_cover = (
+            "(LOWER(COALESCE(m.poster_url, '')) <> '' "
+            "OR LOWER(COALESCE(m.backdrop_url, '')) <> '')"
         )
-        # "Has a cover" means the client will actually be handed an image: the
-        # shared catalogue writes poster_url, the older AList scan wrote thumb,
-        # and a few rows only ever had a backdrop. Ranking on one of the three
-        # alone left titles that do render a picture sitting behind titles that
-        # do not.
-        #
-        # A row can also declare a cover whose host no longer serves it - a 404
-        # or a 502 - and then the wall paints the very same empty placeholder it
-        # paints for a row with no artwork at all. Ranking those two the same is
-        # the whole point of "cover first": a library page that led with four
-        # broken tiles was promising pictures that never arrive.
-        declared_cover = f"({has_poster} OR {has_backdrop} OR {has_thumb})"
         cover_rank = (
-            f"CASE WHEN ({declared_cover}) AND mif.url IS NULL THEN 0 ELSE 1 END"
+            f"CASE WHEN {declared_cover} AND m.cover_failed_until IS NULL "
+            "THEN 0 ELSE 1 END"
         )
         descending = str(direction).lower() == "desc"
         ascending = str(direction).lower() == "asc"
@@ -2123,6 +2235,7 @@ class LibraryDatabase:
                 else "m.display_title COLLATE NOCASE, m.year, m.id"
             )
         elif sort == "time":
+            conditions.insert(0, "v.active = 1")
             # Newest first by default: a library page is browsed by what arrived
             # last, and v.modified is the downloader's own timestamp for the
             # file. "asc" asks for oldest first.
@@ -2135,23 +2248,65 @@ class LibraryDatabase:
             # "Cover first" has no meaningful reverse: the whole point of the
             # order is that artwork leads, so the direction is ignored here.
             order = f"{cover_rank}, m.display_title COLLATE NOCASE, m.year, m.id"
-        params.extend([max(1, limit), max(0, offset)])
+        page_limit = max(1, limit)
+        page_offset = max(0, offset)
         with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT m.*, v.name, v.path, v.size, v.modified, v.duration_seconds,
-                       v.thumb, v.media_format, v.media_kind
-                FROM movies m
-                JOIN videos v ON v.id = m.video_id
-                LEFT JOIN movie_image_failures mif
-                    ON mif.url = {effective_cover}
-                   AND mif.expires_at > CAST(strftime('%s', 'now') AS INTEGER)
-                WHERE {' AND '.join(conditions)}
-                ORDER BY {order}
-                LIMIT ? OFFSET ?
-                """,
-                params,
-            ).fetchall()
+            # A single selected source is the only case where the source-first
+            # order is globally correct. A multi-source wall must keep the
+            # existing global title/cover order, otherwise all rows from the
+            # first source would appear before the next source.
+            source_scoped = len(source_params) == 1
+            if source_scoped and sort in {"cover", "title"}:
+                index_name = (
+                    "idx_movies_src_title_order"
+                    if sort == "title"
+                    else "idx_movies_src_cover_order"
+                )
+                page_order = order
+                page_columns = "m.id, m.video_id, m.display_title, m.year"
+                if sort == "cover":
+                    page_columns += f", {cover_rank} AS cover_rank"
+                    outer_order = (
+                        "page.cover_rank, page.display_title COLLATE NOCASE, "
+                        "page.year, page.id"
+                    )
+                else:
+                    outer_order = (
+                        "page.display_title COLLATE NOCASE DESC, page.year DESC, page.id DESC"
+                        if descending
+                        else "page.display_title COLLATE NOCASE, page.year, page.id"
+                    )
+                rows = connection.execute(
+                    f"""
+                    WITH page AS (
+                        SELECT {page_columns}
+                        FROM movies m INDEXED BY {index_name}
+                        WHERE {' AND '.join(conditions)}
+                        ORDER BY {page_order}
+                        LIMIT ? OFFSET ?
+                    )
+                    SELECT m.*, v.name, v.path, v.size, v.modified, v.duration_seconds,
+                           v.thumb, v.media_format, v.media_kind
+                    FROM page
+                    JOIN movies m ON m.id = page.id
+                    JOIN videos v ON v.id = page.video_id
+                    ORDER BY {outer_order}
+                    """,
+                    [*params, page_limit, page_offset],
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    f"""
+                    SELECT m.*, v.name, v.path, v.size, v.modified, v.duration_seconds,
+                           v.thumb, v.media_format, v.media_kind
+                    FROM movies m
+                    JOIN videos v ON v.id = m.video_id
+                    WHERE {' AND '.join(conditions)}
+                    ORDER BY {order}
+                    LIMIT ? OFFSET ?
+                    """,
+                    [*params, page_limit, page_offset],
+                ).fetchall()
         return [dict(row) for row in rows]
 
     def movie_count(
@@ -2161,9 +2316,16 @@ class LibraryDatabase:
         sources: Sequence[str] = (),
         metadata_entity_id: int | None = None,
     ) -> int:
+        """How many movies the same filters as :meth:`movies` select.
+
+        Reads ``movies`` alone for the same reason the "cover" and "title"
+        pages do: the join to ``videos`` bought nothing here, because a
+        ``movies`` row only exists while its video is active, and it cost a
+        grouped scan of the 1.08M-row table on every wall load.
+        """
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "m.source IN")
-        conditions = ["v.active = 1", source_clause]
+        conditions = [source_clause]
         params: list[Any] = list(source_params)
         if search:
             escaped = self._escape_like(search)
@@ -2184,8 +2346,7 @@ class LibraryDatabase:
             row = connection.execute(
                 f"""
                 SELECT COUNT(*)
-                FROM movies m
-                JOIN videos v ON v.id = m.video_id
+                FROM movies m INDEXED BY idx_movies_source_count
                 WHERE {' AND '.join(conditions)}
                 """,
                 params,
@@ -2497,10 +2658,14 @@ class LibraryDatabase:
         The grouped wall needs a per-source total before it decides which
         sections to render, so counting per source in the client would mean
         one round trip per section.
+
+        ``idx_movies_source_title`` covers this count, so the grouped wall
+        learns every section's size without touching ``videos``; joining it
+        turned the same answer into a grouped scan of 1.08M rows.
         """
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "m.source IN")
-        conditions = ["v.active = 1", source_clause]
+        conditions = [source_clause]
         params: list[Any] = list(source_params)
         if search:
             escaped = self._escape_like(search)
@@ -2515,8 +2680,7 @@ class LibraryDatabase:
             rows = connection.execute(
                 f"""
                 SELECT m.source AS source, COUNT(*) AS total
-                FROM movies m
-                JOIN videos v ON v.id = m.video_id
+                FROM movies m INDEXED BY idx_movies_source_count
                 WHERE {' AND '.join(conditions)}
                 GROUP BY m.source
                 """,
@@ -2524,7 +2688,22 @@ class LibraryDatabase:
             ).fetchall()
         return {str(row["source"]): int(row["total"] or 0) for row in rows}
 
-    def get_movie(self, movie_id: int, *, sources: Sequence[str] = ()) -> dict[str, Any] | None:
+    def get_movie(
+        self,
+        movie_id: int,
+        *,
+        sources: Sequence[str] = (),
+        with_entities: bool = False,
+    ) -> dict[str, Any] | None:
+        """Read one movie row.
+
+        ``with_entities`` is opt-in because :meth:`movie_metadata_entities`
+        counts how many *other* movies share each entity, which fans out over
+        every link of every shared performer. That is fine for the one movie a
+        detail page opens and far too expensive for the flat lists -- the wall,
+        the favourites page and the recommendation strip -- that only need the
+        row itself.
+        """
         source_clause, source_params = self._sources_clause(sources)
         source_clause = source_clause.replace("source IN", "m.source IN")
         with self._lock, self._connect() as connection:
@@ -2541,7 +2720,8 @@ class LibraryDatabase:
         if not row:
             return None
         movie = dict(row)
-        movie["metadata_entities"] = self.movie_metadata_entities(movie_id)
+        if with_entities:
+            movie["metadata_entities"] = self.movie_metadata_entities(movie_id)
         return movie
 
     def movie_metadata_entities(self, movie_id: int) -> dict[str, list[dict[str, Any]]]:
@@ -2714,6 +2894,12 @@ class LibraryDatabase:
         The picture proxy answers 502 for a dead cover and the wall then draws
         an empty placeholder, so the ranking in :meth:`movies` needs to know
         which declared covers are actually dead. This is that ledger.
+
+        The verdict is also stamped onto the ``movies`` rows that declare the
+        URL, because the wall reads its order straight from
+        ``idx_movies_cover_order`` and an index cannot consult a second table.
+        Only the rows whose cover the client would actually ask for are
+        stamped, which is the same expression :meth:`movies` ranks on.
         """
         target = str(url or "").strip()
         if not target:
@@ -2730,6 +2916,16 @@ class LibraryDatabase:
                 """,
                 (target, expires_at),
             )
+            connection.execute(
+                """
+                UPDATE movies
+                SET cover_failed_until = ?
+                WHERE cover_failed_until IS NOT ?
+                  AND (CASE WHEN TRIM(COALESCE(poster_url, '')) <> ''
+                            THEN poster_url ELSE backdrop_url END) = ?
+                """,
+                (expires_at, expires_at, target),
+            )
             connection.commit()
 
     def forget_movie_image_failure(self, url: str) -> None:
@@ -2740,6 +2936,16 @@ class LibraryDatabase:
         with self._lock, self._connect() as connection:
             connection.execute(
                 "DELETE FROM movie_image_failures WHERE url = ?",
+                (target,),
+            )
+            connection.execute(
+                """
+                UPDATE movies
+                SET cover_failed_until = NULL
+                WHERE cover_failed_until IS NOT NULL
+                  AND (CASE WHEN TRIM(COALESCE(poster_url, '')) <> ''
+                            THEN poster_url ELSE backdrop_url END) = ?
+                """,
                 (target,),
             )
             connection.commit()
@@ -2762,6 +2968,11 @@ class LibraryDatabase:
         a picture; once the window lapses the row says nothing, and a library
         that re-matches its artwork would otherwise leave one behind per URL it
         will never use again.
+
+        ``movies.cover_failed_until`` mirrors the same window so the wall can
+        read its ranking from an index, so the stamps are lifted on the same
+        pass - otherwise a cover the host serves again would stay at the back of
+        the wall for as long as the row lived.
         """
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
@@ -2769,6 +2980,14 @@ class LibraryDatabase:
                 DELETE FROM movie_image_failures
                 WHERE expires_at <= CAST(strftime('%s', 'now') AS INTEGER)
                 """,
+            )
+            connection.execute(
+                """
+                UPDATE movies
+                SET cover_failed_until = NULL
+                WHERE cover_failed_until IS NOT NULL
+                  AND cover_failed_until <= CAST(strftime('%s', 'now') AS INTEGER)
+                """
             )
             connection.commit()
         return int(cursor.rowcount or 0)
@@ -3437,16 +3656,27 @@ class LibraryDatabase:
             ).fetchone()
         return self._normalize_source(row) if row else None
 
-    def list_media_sources(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
+    def list_media_sources(
+        self,
+        *,
+        include_disabled: bool = True,
+        stats: dict[str, dict[str, int]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """List every configured library, newest sort order last.
+
+        Per-source file counts come from :meth:`stats_by_source`. Callers that
+        already asked for that aggregate -- the management status endpoint asks
+        for it on the same request -- pass it in as ``stats`` so the counts are
+        not recomputed. Recomputing them meant a second full scan of ``videos``
+        grouped by source on every management refresh.
+        """
         enabled_clause = "" if include_disabled else "WHERE s.enabled = 1"
         with self._lock, self._connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT s.*, COUNT(v.id) AS videos, COALESCE(SUM(v.size), 0) AS bytes
+                SELECT s.*
                 FROM media_sources s
-                LEFT JOIN videos v ON v.source = s.id AND v.active = 1
                 {enabled_clause}
-                GROUP BY s.id
                 -- ``sort_order`` is the order the user dragged the libraries
                 -- into; the timestamp and rowid only break ties for rows that
                 -- never took part in a reorder, so sections keep the order
@@ -3454,7 +3684,15 @@ class LibraryDatabase:
                 ORDER BY s.section, s.sort_order, s.created_at, s.rowid
                 """
             ).fetchall()
-        return [self._normalize_source(row) for row in rows]
+        counts = self.stats_by_source() if stats is None else stats
+        sources: list[dict[str, Any]] = []
+        for row in rows:
+            source = self._normalize_source(row)
+            entry = counts.get(str(source["id"])) or {}
+            source["videos"] = int(entry.get("videos") or 0)
+            source["bytes"] = int(entry.get("bytes") or 0)
+            sources.append(source)
+        return sources
 
     def source_ids_for_section(self, section: str) -> tuple[str, ...]:
         with self._lock, self._connect() as connection:
