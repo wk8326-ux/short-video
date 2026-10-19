@@ -760,11 +760,15 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         val account = preferences.apiCacheAccount?.takeIf { target.host == baseUrl.host }
         val ttlMs = responseCacheTtl(target.encodedPath)
         if (account == null || ttlMs == null) {
-            return executeJson(Request.Builder().url(target).get().build())
+            return withTransientReadRetry {
+                executeJson(Request.Builder().url(target).get().build())
+            }
         }
         responseCache.fresh(target.toString(), account, ttlMs)?.let { return it }
         return try {
-            executeJson(Request.Builder().url(target).get().build()).also { payload ->
+            withTransientReadRetry {
+                executeJson(Request.Builder().url(target).get().build())
+            }.also { payload ->
                 responseCache.put(target.toString(), account, payload)
             }
         } catch (error: IOException) {

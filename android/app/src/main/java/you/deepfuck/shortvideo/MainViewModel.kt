@@ -307,6 +307,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var appUpdateJob: Job? = null
     private var appUpdateObserverJob: Job? = null
     private var skinSaveGeneration = 0L
+    private val catalogSyncJobs = mutableMapOf<String, Job>()
     val movieImageLoader by lazy { api.movieImageLoader(application) }
 
     init {
@@ -2992,6 +2993,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (state.surface != MediaSurface.DRAMA) return
         if (!reset && state.dramaGroupsLoading) return
         val requestedQuery = state.dramaQuery.trim()
+        val sourceSnapshotMissing = state.dramaSources.isEmpty()
         val requestGeneration = ++dramaRequestGeneration
         dramaJob?.cancel()
         mutableState.value = state.copy(dramaGroupsLoading = true, dramaError = null)
@@ -3055,6 +3057,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         dramaGroupsLoading = false,
                         dramaError = null,
                     )
+                    if (sourceSnapshotMissing && selectedSource != null) {
+                        scheduleCatalogSyncForSection("drama", selectedSource.libraryIds)
+                    }
                     if (sourceChanged) loadRecentDramas()
                     if (reset && page.groups.isEmpty() && page.scanRunning) {
                         delay(1_500)
@@ -3241,6 +3246,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = mutableState.value
         if (!reset && state.movieGroupsLoading) return
         movieJob?.cancel()
+        val sourceSnapshotMissing = state.movieSources.isEmpty()
         val requestedSort = state.movieSort
         // Each section previews the library's own first six, so the wall asks
         // the server for every saved per-library order at once. Without this a
@@ -3332,6 +3338,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         movieLoading = false,
                         movieError = null,
                     )
+                    if (sourceSnapshotMissing && selectedSource != null) {
+                        scheduleCatalogSyncForSection("movie", selectedSource.libraryIds)
+                    }
                     if (page.groups.isEmpty() && page.scanRunning) {
                         delay(1_500)
                         loadMovieGroups(reset = true)
@@ -4275,13 +4284,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             "feed", "asmr", "movie", "drama" -> listOf(section)
             else -> emptyList()
         }
+        val selected = sourceIds.orEmpty().filter(String::isNotBlank).distinct()
+        if (section in setOf("movie", "drama") && selected.isEmpty()) return
         targets.forEach { target ->
-            val selected = sourceIds.orEmpty().filter(String::isNotBlank).distinct()
-            if (selected.isEmpty()) {
-                CatalogSyncWorker.enqueue(getApplication(), account, target)
-            } else {
-                selected.forEach { sourceId ->
-                    CatalogSyncWorker.enqueue(getApplication(), account, target, sourceId)
+            catalogSyncJobs.remove(target)?.cancel()
+            catalogSyncJobs[target] = viewModelScope.launch {
+                // Give the visible page request first use of the network and the
+                // server's database. The v1.9.0 startup path queued a full
+                // source bootstrap beside the first wall request, so a short
+                // SQLite/thread-pool delay was shown as a broken page.
+                delay(CATALOG_SYNC_START_DELAY_MS)
+                if (preferences.apiCacheAccount != account) return@launch
+                if (selected.isEmpty()) {
+                    CatalogSyncWorker.enqueue(getApplication(), account, target)
+                } else {
+                    selected.forEach { sourceId ->
+                        CatalogSyncWorker.enqueue(getApplication(), account, target, sourceId)
+                    }
                 }
             }
         }
@@ -4375,6 +4394,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         playback.setOnPlaybackEndedListener(null)
         playback.setOnMediaTransitionListener(null)
         super.onCleared()
+    }
+
+    private companion object {
+        const val CATALOG_SYNC_START_DELAY_MS = 10_000L
     }
 }
 

@@ -1,8 +1,8 @@
 {
-  "versionCode": 211,
-  "versionName": "1.9.0",
-  "apkFile": "deepfuck-android-v1.9.0.apk",
-  "sha256": "9085852f58134b312ef023c3e80c4a3f2ab8f4988c727af127ce93e22a62967a",
+  "versionCode": 212,
+  "versionName": "1.9.1",
+  "apkFile": "deepfuck-android-v1.9.1.apk",
+  "sha256": "ac5b816322670db53aa1774c7fef308d4bdd249a8914804f911599b47ada47c1",
   "size": 4611045,
-  "notes": "完成服务器与 APK 的本地读模型、全文搜索、收藏本地优先、增量同步、媒体源切换和播放缓存架构重构。"
+  "notes": "修复冷启动时管理页和电影墙首请求与本地目录同步竞争导致的无法载入；目录同步延后并按当前媒体源执行，幂等 GET 请求增加有限退避重试。"
 }

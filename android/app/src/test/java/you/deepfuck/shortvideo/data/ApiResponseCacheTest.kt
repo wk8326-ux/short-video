@@ -1,6 +1,7 @@
 package you.deepfuck.shortvideo.data
 
 import java.nio.file.Files
+import java.io.IOException
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -12,6 +13,43 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class ApiResponseCacheTest {
+    @Test
+    fun transientReadFailureRetriesOnceAndReturnsTheSuccessfulResponse() {
+        var calls = 0
+        val delays = mutableListOf<Long>()
+
+        val result = withTransientReadRetry(
+            sleep = { delays += it },
+        ) {
+            calls += 1
+            if (calls == 1) throw IOException("temporary network failure")
+            "ok"
+        }
+
+        assertEquals("ok", result)
+        assertEquals(2, calls)
+        assertEquals(listOf(450L), delays)
+    }
+
+    @Test
+    fun nonTransientHttpFailureIsNotReplayed() {
+        var calls = 0
+
+        try {
+            withTransientReadRetry(
+                sleep = { error("unexpected retry") },
+            ) {
+                calls += 1
+                throw ApiException(404, "not found")
+            }
+            throw AssertionError("expected ApiException")
+        } catch (error: ApiException) {
+            assertEquals(404, error.statusCode)
+        }
+
+        assertEquals(1, calls)
+    }
+
     @Test
     fun freshEntrySurvivesAndExpiresIntoStaleWindow() {
         val directory = Files.createTempDirectory("api-cache-test").toFile()
