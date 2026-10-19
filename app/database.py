@@ -381,6 +381,7 @@ class LibraryDatabase:
                     ON dramas(source, title COLLATE NOCASE);
                 CREATE TABLE IF NOT EXISTS deleted_media_sources (
                     id TEXT PRIMARY KEY,
+                    section TEXT NOT NULL DEFAULT '',
                     deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 -- Where every device left off. One row per media row, keyed by
@@ -432,13 +433,324 @@ class LibraryDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_movie_image_failures_expiry
                     ON movie_image_failures(expires_at);
+                -- TVBox categories are remote paginated collections rather
+                -- than filesystem directories. Persisting their last probe
+                -- makes a failed or independently rescanned category visible
+                -- without reparsing the whole source configuration.
+                CREATE TABLE IF NOT EXISTS tvbox_category_snapshots (
+                    source_id TEXT NOT NULL,
+                    remote_category_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    upstream_total INTEGER NOT NULL DEFAULT 0,
+                    page_count INTEGER NOT NULL DEFAULT 0,
+                    item_count INTEGER NOT NULL DEFAULT 0,
+                    last_fetched INTEGER,
+                    last_error TEXT,
+                    PRIMARY KEY(source_id, remote_category_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_tvbox_category_snapshots_source
+                    ON tvbox_category_snapshots(source_id, last_fetched DESC);
+                -- The Android read model follows this append-only log instead
+                -- of asking for a complete catalogue on every refresh. The
+                -- current row is always looked up when a change is read, so
+                -- the log only needs stable ids and the operation.
+                CREATE TABLE IF NOT EXISTS catalog_sync_state (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    revision INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO catalog_sync_state(id, revision) VALUES(1, 0)
+                ON CONFLICT(id) DO NOTHING;
+                CREATE TABLE IF NOT EXISTS catalog_changes (
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    source_id TEXT,
+                    operation TEXT NOT NULL CHECK(operation IN ('upsert', 'delete')),
+                    revision INTEGER NOT NULL,
+                    changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(entity_type, entity_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_catalog_changes_source_revision
+                    ON catalog_changes(source_id, revision);
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_videos_insert
+                AFTER INSERT ON videos
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES(
+                        'media', CAST(NEW.id AS TEXT), NEW.source,
+                        CASE WHEN NEW.active = 1 AND NEW.hidden = 0 THEN 'upsert' ELSE 'delete' END,
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1)
+                    ) ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_videos_update
+                AFTER UPDATE OF path, name, size, modified, thumb, active, hidden,
+                    source, author, duration_seconds, media_format, media_kind,
+                    display_title, original_title, year, poster_url, backdrop_url
+                    ON videos
+                WHEN NEW.path IS NOT OLD.path OR NEW.name IS NOT OLD.name
+                    OR NEW.size IS NOT OLD.size OR NEW.modified IS NOT OLD.modified
+                    OR NEW.thumb IS NOT OLD.thumb OR NEW.active IS NOT OLD.active
+                    OR NEW.hidden IS NOT OLD.hidden OR NEW.source IS NOT OLD.source
+                    OR NEW.author IS NOT OLD.author
+                    OR NEW.duration_seconds IS NOT OLD.duration_seconds
+                    OR NEW.media_format IS NOT OLD.media_format
+                    OR NEW.media_kind IS NOT OLD.media_kind
+                    OR NEW.display_title IS NOT OLD.display_title
+                    OR NEW.original_title IS NOT OLD.original_title
+                    OR NEW.year IS NOT OLD.year OR NEW.poster_url IS NOT OLD.poster_url
+                    OR NEW.backdrop_url IS NOT OLD.backdrop_url
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES(
+                        'media', CAST(NEW.id AS TEXT), NEW.source,
+                        CASE WHEN NEW.active = 1 AND NEW.hidden = 0 THEN 'upsert' ELSE 'delete' END,
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1)
+                    ) ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_videos_delete
+                AFTER DELETE ON videos
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('media', CAST(OLD.id AS TEXT), OLD.source, 'delete',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_movies_insert
+                AFTER INSERT ON movies
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('movie', CAST(NEW.id AS TEXT), NEW.source, 'upsert',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_movies_update
+                AFTER UPDATE ON movies
+                WHEN NEW.source IS NOT OLD.source
+                    OR NEW.display_title IS NOT OLD.display_title
+                    OR NEW.normalized_title IS NOT OLD.normalized_title
+                    OR NEW.original_title IS NOT OLD.original_title
+                    OR NEW.year IS NOT OLD.year OR NEW.code IS NOT OLD.code
+                    OR NEW.overview IS NOT OLD.overview
+                    OR NEW.poster_url IS NOT OLD.poster_url
+                    OR NEW.backdrop_url IS NOT OLD.backdrop_url
+                    OR NEW.rating IS NOT OLD.rating
+                    OR NEW.runtime_minutes IS NOT OLD.runtime_minutes
+                    OR NEW.metadata_provider IS NOT OLD.metadata_provider
+                    OR NEW.release_date IS NOT OLD.release_date
+                    OR NEW.match_status IS NOT OLD.match_status
+                    OR NEW.match_confidence IS NOT OLD.match_confidence
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('movie', CAST(NEW.id AS TEXT), NEW.source, 'upsert',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_movies_delete
+                AFTER DELETE ON movies
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('movie', CAST(OLD.id AS TEXT), OLD.source, 'delete',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_movie_metadata_links_insert
+                AFTER INSERT ON movie_metadata_links
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    SELECT 'movie', CAST(m.id AS TEXT), m.source, 'upsert',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1)
+                    FROM movies m WHERE m.id = NEW.movie_id
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_movie_metadata_links_delete
+                AFTER DELETE ON movie_metadata_links
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    SELECT 'movie', CAST(m.id AS TEXT), m.source, 'upsert',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1)
+                    FROM movies m WHERE m.id = OLD.movie_id
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_dramas_insert
+                AFTER INSERT ON dramas
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('drama', NEW.id, NEW.source, 'upsert',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_dramas_update
+                AFTER UPDATE ON dramas
+                WHEN NEW.source IS NOT OLD.source OR NEW.folder IS NOT OLD.folder
+                    OR NEW.title IS NOT OLD.title OR NEW.folder_title IS NOT OLD.folder_title
+                    OR NEW.category IS NOT OLD.category OR NEW.code IS NOT OLD.code
+                    OR NEW.poster_url IS NOT OLD.poster_url
+                    OR NEW.overview IS NOT OLD.overview OR NEW.tags IS NOT OLD.tags
+                    OR NEW.episode_count IS NOT OLD.episode_count
+                    OR NEW.metadata_status IS NOT OLD.metadata_status
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('drama', NEW.id, NEW.source, 'upsert',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_dramas_delete
+                AFTER DELETE ON dramas
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('drama', OLD.id, OLD.source, 'delete',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_sources_insert
+                AFTER INSERT ON media_sources
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('source', NEW.id, NEW.id, 'upsert',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_sources_update
+                AFTER UPDATE ON media_sources
+                WHEN NEW.name IS NOT OLD.name OR NEW.provider IS NOT OLD.provider
+                    OR NEW.base_url IS NOT OLD.base_url OR NEW.root_path IS NOT OLD.root_path
+                    OR NEW.excluded_paths IS NOT OLD.excluded_paths
+                    OR NEW.section IS NOT OLD.section OR NEW.scan_mode IS NOT OLD.scan_mode
+                    OR NEW.enabled IS NOT OLD.enabled
+                    OR NEW.parent_source_id IS NOT OLD.parent_source_id
+                    OR NEW.virtual_category_id IS NOT OLD.virtual_category_id
+                    OR NEW.virtual_category_name IS NOT OLD.virtual_category_name
+                    OR NEW.virtual_category_type IS NOT OLD.virtual_category_type
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('source', NEW.id, NEW.id, 'upsert',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_sources_delete
+                AFTER DELETE ON media_sources
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('source', OLD.id, OLD.id, 'delete',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
                 """
             )
+            # Source table migrations rebuild the table to add virtual-library
+            # and multi-root columns. Recreate its sync triggers only after
+            # those migrations so SQLite does not carry trigger references to
+            # columns that do not exist in the legacy schema.
+            connection.executescript(
+                """
+                DROP TRIGGER IF EXISTS trg_catalog_sources_insert;
+                DROP TRIGGER IF EXISTS trg_catalog_sources_update;
+                DROP TRIGGER IF EXISTS trg_catalog_sources_delete;
+                """
+            )
+            deleted_source_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(deleted_media_sources)"
+                ).fetchall()
+            }
+            if "section" not in deleted_source_columns:
+                connection.execute(
+                    "ALTER TABLE deleted_media_sources ADD COLUMN section TEXT NOT NULL DEFAULT ''"
+                )
             self._migrate_media_source_roots(connection)
             self._migrate_media_source_order(connection)
             self._migrate_tvbox_virtual_sources(connection)
             self._migrate_excluded_paths(connection)
             self._backfill_asmr_author_directories(connection)
+            connection.executescript(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_sources_insert
+                AFTER INSERT ON media_sources
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('source', NEW.id, NEW.id, 'upsert',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_sources_update
+                AFTER UPDATE ON media_sources
+                WHEN NEW.name IS NOT OLD.name OR NEW.provider IS NOT OLD.provider
+                    OR NEW.base_url IS NOT OLD.base_url OR NEW.root_path IS NOT OLD.root_path
+                    OR NEW.root_paths IS NOT OLD.root_paths
+                    OR NEW.excluded_paths IS NOT OLD.excluded_paths
+                    OR NEW.section IS NOT OLD.section OR NEW.scan_mode IS NOT OLD.scan_mode
+                    OR NEW.enabled IS NOT OLD.enabled
+                    OR NEW.parent_source_id IS NOT OLD.parent_source_id
+                    OR NEW.virtual_category_id IS NOT OLD.virtual_category_id
+                    OR NEW.virtual_category_name IS NOT OLD.virtual_category_name
+                    OR NEW.virtual_category_type IS NOT OLD.virtual_category_type
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('source', NEW.id, NEW.id, 'upsert',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                CREATE TRIGGER IF NOT EXISTS trg_catalog_sources_delete
+                AFTER DELETE ON media_sources
+                BEGIN
+                    UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1;
+                    INSERT INTO catalog_changes(entity_type, entity_id, source_id, operation, revision)
+                    VALUES('source', OLD.id, OLD.id, 'delete',
+                        (SELECT revision FROM catalog_sync_state WHERE id = 1))
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        source_id = excluded.source_id, operation = excluded.operation,
+                        revision = excluded.revision, changed_at = CURRENT_TIMESTAMP;
+                END;
+                """
+            )
             connection.execute(
                 """
                 INSERT INTO media_favorites(media_type, target_id, created_at)
@@ -449,6 +761,7 @@ class LibraryDatabase:
                 """
             )
             connection.commit()
+
             movie_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(movies)").fetchall()
@@ -474,6 +787,206 @@ class LibraryDatabase:
                     connection.execute(f"ALTER TABLE movies DROP COLUMN {name}")
             self._ensure_movie_order_indexes(connection)
             connection.commit()
+
+    def catalog_revision(self) -> int:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT revision FROM catalog_sync_state WHERE id = 1"
+            ).fetchone()
+        return int(row["revision"] or 0)
+
+    def catalog_changes_since(
+        self,
+        cursor: int = 0,
+        *,
+        source_id: str | None = None,
+        limit: int = 500,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return a consistent page of latest entity changes and high-water mark.
+
+        Scans can touch the same row several times while metadata is filled in.
+        Only the latest state of each entity is stored, keeping this table
+        bounded by catalogue size. The revision and page share one SQLite read
+        snapshot so concurrent writes cannot advance the cursor past an unseen
+        change.
+        """
+        bounded_limit = max(1, min(int(limit), 1000))
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
+            high_water = int(connection.execute(
+                "SELECT revision FROM catalog_sync_state WHERE id = 1"
+            ).fetchone()[0])
+            source_filter = "AND source_id = ?" if source_id else ""
+            params: list[Any] = [max(0, int(cursor))]
+            if source_id:
+                params.append(source_id)
+            params.append(bounded_limit)
+            rows = connection.execute(
+                f"""
+                SELECT c.revision, c.entity_type, c.entity_id, c.source_id,
+                       c.operation, c.changed_at
+                FROM catalog_changes c
+                WHERE c.revision > ? {source_filter}
+                ORDER BY c.revision
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+            connection.commit()
+        return [dict(row) for row in rows], high_water
+
+    def catalog_media_page(
+        self,
+        *,
+        section: str,
+        sources: Sequence[str],
+        limit: int = 500,
+        offset: int = 0,
+        duration_boundary: float = 180.0,
+    ) -> list[dict[str, Any]]:
+        """Read a bounded base-index page for the mobile sync bootstrap."""
+        page_limit = max(1, min(int(limit), 1000))
+        page_offset = max(0, int(offset))
+        source_clause, source_params = self._sources_clause(sources)
+        if section in {"short", "long", "asmr"}:
+            conditions = ["v.active = 1", source_clause]
+            params: list[Any] = list(source_params)
+            if section == "short":
+                conditions.append("v.duration_seconds < ?")
+                params.append(float(duration_boundary))
+            elif section == "long":
+                conditions.append("v.duration_seconds >= ?")
+                params.append(float(duration_boundary))
+            else:
+                conditions.append("v.author IS NOT NULL AND TRIM(v.author) <> ''")
+            query = f"""
+                SELECT v.id, v.source, v.path, v.name, v.size, v.modified, v.thumb,
+                       v.author, v.duration_seconds, v.media_format, v.media_kind
+                FROM videos v
+                WHERE {' AND '.join(conditions)}
+                ORDER BY v.id
+                LIMIT ? OFFSET ?
+            """
+            params.extend([page_limit, page_offset])
+        elif section == "movie":
+            movie_clause = source_clause.replace("source IN", "m.source IN")
+            query = f"""
+                SELECT m.id, m.video_id, m.source, m.display_title, m.original_title,
+                       m.normalized_title, m.code, m.year, m.overview, m.poster_url,
+                       m.backdrop_url, m.release_date, m.metadata_provider,
+                       m.match_status, m.match_confidence, v.path, v.name, v.size,
+                       v.modified, v.thumb, v.duration_seconds, v.media_format,
+                       v.media_kind
+                FROM movies m
+                JOIN videos v ON v.id = m.video_id AND v.active = 1
+                WHERE {movie_clause}
+                ORDER BY m.id
+                LIMIT ? OFFSET ?
+            """
+            params = [*source_params, page_limit, page_offset]
+        elif section == "drama":
+            drama_clause = source_clause.replace("source IN", "d.source IN")
+            query = f"""
+                SELECT d.*
+                FROM dramas d
+                WHERE d.episode_count > 0 AND {drama_clause}
+                ORDER BY d.id
+                LIMIT ? OFFSET ?
+            """
+            params = [*source_params, page_limit, page_offset]
+        else:
+            raise ValueError("Unsupported sync section")
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+            result = [dict(row) for row in rows]
+            if section == "movie" and result:
+                entities_by_movie = self._movie_metadata_entities_for_ids(
+                    connection,
+                    [int(row["id"]) for row in result],
+                )
+                for row in result:
+                    row["metadata_entities"] = entities_by_movie.get(
+                        int(row["id"]),
+                        {entity_type: [] for entity_type in MOVIE_METADATA_ENTITY_TYPES},
+                    )
+        return result
+
+    @staticmethod
+    def _movie_metadata_entities_for_ids(
+        connection: sqlite3.Connection,
+        movie_ids: Sequence[int],
+    ) -> dict[int, dict[str, list[dict[str, Any]]]]:
+        """Read metadata for one sync page without an N+1 query per movie."""
+        ids = [int(movie_id) for movie_id in movie_ids]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        grouped = {
+            movie_id: {entity_type: [] for entity_type in MOVIE_METADATA_ENTITY_TYPES}
+            for movie_id in ids
+        }
+        rows = connection.execute(
+            f"""
+            SELECT l.movie_id, e.id, e.type, e.name, l.position,
+                   COUNT(DISTINCT CASE
+                       WHEN linked_video.id IS NOT NULL THEN linked.movie_id
+                   END) AS movie_count
+            FROM movie_metadata_links l
+            JOIN movie_metadata_entities e ON e.id = l.entity_id
+            LEFT JOIN movie_metadata_links linked ON linked.entity_id = e.id
+            LEFT JOIN movies linked_movie ON linked_movie.id = linked.movie_id
+            LEFT JOIN videos linked_video
+                ON linked_video.id = linked_movie.video_id AND linked_video.active = 1
+            WHERE l.movie_id IN ({placeholders})
+            GROUP BY l.movie_id, e.id, e.type, e.name, l.position
+            ORDER BY l.movie_id,
+                     CASE e.type
+                         WHEN 'year' THEN 0 WHEN 'studio' THEN 1
+                         WHEN 'genre' THEN 2 ELSE 3 END,
+                     l.position, e.id
+            """,
+            ids,
+        ).fetchall()
+        for row in rows:
+            movie_id = int(row["movie_id"])
+            grouped.setdefault(
+                movie_id,
+                {entity_type: [] for entity_type in MOVIE_METADATA_ENTITY_TYPES},
+            )[str(row["type"])].append(
+                {
+                    "id": int(row["id"]),
+                    "type": str(row["type"]),
+                    "name": str(row["name"]),
+                    "movie_count": int(row["movie_count"] or 0),
+                }
+            )
+        return grouped
+
+    def catalog_entity(self, entity_type: str, entity_id: str) -> dict[str, Any] | None:
+        """Resolve one change-log entry without exposing source credentials."""
+        if entity_type == "media":
+            try:
+                return self.get_video(int(entity_id))
+            except (TypeError, ValueError):
+                return None
+        if entity_type == "movie":
+            try:
+                return self.get_movie(int(entity_id), with_entities=True)
+            except (TypeError, ValueError):
+                return None
+        if entity_type == "drama":
+            return self.get_drama(entity_id)
+        if entity_type == "source":
+            return self.get_media_source(entity_id)
+        return None
+
+    def get_deleted_media_source(self, source_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, section FROM deleted_media_sources WHERE id = ?",
+                (source_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     @staticmethod
     def _ensure_movie_order_indexes(connection: sqlite3.Connection) -> None:
@@ -2930,6 +3443,12 @@ class LibraryDatabase:
                 """,
                 (expires_at, expires_at, target),
             )
+            # Cover availability changes the ordering of the cached catalogue,
+            # even though it is not a media-row mutation recorded in the sync
+            # log. Advance the cheap read-model version so wall caches expire.
+            connection.execute(
+                "UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1"
+            )
             connection.commit()
 
     def forget_movie_image_failure(self, url: str) -> None:
@@ -2951,6 +3470,9 @@ class LibraryDatabase:
                             THEN poster_url ELSE backdrop_url END) = ?
                 """,
                 (target,),
+            )
+            connection.execute(
+                "UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1"
             )
             connection.commit()
 
@@ -2993,6 +3515,10 @@ class LibraryDatabase:
                   AND cover_failed_until <= CAST(strftime('%s', 'now') AS INTEGER)
                 """
             )
+            if cursor.rowcount or connection.total_changes:
+                connection.execute(
+                    "UPDATE catalog_sync_state SET revision = revision + 1 WHERE id = 1"
+                )
             connection.commit()
         return int(cursor.rowcount or 0)
 
@@ -3583,11 +4109,15 @@ class LibraryDatabase:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT id FROM media_sources WHERE id = ?", (source_id,)
+                "SELECT id, section FROM media_sources WHERE id = ?", (source_id,)
             ).fetchone()
             if not existing:
                 connection.rollback()
                 return False
+            connection.execute(
+                "DELETE FROM tvbox_category_snapshots WHERE source_id = ?",
+                (source_id,),
+            )
             connection.execute("DELETE FROM movies WHERE source = ?", (source_id,))
             connection.execute("DELETE FROM dramas WHERE source = ?", (source_id,))
             connection.execute("DELETE FROM asmr_author_directories WHERE source = ?", (source_id,))
@@ -3616,14 +4146,19 @@ class LibraryDatabase:
             )
             # A removed TVBox source must not leave its generated category
             # libraries behind; they only exist to present that source's feed.
-            child_ids = [
-                str(row["id"])
+            child_sources = [
+                {"id": str(row["id"]), "section": str(row["section"])}
                 for row in connection.execute(
-                    "SELECT id FROM media_sources WHERE parent_source_id = ?",
+                    "SELECT id, section FROM media_sources WHERE parent_source_id = ?",
                     (source_id,),
                 ).fetchall()
             ]
-            for child_id in child_ids:
+            for child in child_sources:
+                child_id = child["id"]
+                connection.execute(
+                    "DELETE FROM tvbox_category_snapshots WHERE source_id = ?",
+                    (child_id,),
+                )
                 connection.execute("DELETE FROM movies WHERE source = ?", (child_id,))
                 connection.execute("DELETE FROM dramas WHERE source = ?", (child_id,))
                 connection.execute("DELETE FROM asmr_author_directories WHERE source = ?", (child_id,))
@@ -3641,12 +4176,13 @@ class LibraryDatabase:
                 )
                 connection.execute("DELETE FROM media_scan_jobs WHERE source = ?", (child_id,))
                 connection.execute(
-                    "INSERT OR REPLACE INTO deleted_media_sources(id) VALUES(?)",
-                    (child_id,),
+                    "INSERT OR REPLACE INTO deleted_media_sources(id, section) VALUES(?, ?)",
+                    (child_id, child["section"]),
                 )
                 connection.execute("DELETE FROM media_sources WHERE id = ?", (child_id,))
             connection.execute(
-                "INSERT OR REPLACE INTO deleted_media_sources(id) VALUES(?)", (source_id,)
+                "INSERT OR REPLACE INTO deleted_media_sources(id, section) VALUES(?, ?)",
+                (source_id, str(existing["section"])),
             )
             connection.execute("DELETE FROM media_sources WHERE id = ?", (source_id,))
             connection.commit()
@@ -3868,6 +4404,82 @@ class LibraryDatabase:
                 """,
                 (last_success, last_error, max(0, directories), source_id),
             )
+
+    def record_tvbox_category_snapshot(
+        self,
+        *,
+        source_id: str,
+        remote_category_id: str,
+        name: str,
+        upstream_total: int,
+        page_count: int,
+        item_count: int,
+        last_error: str | None,
+    ) -> None:
+        """Store the latest independent probe/fetch result for one category."""
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO tvbox_category_snapshots(
+                    source_id, remote_category_id, name, upstream_total,
+                    page_count, item_count, last_fetched, last_error
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id, remote_category_id) DO UPDATE SET
+                    name = excluded.name,
+                    upstream_total = excluded.upstream_total,
+                    page_count = excluded.page_count,
+                    item_count = excluded.item_count,
+                    last_fetched = excluded.last_fetched,
+                    last_error = excluded.last_error
+                """,
+                (
+                    source_id,
+                    remote_category_id,
+                    name,
+                    max(0, int(upstream_total)),
+                    max(0, int(page_count)),
+                    max(0, int(item_count)),
+                    int(time.time()),
+                    last_error,
+                ),
+            )
+
+    def tvbox_category_snapshots(self, source_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_id, remote_category_id, name, upstream_total,
+                       page_count, item_count, last_fetched, last_error
+                FROM tvbox_category_snapshots
+                WHERE source_id = ?
+                ORDER BY rowid
+                """,
+                (source_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_tvbox_category_snapshots_not_in(
+        self,
+        source_id: str,
+        remote_category_ids: Sequence[str],
+    ) -> None:
+        ids = tuple(str(value) for value in remote_category_ids if str(value))
+        with self._lock, self._connect() as connection:
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                connection.execute(
+                    f"""
+                    DELETE FROM tvbox_category_snapshots
+                    WHERE source_id = ?
+                      AND remote_category_id NOT IN ({placeholders})
+                    """,
+                    (source_id, *ids),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM tvbox_category_snapshots WHERE source_id = ?",
+                    (source_id,),
+                )
 
     @staticmethod
     def _source_record(source: dict[str, Any]) -> dict[str, Any]:

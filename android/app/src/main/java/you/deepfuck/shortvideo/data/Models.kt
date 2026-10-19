@@ -1,6 +1,7 @@
 package you.deepfuck.shortvideo.data
 
 import java.time.LocalDate
+import org.json.JSONArray
 import org.json.JSONObject
 
 internal fun normalizeMovieReleaseDate(value: String?): String? {
@@ -202,6 +203,38 @@ data class MovieItem(
         format = format,
     )
 
+    fun toJson(): JSONObject = JSONObject()
+        .put("id", id)
+        .put("videoId", videoId)
+        .put("title", title)
+        .put("originalTitle", originalTitle)
+        .put("code", code)
+        .put("year", year)
+        .put("overview", overview)
+        .put("posterUrl", posterUrl)
+        .put("backdropUrl", backdropUrl)
+        .put("wallUrl", wallUrl)
+        .put("rating", rating)
+        .put("runtimeMinutes", runtimeMinutes)
+        .put("matchStatus", matchStatus)
+        .put("matchConfidence", matchConfidence)
+        .put("playUrl", playUrl)
+        .put("modified", modified)
+        .put("duration", durationSeconds)
+        .put("source", source)
+        .put("path", path)
+        .put("size", size)
+        .put("format", format)
+        .put("metadataProvider", metadataProvider)
+        .put("releaseDate", releaseDate)
+        .put("yearEntity", yearEntity?.toJson() ?: JSONObject.NULL)
+        .put("studioEntity", studioEntity?.toJson() ?: JSONObject.NULL)
+        .put("genreEntities", metadataEntitiesToJson(genreEntities))
+        .put("performerEntities", metadataEntitiesToJson(performerEntities))
+        .put("resumePositionMs", resumePositionMs)
+        .put("favorite", favorite)
+
+
     companion object {
         fun fromJson(value: JSONObject): MovieItem = MovieItem(
             id = value.getLong("id"),
@@ -261,6 +294,16 @@ data class MovieMetadataEntity(
     }
 }
 
+private fun MovieMetadataEntity.toJson(): JSONObject = JSONObject()
+    .put("id", id)
+    .put("type", type)
+    .put("name", name)
+    .put("movieCount", movieCount)
+
+private fun metadataEntitiesToJson(items: List<MovieMetadataEntity>): JSONArray = JSONArray().apply {
+    items.forEach { put(it.toJson()) }
+}
+
 data class MovieMetadataPage(
     val entity: MovieMetadataEntity,
     val items: List<MovieItem>,
@@ -307,6 +350,7 @@ data class LibraryResult(
     val drama: DramaItem?,
     val entity: MovieMetadataEntity?,
     val favorite: Boolean,
+    private val rawJson: String = "",
 ) {
     val favoriteTargetId: String?
         get() = when {
@@ -315,6 +359,23 @@ data class LibraryResult(
             media != null -> media.id.toString()
             else -> null
         }
+
+    fun toJson(): JSONObject = if (rawJson.isNotBlank()) {
+        JSONObject(rawJson).put("favorite", favorite).apply {
+            optJSONObject("movie")?.put("favorite", favorite)
+        }
+    } else {
+        JSONObject()
+            .put("id", id)
+            .put("type", type)
+            .put("section", section)
+            .put("title", title)
+            .put("subtitle", subtitle)
+            .put("posterUrl", posterUrl)
+            .put("author", author)
+            .put("favorite", favorite)
+            .apply { media?.let { put("media", it.toJson()) } }
+    }
 
     companion object {
         fun fromJson(value: JSONObject): LibraryResult = LibraryResult(
@@ -330,6 +391,7 @@ data class LibraryResult(
             drama = value.optJSONObject("drama")?.let(DramaItem::fromJson),
             entity = value.optJSONObject("entity")?.let(MovieMetadataEntity::fromJson),
             favorite = value.optBoolean("favorite"),
+            rawJson = value.toString(),
         )
     }
 }
@@ -339,6 +401,64 @@ data class LibraryResultsPage(
     val total: Int,
     val nextOffset: Int?,
 )
+
+data class CatalogSyncPage(
+    val serverRevision: Long,
+    val nextCursor: Long,
+    val nextOffset: Int?,
+    val hasMore: Boolean,
+    val sources: List<JSONObject>,
+    val upserts: List<CatalogSyncItem>,
+    val deletes: List<CatalogSyncDelete>,
+) {
+    companion object {
+        fun fromJson(value: JSONObject): CatalogSyncPage = CatalogSyncPage(
+            serverRevision = value.optLong("serverRevision"),
+            nextCursor = value.optLong("nextCursor", value.optLong("serverRevision")),
+            nextOffset = value.optNullableInt("nextOffset"),
+            hasMore = value.optBoolean(
+                "hasMore",
+                value.optLong("nextCursor", value.optLong("serverRevision")) <
+                    value.optLong("serverRevision"),
+            ),
+            sources = value.optObjectList("sources") { it },
+            upserts = value.optObjectList("upserts", CatalogSyncItem::fromJson),
+            deletes = value.optObjectList("deletes", CatalogSyncDelete::fromJson),
+        )
+    }
+}
+
+data class CatalogSyncItem(
+    val entityType: String,
+    val entityId: String,
+    val section: String,
+    val item: JSONObject,
+) {
+    companion object {
+        fun fromJson(value: JSONObject): CatalogSyncItem = CatalogSyncItem(
+            entityType = value.optString("entityType"),
+            entityId = value.optString("entityId"),
+            section = value.optString("section"),
+            item = value.optJSONObject("item") ?: JSONObject(),
+        )
+    }
+}
+
+data class CatalogSyncDelete(
+    val entityType: String,
+    val entityId: String,
+    val section: String,
+    val sourceId: String?,
+) {
+    companion object {
+        fun fromJson(value: JSONObject): CatalogSyncDelete = CatalogSyncDelete(
+            entityType = value.optString("entityType"),
+            entityId = value.optString("entityId"),
+            section = value.optString("section"),
+            sourceId = value.optNullableString("sourceId"),
+        )
+    }
+}
 
 data class AppSettings(val skin: String = "obsidian-coral")
 
@@ -445,6 +565,21 @@ data class DramaItem(
         get() = category?.trim()?.takeIf { it.isNotEmpty() } ?: "短剧"
 
     val hasPoster: Boolean get() = posterUrl?.isNotBlank() == true
+
+    fun toJson(): JSONObject = JSONObject()
+        .put("id", id)
+        .put("title", title)
+        .put("category", category)
+        .put("code", code)
+        .put("overview", overview)
+        .put("tags", JSONArray(tags))
+        .put("episodeCount", episodeCount)
+        .put("posterUrl", posterUrl)
+        .put("matchStatus", matchStatus)
+        .put("source", source)
+        .put("path", path)
+        .put("resumePositionMs", resumePositionMs)
+        .put("episodeId", resumeEpisodeId)
 
     companion object {
         fun fromJson(value: JSONObject): DramaItem = DramaItem(

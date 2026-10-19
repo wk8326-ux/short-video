@@ -94,6 +94,28 @@ def test_entity_movie_page_spans_libraries_and_reports_counts(tmp_path):
     ) == 3
 
 
+def test_catalog_sync_page_includes_movie_metadata_in_one_read(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    movie = _seed(database)[0]
+    database.update_movie_metadata(
+        int(movie["id"]),
+        metadata_entities={
+            "performer": ["演员甲"],
+            "genre": ["剧情"],
+        },
+    )
+
+    page = database.catalog_media_page(
+        section="movie",
+        sources=("library-a",),
+        limit=10,
+    )
+
+    entities = page[0]["metadata_entities"]
+    assert [item["name"] for item in entities["performer"]] == ["演员甲"]
+    assert [item["name"] for item in entities["genre"]] == ["剧情"]
+
+
 def test_movie_recommendations_use_or_signals_and_number_prefix(tmp_path):
     database = LibraryDatabase(str(tmp_path / "library.db"))
     movies = _seed(database)

@@ -27,9 +27,11 @@ import you.deepfuck.shortvideo.data.AppUpdateUiState
 import you.deepfuck.shortvideo.data.AppSettings
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.AsmrFilter
+import you.deepfuck.shortvideo.data.CatalogSyncWorker
 import you.deepfuck.shortvideo.data.DramaDetail
 import you.deepfuck.shortvideo.data.DramaEpisode
 import you.deepfuck.shortvideo.data.DramaGroup
+import you.deepfuck.shortvideo.data.DramaGroupPage
 import you.deepfuck.shortvideo.data.DramaItem
 import you.deepfuck.shortvideo.data.DramaSource
 import you.deepfuck.shortvideo.data.FeedMode
@@ -37,11 +39,13 @@ import you.deepfuck.shortvideo.data.LibraryScanStatus
 import you.deepfuck.shortvideo.data.LibraryResult
 import you.deepfuck.shortvideo.data.LibraryResultsPage
 import you.deepfuck.shortvideo.data.LibrarySection
+import you.deepfuck.shortvideo.data.LocalMediaStore
 import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.data.MediaSourceDraft
 import you.deepfuck.shortvideo.data.MovieGroup
+import you.deepfuck.shortvideo.data.MovieGroupPage
 import you.deepfuck.shortvideo.data.MovieBrowseDestination
 import you.deepfuck.shortvideo.data.MovieBrowseNavigation
 import you.deepfuck.shortvideo.data.MovieItem
@@ -198,9 +202,18 @@ private data class AsmrItemsKey(
     val filter: AsmrFilter,
 )
 
+private data class CachedSourceGroup(
+    val id: String,
+    val name: String,
+    val provider: String,
+    val libraryIds: List<String>,
+    val total: Int,
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = PlaybackPreferences(application)
     private val api = MediaApi(preferences)
+    private val localStore = LocalMediaStore(preferences.appContext)
     private val logs = AppLogStore.get(application)
     private val workManager = WorkManager.getInstance(application)
     val playback: PlaybackEngine = PlaybackEngineProvider.get(application)
@@ -307,6 +320,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (api.hasSession()) {
             restoreCurrentSurface()
             loadAppSettings()
+            scheduleCatalogSync(initialSurface)
             verifySessionInBackground()
         } else {
             viewModelScope.launch { mutableState.value = mutableState.value.copy(authentication = AuthenticationState.SIGNED_OUT) }
@@ -333,6 +347,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         authentication = AuthenticationState.SIGNED_IN,
                         loginBusy = false,
                     )
+                    scheduleCatalogSync(initialSurface)
                     restoreCurrentSurface()
                 }
                 .onFailure { error ->
@@ -352,7 +367,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         appUpdateJob?.cancel()
         appUpdateObserverJob?.cancel()
         saveCurrentPosition(forceReport = true)
+        val account = preferences.apiCacheAccount
         viewModelScope.launch(Dispatchers.IO) { api.logout() }
+        if (account != null) viewModelScope.launch(Dispatchers.IO) { localStore.clearAccount(account) }
         playback.stop()
         stopPlaybackService()
         activeFeedItemId = null
@@ -381,9 +398,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = mutableState.value.copy(searchLoading = true, searchError = null)
         librarySearchJob = viewModelScope.launch {
             delay(260)
+            val localItems = withContext(Dispatchers.IO) {
+                preferences.apiCacheAccount?.let { account ->
+                    localStore.search(account, query.trim(), section, 60)
+                        .mapNotNull { json -> runCatching { LibraryResult.fromJson(json) }.getOrNull() }
+                }.orEmpty()
+            }
+            if (generation != librarySearchGeneration) return@launch
+            if (localItems.isNotEmpty()) {
+                mutableState.value = mutableState.value.copy(
+                    searchResults = localItems,
+                    searchLoading = true,
+                    searchError = null,
+                )
+            }
             runApi { api.searchLibrary(query.trim(), section) }
                 .onSuccess { items ->
                     if (generation != librarySearchGeneration) return@onSuccess
+                    withContext(Dispatchers.IO) {
+                        preferences.apiCacheAccount?.let { account ->
+                            val payload = org.json.JSONArray()
+                            items.forEach { payload.put(it.toJson()) }
+                            localStore.cacheLibraryResults(account, payload)
+                        }
+                    }
+                    scheduleCatalogSyncForSection(section)
                     val history = if (rememberQuery) {
                         preferences.rememberSearchQuery(query.trim())
                     } else {
@@ -398,9 +437,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 .onFailure { error ->
                     if (generation != librarySearchGeneration || handleUnauthorized(error)) return@onFailure
-                    mutableState.value = mutableState.value.copy(
+                    val current = mutableState.value
+                    mutableState.value = current.copy(
                         searchLoading = false,
-                        searchError = "搜索暂时不可用，请重试",
+                        searchError = if (current.searchResults.isEmpty()) "搜索暂时不可用，请重试" else null,
                     )
                 }
         }
@@ -450,9 +490,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             favoritesError = null,
         )
         favoritesJob = viewModelScope.launch {
+            val localPage = withContext(Dispatchers.IO) {
+                preferences.apiCacheAccount?.let { account ->
+                    localStore.favoritePage(account, section, offset, 40)
+                }
+            }
+            if (generation != favoritesGeneration) return@launch
+            val localItems = localPage?.items.orEmpty().mapNotNull { json ->
+                runCatching { LibraryResult.fromJson(json) }.getOrNull()
+            }
+            if (localItems.isNotEmpty()) {
+                mutableState.value = mutableState.value.copy(
+                    favoriteItems = if (offset == 0) localItems else mutableState.value.favoriteItems + localItems,
+                    favoriteTotal = localPage?.total ?: localItems.size,
+                    favoriteNextOffset = localPage?.nextOffset,
+                    favoritesLoading = true,
+                    favoritesError = null,
+                )
+            }
             runApi { api.favoriteEntries(section, offset) }
                 .onSuccess { page ->
                     if (generation != favoritesGeneration) return@onSuccess
+                    withContext(Dispatchers.IO) {
+                        preferences.apiCacheAccount?.let { account ->
+                            localStore.cacheFavoriteResults(account, page.items.map { it.toJson() })
+                        }
+                    }
                     val current = mutableState.value
                     val ids = if (offset == 0) mutableSetOf() else current.favoriteItems.mapTo(mutableSetOf()) { it.id }
                     mutableState.value = current.copy(
@@ -465,9 +528,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 .onFailure { error ->
                     if (generation != favoritesGeneration || handleUnauthorized(error)) return@onFailure
-                    mutableState.value = mutableState.value.copy(
+                    val current = mutableState.value
+                    mutableState.value = current.copy(
                         favoritesLoading = false,
-                        favoritesError = "收藏列表暂时不可用，请重试",
+                        favoritesError = if (current.favoriteItems.isEmpty()) {
+                            "收藏列表暂时不可用，请重试"
+                        } else null,
                     )
                 }
         }
@@ -481,14 +547,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val wanted = !item.favorite
         stampLibraryFavorite(item, wanted)
         viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                preferences.apiCacheAccount?.let { account ->
+                    localStore.setFavorite(account, item.section, targetId, item.toJson(), wanted)
+                }
+            }
             runApi { api.setFavorite(item.section, targetId, wanted) }
-                .onSuccess { stored -> if (stored != wanted) stampLibraryFavorite(item, stored) }
+                .onSuccess { stored ->
+                    preferences.apiCacheAccount?.let { account ->
+                        withContext(Dispatchers.IO) {
+                            localStore.markFavoriteSynced(account, item.section, targetId, stored)
+                            if (stored != wanted) localStore.setFavorite(account, item.section, targetId, item.toJson(), stored)
+                        }
+                    }
+                    if (stored != wanted) stampLibraryFavorite(item, stored)
+                }
                 .onFailure { error ->
                     if (handleUnauthorized(error)) return@onFailure
-                    stampLibraryFavorite(item, !wanted)
-                    mutableState.value = mutableState.value.copy(
-                        favoritesError = "收藏状态未能同步，请重试",
-                    )
+                    scheduleFavoriteSync()
                 }
         }
     }
@@ -503,17 +579,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         favoriteMutationJobs.remove(key)?.cancel()
         favoriteMutationJobs[key] = viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                preferences.apiCacheAccount?.let { account ->
+                    localStore.setFavorite(account, section, targetId, null, wanted)
+                }
+            }
             runApi { api.setFavorite(section, targetId, wanted) }
                 .onSuccess { stored ->
+                    preferences.apiCacheAccount?.let { account ->
+                        withContext(Dispatchers.IO) {
+                            localStore.markFavoriteSynced(account, section, targetId, stored)
+                            if (stored != wanted) localStore.setFavorite(account, section, targetId, null, stored)
+                        }
+                    }
                     if (stored != wanted) stampFavoriteMediaId(section, targetId, stored)
                 }
                 .onFailure { error ->
-                    if (!handleUnauthorized(error)) {
-                        stampFavoriteMediaId(section, targetId, !wanted)
-                        mutableState.value = mutableState.value.copy(
-                            favoritesError = "收藏状态未能同步，请重试",
-                        )
-                    }
+                    if (!handleUnauthorized(error)) scheduleFavoriteSync()
                 }
         }
     }
@@ -533,6 +615,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val requestKey = "$section:${ids.sorted().joinToString(",")}"
         favoriteStatusJobs.remove(requestKey)?.cancel()
         favoriteStatusJobs[requestKey] = viewModelScope.launch {
+            val localFavorites = withContext(Dispatchers.IO) {
+                preferences.apiCacheAccount?.let { account -> localStore.favoriteIds(account, section, ids) }.orEmpty()
+            }
+            if (localFavorites.isNotEmpty()) {
+                val keys = ids.mapTo(mutableSetOf()) { "$section:$it" }
+                mutableState.update { state ->
+                    state.copy(favoriteMediaIds = state.favoriteMediaIds - keys + localFavorites.map { "$section:$it" })
+                }
+            }
             runApi { api.favoriteStatuses(section, ids) }
                 .onSuccess { favorites ->
                     val keys = ids.mapTo(mutableSetOf()) { "$section:$it" }
@@ -741,6 +832,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             dramaRequestGeneration += 1L
         }
         preferences.surface = surface
+        scheduleCatalogSync(surface)
         val surfaceMuted = preferences.muted(surface)
         playback.setMuted(surfaceMuted)
         activeFeedItemId = null
@@ -1054,6 +1146,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieLoading = false,
             movieError = null,
         )
+        scheduleCatalogSyncForSection(
+            "movie",
+            state.movieSources.firstOrNull { it.id == sourceId }?.libraryIds,
+        )
         loadMovieGroups(reset = true)
     }
 
@@ -1075,6 +1171,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             dramaGroupsLoading = false,
             dramaLoading = false,
             dramaError = null,
+        )
+        scheduleCatalogSyncForSection(
+            "drama",
+            state.dramaSources.firstOrNull { it.id == sourceId }?.libraryIds,
         )
         loadDramas(reset = true)
         loadRecentDramas()
@@ -1347,6 +1447,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val generation = ++movieFavoritesGeneration
         mutableState.value = state.copy(movieFavoritesLoading = true, movieFavoritesError = null)
         movieFavoritesJob = viewModelScope.launch {
+            val localPage = withContext(Dispatchers.IO) {
+                preferences.apiCacheAccount?.let { account ->
+                    localStore.favoritePage(account, "movie", offset, MediaApi.MOVIE_LIBRARY_PAGE_SIZE)
+                }
+            }
+            if (generation != movieFavoritesGeneration || !mutableState.value.openMovieFavorites) return@launch
+            val localItems = localPage?.items.orEmpty().mapNotNull { json ->
+                runCatching { LibraryResult.fromJson(json).movie?.withResumePosition() }.getOrNull()
+            }
+            if (localItems.isNotEmpty()) {
+                val current = mutableState.value
+                val merged = if (reset) localItems else {
+                    val seen = current.movieFavorites.mapTo(mutableSetOf(), MovieItem::id)
+                    current.movieFavorites + localItems.filter { seen.add(it.id) }
+                }
+                mutableState.value = current.copy(
+                    movieFavorites = merged,
+                    movieFavoritesTotal = localPage?.total ?: merged.size,
+                    movieFavoritesNextOffset = localPage?.nextOffset,
+                    movieFavoritesLoading = true,
+                    movieFavoritesError = null,
+                )
+            }
             runApi { api.movieFavorites(offset = offset) }
                 .onSuccess { page ->
                     val current = mutableState.value
@@ -1377,6 +1500,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         return@onFailure
                     }
                     if (!handleUnauthorized(error)) {
+                        val hasLocal = mutableState.value.movieFavorites.isNotEmpty()
                         mutableState.value = current.copy(
                             movieFavoritesLoading = false,
                             // A failure after the first page keeps the hearts
@@ -1386,7 +1510,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 current.movieFavoritesNextOffset.takeIf {
                                     current.movieFavorites.isEmpty()
                                 },
-                            movieFavoritesError = "收藏列表暂时载入不了，稍后再试",
+                            movieFavoritesError = "收藏列表暂时载入不了，稍后再试".takeUnless { hasLocal },
                         )
                     }
                 }
@@ -1403,8 +1527,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      *
      * The heart answers the tap rather than the round trip: a server on the
      * other side of the ocean must not be able to make a tap look broken. The
-     * server's own verdict is painted over the local guess when it lands, and a
-     * failure puts the previous heart back, which is the whole feedback.
+     * local outbox keeps the optimistic state until the server acknowledges it.
      */
     fun toggleMovieFavorite(movie: MovieItem) {
         val state = mutableState.value
@@ -1412,8 +1535,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val wanted = !movie.favorite
         applyMovieFavorite(movie, wanted)
         viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                preferences.apiCacheAccount?.let { account ->
+                    localStore.setFavorite(account, "movie", movie.id.toString(), null, wanted)
+                }
+            }
             runApi { api.setMovieFavorite(movie.id, wanted) }
                 .onSuccess { stored ->
+                    preferences.apiCacheAccount?.let { account ->
+                        withContext(Dispatchers.IO) {
+                            localStore.markFavoriteSynced(account, "movie", movie.id.toString(), stored.favorite)
+                            if (stored.favorite != wanted) {
+                                localStore.setFavorite(account, "movie", movie.id.toString(), null, stored.favorite)
+                            }
+                        }
+                    }
                     val current = mutableState.value
                     if (current.surface != MediaSurface.MOVIE) return@onSuccess
                     if (stored.favorite != wanted) applyMovieFavorite(movie, stored.favorite)
@@ -1423,19 +1559,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val current = mutableState.value
                     if (current.surface != MediaSurface.MOVIE) return@onFailure
                     val selected = current.selectedMovie
-                    applyMovieFavorite(movie, !wanted)
-                    // The heart only ever shows on the metadata page, so the
-                    // note about a failed tap belongs beside the play button
-                    // that page already draws.
                     if (selected?.id == movie.id) {
                         mutableState.value = mutableState.value.copy(
-                            movieError = if (wanted) {
-                                "收藏没成功，稍后再试"
-                            } else {
-                                "取消收藏没成功，稍后再试"
-                            },
+                            movieError = null,
                         )
                     }
+                    scheduleFavoriteSync()
                 }
         }
     }
@@ -1499,6 +1628,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val state = mutableState.value
         if (state.surface != MediaSurface.MOVIE) return
         val localMovie = movie.withResumePosition()
+        preferences.apiCacheAccount?.let { account ->
+            viewModelScope.launch(Dispatchers.IO) {
+                localStore.recordRecent(account, "movie", localMovie.toJson())
+            }
+        }
         movieDetailCache[localMovie.id] = localMovie
         val navigation = if (state.movieNavigation.current == MovieBrowseDestination.Detail(localMovie.id)) {
             state.movieNavigation
@@ -1517,6 +1651,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         playback.prefetch(MediaSurface.MOVIE, listOf(localMovie.asMediaEntry()))
         movieDetailJob?.cancel()
         movieDetailJob = viewModelScope.launch {
+            preferences.apiCacheAccount?.let { account ->
+                val cachedDetail = withContext(Dispatchers.IO) {
+                    localStore.cachedItem(account, "movie", movie.id.toString())
+                }
+                val cachedMovie = cachedDetail
+                    ?.optJSONObject("movie")
+                    ?.let { payload -> runCatching { MovieItem.fromJson(payload) }.getOrNull() }
+                if (cachedMovie != null) {
+                    val resolved = cachedMovie.withResumePosition()
+                    movieDetailCache[resolved.id] = resolved
+                    val current = mutableState.value
+                    if (current.surface == MediaSurface.MOVIE && current.selectedMovie?.id == movie.id) {
+                        mutableState.value = current.copy(
+                            selectedMovie = resolved,
+                            movieDetailLoading = true,
+                        )
+                    }
+                }
+            }
             runApi { api.movieDetail(movie.id) }
                 .onSuccess { detail ->
                     val state = mutableState.value
@@ -1889,6 +2042,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectDrama(drama: DramaItem) {
         if (mutableState.value.surface != MediaSurface.DRAMA) return
+        preferences.apiCacheAccount?.let { account ->
+            viewModelScope.launch(Dispatchers.IO) {
+                localStore.recordRecent(account, "drama", drama.toJson())
+            }
+        }
         loadFavoriteStatuses("drama", listOf(drama.id))
         mutableState.value = mutableState.value.copy(
             selectedDrama = DramaDetail(item = drama, episodes = emptyList()),
@@ -1898,6 +2056,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         dramaDetailJob?.cancel()
         dramaDetailJob = viewModelScope.launch {
+            preferences.apiCacheAccount?.let { account ->
+                val cachedDetail = withContext(Dispatchers.IO) {
+                    localStore.cachedItem(account, "drama", drama.id)
+                }
+                val cachedDrama = cachedDetail
+                    ?.optJSONObject("drama")
+                    ?.takeIf { it.has("episodes") }
+                    ?.let { payload -> runCatching { DramaDetail.fromJson(payload) }.getOrNull() }
+                if (cachedDrama != null) {
+                    val current = mutableState.value
+                    if (current.surface == MediaSurface.DRAMA && current.selectedDrama?.item?.id == drama.id) {
+                        mutableState.value = current.copy(
+                            selectedDrama = cachedDrama.copy(item = cachedDrama.item.withAbsolutePoster()),
+                            dramaDetailLoading = true,
+                        )
+                    }
+                }
+            }
             runApi { api.dramaDetail(drama.id) }
                 .onSuccess { detail ->
                     val state = mutableState.value
@@ -2734,6 +2910,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val requestGeneration = ++dramaRequestGeneration
         mutableState.value = state.copy(dramaLoading = true, dramaError = null)
         dramaJob = viewModelScope.launch {
+            preferences.apiCacheAccount?.let { account ->
+                val cached = withContext(Dispatchers.IO) {
+                    localStore.search(account, requestedQuery, "drama", MediaApi.DRAMA_PAGE_SIZE)
+                        .mapNotNull { wrapper ->
+                            wrapper.optJSONObject("drama")?.let { drama ->
+                                runCatching { DramaItem.fromJson(drama).withAbsolutePoster() }.getOrNull()
+                            }
+                        }
+                }
+                if (cached.isNotEmpty() && requestGeneration == dramaRequestGeneration) {
+                    val current = mutableState.value
+                    val ids = if (reset) mutableSetOf() else current.dramaItems.mapTo(mutableSetOf()) { it.id }
+                    val merged = if (reset) cached else current.dramaItems + cached.filter { ids.add(it.id) }
+                    mutableState.value = current.copy(
+                        dramaItems = merged,
+                        dramaTotal = maxOf(current.dramaTotal, merged.size),
+                        dramaLoading = true,
+                        dramaError = null,
+                    )
+                }
+            }
             runApi {
                 api.dramas(
                     query = requestedQuery,
@@ -2799,6 +2996,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         dramaJob?.cancel()
         mutableState.value = state.copy(dramaGroupsLoading = true, dramaError = null)
         dramaJob = viewModelScope.launch {
+            preferences.apiCacheAccount?.let { account ->
+                val local = withContext(Dispatchers.IO) {
+                    localDramaGroupPage(account, state.selectedDramaSourceId)
+                }
+                if (local != null && requestGeneration == dramaRequestGeneration) {
+                    val current = mutableState.value
+                    mutableState.value = current.copy(
+                        dramaSources = local.sources,
+                        selectedDramaSourceId = local.selectedSourceId,
+                        dramaGroups = local.groups,
+                        dramaTotal = local.total,
+                        dramaGroupsLoading = true,
+                        dramaError = null,
+                    )
+                }
+            }
             runApi {
                 api.dramaGroups(
                     query = requestedQuery,
@@ -2857,11 +3070,69 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!handleUnauthorized(error)) {
                         mutableState.value = current.copy(
                             dramaGroupsLoading = false,
-                            dramaError = "短剧目录暂时无法载入",
+                            dramaError = "短剧目录暂时无法载入".takeIf {
+                                current.dramaGroups.isEmpty()
+                            },
                         )
                     }
                 }
         }
+    }
+
+    private fun localDramaGroupPage(account: String, selectedSourceId: String?): DramaGroupPage? {
+        val pages = localStore.cachedPagesBySource(
+            account,
+            "drama",
+            MediaApi.DRAMA_GROUP_SIZE,
+        )
+        if (pages.isEmpty()) return null
+        val sourceGroups = cachedSourceGroups(account, "drama", pages)
+        val parsed = pages.flatMap { (sourceId, page) ->
+            page.items.mapNotNull { wrapper ->
+                wrapper.optJSONObject("drama")?.let { drama ->
+                    runCatching {
+                        sourceId to DramaItem.fromJson(drama).withAbsolutePoster()
+                    }.getOrNull()
+                }
+            }
+        }
+        if (parsed.isEmpty()) return null
+        val sources = sourceGroups.map { source ->
+            DramaSource(
+                id = source.id,
+                name = source.name,
+                provider = source.provider,
+                libraryIds = source.libraryIds,
+                libraryCount = source.libraryIds.size,
+                total = source.total,
+            )
+        }
+        val selected = sources.firstOrNull { it.id == selectedSourceId }
+            ?: sources.firstOrNull { it.total > 0 }
+            ?: sources.firstOrNull()
+        val visibleIds = selected?.libraryIds?.toSet()
+        val grouped = parsed
+            .filter { visibleIds == null || it.first in visibleIds }
+            .groupBy { (sourceId, item) -> sourceId to item.categoryLabel }
+            .map { (key, entries) ->
+                val (sourceId, category) = key
+                DramaGroup(
+                    groupId = "$sourceId|$category",
+                    sourceId = sourceId,
+                    category = category,
+                    name = category,
+                    total = entries.size,
+                    items = entries.map { it.second },
+                    nextOffset = null,
+                )
+            }
+        return DramaGroupPage(
+            groups = grouped,
+            total = selected?.total ?: grouped.sumOf { it.total },
+            scanRunning = false,
+            sources = sources,
+            selectedSourceId = selected?.id,
+        )
     }
 
     private fun DramaItem.withAbsolutePoster(): DramaItem =
@@ -2883,6 +3154,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val requestedSort = state.movieSort
         mutableState.value = state.copy(movieLoading = true, movieError = null)
         movieJob = viewModelScope.launch {
+            preferences.apiCacheAccount?.let { account ->
+                val cached = withContext(Dispatchers.IO) {
+                    localStore.search(account, requestedQuery, "movie", MediaApi.MOVIE_LIBRARY_PAGE_SIZE)
+                        .mapNotNull { wrapper ->
+                            wrapper.optJSONObject("movie")?.let { movie ->
+                                runCatching { MovieItem.fromJson(movie).withResumePosition() }.getOrNull()
+                            }
+                        }
+                }
+                if (cached.isNotEmpty() && requestGeneration == movieRequestGeneration) {
+                    val current = mutableState.value
+                    val merged = mergeMoviePages(current.movieItems, cached, reset, requestedSort)
+                    mutableState.value = current.copy(
+                        movieItems = merged,
+                        movieTotal = maxOf(current.movieTotal, merged.size),
+                        movieLoading = true,
+                        movieError = null,
+                    )
+                }
+            }
             runApi { api.movies(query = requestedQuery, offset = offset, sort = requestedSort) }
                 .onSuccess { page ->
                     val current = mutableState.value
@@ -2963,6 +3254,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieError = null,
         )
         movieJob = viewModelScope.launch {
+            preferences.apiCacheAccount?.let { account ->
+                val local = withContext(Dispatchers.IO) {
+                    localMovieGroupPage(account, state.selectedMovieSourceId)
+                }
+                if (local != null && requestGeneration == movieRequestGeneration) {
+                    val current = mutableState.value
+                    mutableState.value = current.copy(
+                        movieSources = local.sources,
+                        selectedMovieSourceId = local.selectedSourceId,
+                        movieGroups = local.groups,
+                        movieTotal = local.total,
+                        movieGroupsLoading = true,
+                        movieLoading = true,
+                        movieError = null,
+                    )
+                }
+            }
             runApi {
                 api.movieGroups(
                     sort = requestedSort,
@@ -3046,10 +3354,112 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         mutableState.value = current.copy(
                             movieGroupsLoading = false,
                             movieLoading = false,
-                            movieError = "电影目录暂时无法载入",
+                            movieError = "电影目录暂时无法载入".takeIf {
+                                current.movieGroups.isEmpty()
+                            },
                         )
                     }
                 }
+        }
+    }
+
+    private fun localMovieGroupPage(account: String, selectedSourceId: String?): MovieGroupPage? {
+        val groups = localStore.cachedPagesBySource(
+            account,
+            "movie",
+            MediaApi.MOVIE_GROUP_SIZE,
+        )
+        if (groups.isEmpty()) return null
+        val sourceGroups = cachedSourceGroups(account, "movie", groups)
+        val parsedGroups = groups.mapNotNull { (sourceId, page) ->
+            val items = page.items.mapNotNull { wrapper ->
+                wrapper.optJSONObject("movie")?.let { movie ->
+                    runCatching { MovieItem.fromJson(movie).withResumePosition() }.getOrNull()
+                }
+            }
+            if (items.isEmpty()) null else MovieGroup(
+                sourceId = sourceId,
+                name = localStore.cachedSources(account, "movie")
+                    .firstOrNull { it.optString("id") == sourceId }
+                    ?.optString("name")
+                    .orEmpty()
+                    .ifBlank { sourceId },
+                total = page.total,
+                items = items,
+                nextOffset = page.nextOffset,
+            )
+        }
+        if (parsedGroups.isEmpty()) return null
+        val sources = sourceGroups.map { source ->
+            MovieSource(
+                id = source.id,
+                name = source.name,
+                provider = source.provider,
+                libraryIds = source.libraryIds,
+                libraryCount = source.libraryIds.size,
+                total = source.total,
+            )
+        }
+        val selected = sources.firstOrNull { it.id == selectedSourceId }
+            ?: sources.firstOrNull { it.total > 0 }
+            ?: sources.firstOrNull()
+        val visibleIds = selected?.libraryIds?.toSet()
+        val visibleGroups = if (visibleIds == null) parsedGroups else {
+            parsedGroups.filter { it.sourceId in visibleIds }
+        }
+        return MovieGroupPage(
+            groups = visibleGroups,
+            total = selected?.total ?: parsedGroups.sumOf { it.total },
+            scanRunning = false,
+            sources = sources,
+            selectedSourceId = selected?.id,
+        )
+    }
+
+    private fun cachedSourceGroups(
+        account: String,
+        section: String,
+        pages: Map<String, LocalMediaStore.LocalPage>,
+    ): List<CachedSourceGroup> {
+        val sourcePayloads = localStore.cachedSources(account, section)
+            .associateBy { it.optString("id").trim() }
+            .filterKeys(String::isNotBlank)
+            .toMutableMap()
+        pages.keys.forEach { sourceId ->
+            sourcePayloads.putIfAbsent(
+                sourceId,
+                org.json.JSONObject().put("id", sourceId).put("name", sourceId),
+            )
+        }
+        val childParents = sourcePayloads.values.mapNotNull { source ->
+            source.optString("parentSourceId").trim().takeIf(String::isNotBlank)
+        }.toSet()
+        val selectable = sourcePayloads.values.filter { source ->
+            val id = source.optString("id").trim()
+            val provider = source.optString("provider", "alist").lowercase()
+            !(source.optString("parentSourceId").isBlank() &&
+                provider in setOf("tvbox", "html") && id in childParents)
+        }
+        val grouped = linkedMapOf<String, MutableList<org.json.JSONObject>>()
+        selectable.forEach { source ->
+            val sourceId = source.optString("id").trim()
+            val groupId = source.optString("sourceGroupId").trim().ifBlank {
+                "source:$sourceId"
+            }
+            grouped.getOrPut(groupId) { mutableListOf() }.add(source)
+        }
+        return grouped.map { (groupId, members) ->
+            val first = members.first()
+            val groupName = first.optString("sourceGroupName").trim().ifBlank {
+                first.optString("name").trim().ifBlank { groupId }
+            }
+            CachedSourceGroup(
+                id = groupId,
+                name = groupName,
+                provider = first.optString("provider", "alist").lowercase(),
+                libraryIds = members.map { it.optString("id").trim() },
+                total = members.sumOf { pages[it.optString("id").trim()]?.total ?: 0 },
+            )
         }
     }
 
@@ -3077,8 +3487,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!api.hasSession()) return
         recentJob?.cancel()
         recentJob = viewModelScope.launch {
+            preferences.apiCacheAccount?.let { account ->
+                val cached = withContext(Dispatchers.IO) {
+                    localStore.recentItems(account, "movie", MediaApi.RECENT_LIMIT)
+                        .mapNotNull { item ->
+                            item.optJSONObject("movie")?.let { movie ->
+                                runCatching { MovieItem.fromJson(movie) }.getOrNull()
+                            }
+                        }
+                }
+                if (cached.isNotEmpty()) {
+                    mutableState.value = mutableState.value.copy(
+                        recentMovies = cached.map { it.withResumePosition() },
+                    )
+                }
+            }
             runApi { api.recentMovies() }
                 .onSuccess { items ->
+                    preferences.apiCacheAccount?.let { account ->
+                        withContext(Dispatchers.IO) {
+                            localStore.cacheRecentItems(account, "movie", items.map { it.toJson() })
+                        }
+                    }
                     mutableState.value = mutableState.value.copy(
                         recentMovies = items.map { it.withResumePosition() },
                     )
@@ -3106,6 +3536,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // last is how a strip ended up one entry short of what was just watched.
         recentDramaJob?.cancel()
         recentDramaJob = viewModelScope.launch {
+            preferences.apiCacheAccount?.let { account ->
+                val cached = withContext(Dispatchers.IO) {
+                    localStore.recentItems(account, "drama", MediaApi.RECENT_LIMIT)
+                        .mapNotNull { item ->
+                            item.optJSONObject("drama")?.let { drama ->
+                                runCatching { DramaItem.fromJson(drama) }.getOrNull()
+                            }
+                        }
+                }
+                if (cached.isNotEmpty()) {
+                    mutableState.value = mutableState.value.copy(
+                        recentDramas = cached.map { it.withAbsolutePoster() },
+                    )
+                }
+            }
             runApi {
                 api.recentDramas(
                     sourceId = mutableState.value.selectedDramaSourceId
@@ -3114,6 +3559,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
                 .onSuccess { items ->
+                    preferences.apiCacheAccount?.let { account ->
+                        withContext(Dispatchers.IO) {
+                            localStore.cacheRecentItems(account, "drama", items.map { it.toJson() })
+                        }
+                    }
                     mutableState.value = mutableState.value.copy(
                         recentDramas = items.map { it.withAbsolutePoster() },
                     )
@@ -3281,6 +3731,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             asmrError = null,
         )
         asmrAuthorsJob = viewModelScope.launch {
+            preferences.apiCacheAccount?.let { account ->
+                val cachedAuthors = withContext(Dispatchers.IO) {
+                    localStore.cachedAsmrAuthors(account)
+                }
+                if (cachedAuthors.isNotEmpty() && mutableState.value.asmrAuthors.isEmpty()) {
+                    val authors = cachedAuthors.map { item ->
+                        AsmrAuthor(
+                            name = item.optString("title"),
+                            itemCount = item.optInt("count"),
+                            videoCount = 0,
+                            audioCount = 0,
+                            modified = null,
+                        )
+                    }
+                    mutableState.value = mutableState.value.copy(
+                        asmrAuthors = authors,
+                        asmrAuthorsTotal = authors.size,
+                        asmrLoading = true,
+                        asmrError = null,
+                    )
+                }
+            }
             val page = runApi { api.asmrAuthors() }.getOrElse {
                 if (mutableState.value.asmrAuthors.isEmpty()) {
                     handleAsmrError(it, "无法载入 ASMR 目录")
@@ -3781,11 +4253,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun <T> runApi(block: () -> T): Result<T> =
         withContext(Dispatchers.IO) { runCatching(block) }
 
+    private fun scheduleCatalogSync(surface: MediaSurface) {
+        val section = if (surface.isFeed) "feed" else surface.apiValue
+        val sourceIds = when (section) {
+            "movie" -> mutableState.value.movieSources
+                .firstOrNull { it.id == mutableState.value.selectedMovieSourceId }
+                ?.libraryIds
+            "drama" -> mutableState.value.dramaSources
+                .firstOrNull { it.id == mutableState.value.selectedDramaSourceId }
+                ?.libraryIds
+            else -> null
+        }
+        scheduleCatalogSyncForSection(section, sourceIds)
+    }
+
+    private fun scheduleCatalogSyncForSection(section: String, sourceIds: List<String>? = null) {
+        val account = preferences.apiCacheAccount ?: return
+        val targets = when (section) {
+            "all" -> listOf("feed", "asmr", "movie", "drama")
+            "short", "long" -> listOf("feed")
+            "feed", "asmr", "movie", "drama" -> listOf(section)
+            else -> emptyList()
+        }
+        targets.forEach { target ->
+            val selected = sourceIds.orEmpty().filter(String::isNotBlank).distinct()
+            if (selected.isEmpty()) {
+                CatalogSyncWorker.enqueue(getApplication(), account, target)
+            } else {
+                selected.forEach { sourceId ->
+                    CatalogSyncWorker.enqueue(getApplication(), account, target, sourceId)
+                }
+            }
+        }
+    }
+
+    private fun scheduleFavoriteSync() {
+        val account = preferences.apiCacheAccount ?: return
+        CatalogSyncWorker.enqueue(getApplication(), account, "favorites")
+    }
+
     private fun handleUnauthorized(error: Throwable): Boolean {
         if ((error as? ApiException)?.statusCode != 401) return false
         appUpdateJob?.cancel()
         appUpdateObserverJob?.cancel()
+        val account = preferences.apiCacheAccount
         preferences.clearSession()
+        if (account != null) viewModelScope.launch(Dispatchers.IO) { localStore.clearAccount(account) }
         playback.stop()
         stopPlaybackService()
         mutableState.value = AppUiState(authentication = AuthenticationState.SIGNED_OUT)

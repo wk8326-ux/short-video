@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from app.alist import AListError
 from app.app_update import AppUpdateStore, InvalidUpdateManifest, UpdateNotPublished
 from app.auth import LoginRateLimiter, SESSION_COOKIE, SessionManager, verify_password
+from app.catalog_cache import AsyncCatalogCache, cached_catalog_endpoint
 from app.database import (
     LibraryDatabase,
     normalize_excluded_paths,
@@ -69,7 +70,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.8.9"
+APP_VERSION = "1.9.0"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -81,6 +82,7 @@ session_manager = SessionManager(
     settings.session_days * 24 * 60 * 60,
 )
 login_limiter = LoginRateLimiter()
+catalog_cache = AsyncCatalogCache(ttl_seconds=3.0, max_entries=512)
 
 scan_state: dict[str, Any] = {
     "running": False,
@@ -603,6 +605,7 @@ async def scan_source(source: str) -> bool:
                 directories=source_state["directories"],
             )
             runtime.direct_urls.clear()
+            await catalog_cache.invalidate()
             logger.info(
                 "Indexed %s active %s media items across %s directories (%s retired)",
                 active,
@@ -799,6 +802,7 @@ async def scan_html_source(source_id: str) -> bool:
                 last_error=None,
                 directories=len(categories),
             )
+            await catalog_cache.invalidate()
             return True
         except Exception as exc:
             source_state["status"] = "interrupted"
@@ -874,6 +878,11 @@ async def scan_tvbox_source(source_id: str) -> bool:
                 seen_categories.add(category_key)
                 deduped_categories.append(category)
             categories = deduped_categories
+            await asyncio.to_thread(
+                database.delete_tvbox_category_snapshots_not_in,
+                source_id,
+                tuple(category.remote_id for category in categories),
+            )
             for category in categories:
                 category_order += 1
                 slug = re.sub(r"[^a-z0-9]+", "-", category.remote_id.lower()).strip("-")
@@ -921,6 +930,20 @@ async def scan_tvbox_source(source_id: str) -> bool:
                         page=1,
                     )
                 except Exception as probe_exc:
+                    # A transient upstream failure must not make an existing
+                    # category look absent during the parent's cleanup pass.
+                    if child and not virtual_category_id:
+                        wanted_ids.add(child_id)
+                    await asyncio.to_thread(
+                        database.record_tvbox_category_snapshot,
+                        source_id=source_id,
+                        remote_category_id=category.remote_id,
+                        name=category.name,
+                        upstream_total=0,
+                        page_count=0,
+                        item_count=0,
+                        last_error=str(probe_exc)[:400],
+                    )
                     scan_errors.append(
                         f"{category.name}: {str(probe_exc)[:200]}"
                     )
@@ -931,6 +954,16 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     )
                     continue
                 upstream_total = probe_page.total or len(probe_page.items)
+                await asyncio.to_thread(
+                    database.record_tvbox_category_snapshot,
+                    source_id=source_id,
+                    remote_category_id=category.remote_id,
+                    name=category.name,
+                    upstream_total=upstream_total,
+                    page_count=probe_page.page_count,
+                    item_count=0,
+                    last_error=None,
+                )
                 if upstream_total <= 0:
                     logger.info(
                         "TVBox category %s (%s) is empty upstream, not creating a library",
@@ -1019,11 +1052,22 @@ async def scan_tvbox_source(source_id: str) -> bool:
                 try:
                     first_page = probe_page
                     upstream_total = probe_page.total or len(probe_page.items)
+                    existing_count = 0
                     existing_count = await asyncio.to_thread(
                         database.movie_count,
                         sources=(child_id,),
                     )
                     if existing_count >= upstream_total and upstream_total > 0:
+                        await asyncio.to_thread(
+                            database.record_tvbox_category_snapshot,
+                            source_id=source_id,
+                            remote_category_id=category.remote_id,
+                            name=category.name,
+                            upstream_total=upstream_total,
+                            page_count=probe_page.page_count,
+                            item_count=existing_count,
+                            last_error=None,
+                        )
                         logger.info(
                             "TVBox category %s already has %d items (upstream %d), skipping",
                             category.remote_id,
@@ -1074,7 +1118,27 @@ async def scan_tvbox_source(source_id: str) -> bool:
                         f"/tvbox/{category.remote_id}",
                     )
                     await asyncio.to_thread(database.sync_movie_index, child_id, parse_movie_filename)
+                    await asyncio.to_thread(
+                        database.record_tvbox_category_snapshot,
+                        source_id=source_id,
+                        remote_category_id=category.remote_id,
+                        name=category.name,
+                        upstream_total=upstream_total,
+                        page_count=probe_page.page_count,
+                        item_count=len(rows),
+                        last_error=None,
+                    )
                 except Exception as category_exc:
+                    await asyncio.to_thread(
+                        database.record_tvbox_category_snapshot,
+                        source_id=source_id,
+                        remote_category_id=category.remote_id,
+                        name=category.name,
+                        upstream_total=upstream_total,
+                        page_count=probe_page.page_count,
+                        item_count=existing_count,
+                        last_error=str(category_exc)[:400],
+                    )
                     scan_errors.append(
                         f"{category.name}: {str(category_exc)[:200]}"
                     )
@@ -1128,6 +1192,7 @@ async def scan_tvbox_source(source_id: str) -> bool:
                     last_error=None,
                     directories=len(categories),
                 )
+            await catalog_cache.invalidate()
             return True
         except Exception as exc:
             source_state["status"] = "interrupted"
@@ -2020,6 +2085,20 @@ def public_source(
         payload["movieMetadata"] = movie_metadata
     if drama_metadata is not None:
         payload["dramaMetadata"] = drama_metadata
+    if str(source.get("provider") or "").lower() == "tvbox":
+        payload["tvboxCategories"] = [
+            {
+                "sourceId": row["source_id"],
+                "remoteCategoryId": row["remote_category_id"],
+                "name": row["name"],
+                "upstreamTotal": int(row["upstream_total"] or 0),
+                "pageCount": int(row["page_count"] or 0),
+                "itemCount": int(row["item_count"] or 0),
+                "lastFetched": row["last_fetched"],
+                "lastError": row["last_error"],
+            }
+            for row in database.tvbox_category_snapshots(str(source["id"]))
+        ]
     return payload
 
 
@@ -3212,6 +3291,302 @@ async def app_update_apk(versionCode: int | None = Query(default=None, ge=1)):
     )
 
 
+def _sync_source_sections(section: str) -> tuple[str, ...]:
+    if section in {"short", "long", "feed"}:
+        return source_registry.ids("feed")
+    if section in {"asmr", "movie", "drama"}:
+        return source_registry.ids(section)
+    return tuple(
+        dict.fromkeys(
+            source_registry.ids("feed")
+            + source_registry.ids("asmr")
+            + source_registry.ids("movie")
+            + source_registry.ids("drama")
+        )
+    )
+
+
+def _sync_media_payload(row: dict[str, Any], section: str) -> dict[str, Any]:
+    video_id = int(row["id"])
+    return {
+        "id": video_id,
+        "section": section,
+        "sourceId": str(row.get("source") or ""),
+        "title": Path(str(row.get("name") or "")).stem,
+        "path": row.get("path"),
+        "folder": str(row.get("path") or "").rsplit("/", 1)[0],
+        "size": int(row.get("size") or 0),
+        "modified": row.get("modified"),
+        "duration": row.get("duration_seconds"),
+        "posterUrl": f"/api/videos/{video_id}/poster" if row.get("thumb") else None,
+        "author": row.get("author"),
+        "format": row.get("media_format"),
+        "kind": row.get("media_kind") or "video",
+    }
+
+
+def _sync_movie_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = public_movie(row, detail=True)
+    payload.pop("playUrl", None)
+    payload["section"] = "movie"
+    payload["sourceId"] = str(row.get("source") or "")
+    payload["path"] = row.get("path")
+    payload["folder"] = str(row.get("path") or "").rsplit("/", 1)[0]
+    return payload
+
+
+def _sync_drama_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = public_drama(row)
+    payload["section"] = "drama"
+    payload["sourceId"] = str(row.get("source") or "")
+    payload["folder"] = row.get("folder")
+    return payload
+
+
+def _sync_change_payload(change: dict[str, Any]) -> dict[str, Any] | None:
+    entity_type = str(change.get("entity_type") or "")
+    entity_id = str(change.get("entity_id") or "")
+    row = database.catalog_entity(entity_type, entity_id)
+    if row is None or str(change.get("operation")) == "delete":
+        return None
+    if entity_type == "media":
+        source = database.get_media_source(str(row.get("source") or "")) or {}
+        source_section = str(source.get("section") or "")
+        if source_section == "feed":
+            section = (
+                "short"
+                if row.get("duration_seconds") is not None
+                and float(row["duration_seconds"]) < settings.duration_boundary_seconds
+                else "long"
+            )
+        elif source_section == "asmr":
+            section = "asmr"
+        else:
+            return None
+        return _sync_media_payload(row, section)
+    if entity_type == "movie":
+        return _sync_movie_payload(row)
+    if entity_type == "drama":
+        return _sync_drama_payload(row)
+    if entity_type == "source":
+        return public_source(row)
+    return None
+
+
+def _sync_source_payloads(
+    section: str,
+    source_id: str | None = None,
+) -> list[dict[str, Any]]:
+    selected = {source_id} if source_id else set(_sync_source_sections(section))
+    return [
+        public_source(source)
+        for source in database.list_media_sources(include_disabled=False)
+        if str(source.get("id")) in selected
+    ]
+
+
+def _sync_source_matches_section(source: dict[str, Any], section: str) -> bool:
+    source_section = str(source.get("section") or "")
+    if section in {"short", "long", "feed"}:
+        return source_section == "feed"
+    return source_section == section
+
+
+def _sync_change_matches_section(change_section: str, section: str | None) -> bool:
+    if section is None:
+        return change_section in {"feed", "asmr", "movie", "drama"}
+    if section == "feed":
+        return change_section == "feed"
+    if section in {"short", "long"}:
+        return change_section == "feed"
+    return change_section == section
+
+
+@app.get("/api/sync/bootstrap")
+async def sync_bootstrap(
+    section: Literal["short", "long", "asmr", "movie", "drama"] = Query(...),
+    source_id: str | None = Query(default=None, alias="sourceId", max_length=160),
+    limit: int = Query(default=300, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """Bootstrap one bounded local read-model slice.
+
+    This endpoint intentionally excludes playable URLs and credentials. The
+    client asks the normal play endpoint for a fresh redirect only when a user
+    starts playback.
+    """
+    sources = _sync_source_sections(section)
+    if source_id:
+        if source_id not in sources:
+            source = await asyncio.to_thread(database.get_media_source, source_id)
+            if not source or str(source.get("parent_source_id") or "") not in sources:
+                raise HTTPException(status_code=404, detail="Media source not found")
+            sources = (source_id,)
+        else:
+            sources = (source_id,)
+    revision = await asyncio.to_thread(database.catalog_revision)
+    rows = await asyncio.to_thread(
+        database.catalog_media_page,
+        section=section,
+        sources=sources,
+        limit=limit + 1,
+        offset=offset,
+        duration_boundary=settings.duration_boundary_seconds,
+    )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    if section in {"short", "long", "asmr"}:
+        upserts = [
+            {
+                "entityType": "media",
+                "entityId": str(row["id"]),
+                "section": section,
+                "item": _sync_media_payload(row, section),
+            }
+            for row in rows
+        ]
+    elif section == "movie":
+        upserts = [
+            {
+                "entityType": "movie",
+                "entityId": str(row["id"]),
+                "section": section,
+                "item": _sync_movie_payload(row),
+            }
+            for row in rows
+        ]
+    else:
+        upserts = [
+            {
+                "entityType": "drama",
+                "entityId": str(row["id"]),
+                "section": section,
+                "item": _sync_drama_payload(row),
+            }
+            for row in rows
+        ]
+    return {
+        "schemaVersion": 1,
+        "serverRevision": revision,
+        "nextOffset": offset + len(rows) if has_more else None,
+        "sources": await asyncio.to_thread(_sync_source_payloads, section, source_id),
+        "libraries": await asyncio.to_thread(_sync_source_payloads, section, source_id),
+        "upserts": upserts,
+        "deletes": [],
+    }
+
+
+@app.get("/api/sync/changes")
+async def sync_changes(
+    cursor: int = Query(default=0, ge=0),
+    section: Literal["feed", "short", "long", "asmr", "movie", "drama"] | None = Query(default=None),
+    source_id: str | None = Query(default=None, alias="sourceId", max_length=160),
+    limit: int = Query(default=300, ge=1, le=500),
+) -> dict[str, Any]:
+    selected_sections = (
+        ("short", "long") if section == "feed"
+        else (section,) if section
+        else ("short", "long", "asmr", "movie", "drama")
+    )
+    selected_sources = set(
+        source_id and (source_id,) or tuple(
+            source for item in selected_sections for source in _sync_source_sections(item)
+        )
+    )
+    changes, high_water = await asyncio.to_thread(
+        database.catalog_changes_since,
+        cursor,
+        source_id=source_id,
+        limit=limit,
+    )
+    upserts: list[dict[str, Any]] = []
+    deletes: list[dict[str, Any]] = []
+    max_returned_revision = cursor
+    for change in changes:
+        max_returned_revision = max(max_returned_revision, int(change["revision"]))
+        payload = _sync_change_payload(change)
+        if payload is not None:
+            payload_section = str(payload.get("section") or "")
+            if str(change["entity_type"]) == "source":
+                source = database.get_media_source(str(change["entity_id"])) or {}
+                if not _sync_source_matches_section(source, section or str(source.get("section") or "")):
+                    continue
+                if selected_sources and str(change.get("source_id") or "") not in selected_sources:
+                    continue
+                payload_section = str(source.get("section") or "")
+                payload["section"] = payload_section
+            else:
+                payload_source = str(payload.get("sourceId") or "")
+                # One feed source owns both short and long records. A per-source
+                # cursor must deliver both so a duration change cannot strand a
+                # row in the old local section.
+                section_matches = (
+                    payload_section in {"short", "long"}
+                    if section in {"short", "long", "feed"}
+                    and source_id
+                    and payload_section in {"short", "long"}
+                    else payload_section in selected_sections
+                )
+                if not section_matches:
+                    continue
+                if selected_sources and payload_source not in selected_sources and str(change.get("source_id") or "") not in selected_sources:
+                    continue
+            upserts.append({
+                "revision": int(change["revision"]),
+                "entityType": str(change["entity_type"]),
+                "entityId": str(change["entity_id"]),
+                "section": payload_section,
+                "item": payload,
+            })
+        else:
+            is_source_delete = str(change.get("entity_type") or "") == "source"
+            entity_type = str(change.get("entity_type") or "")
+            change_source = str(change.get("source_id") or "")
+            source = database.get_media_source(change_source) or database.get_deleted_media_source(change_source) or {}
+            source_section = str(source.get("section") or "")
+            if selected_sources and change_source not in selected_sources and not _sync_change_matches_section(
+                source_section, section
+            ):
+                continue
+            if is_source_delete:
+                delete_section = "source"
+            elif entity_type == "media":
+                delete_section = source_section
+            elif entity_type == "movie":
+                delete_section = "movie"
+            elif entity_type == "drama":
+                delete_section = "drama"
+            else:
+                delete_section = ""
+            if is_source_delete:
+                if not _sync_change_matches_section(source_section, section):
+                    continue
+            elif not _sync_change_matches_section(delete_section, section):
+                continue
+            deletes.append({
+                "revision": int(change["revision"]),
+                "entityType": str(change["entity_type"]),
+                "entityId": str(change["entity_id"]),
+                "sourceId": change.get("source_id"),
+                "section": source_section if is_source_delete else delete_section,
+                "operation": "delete",
+            })
+    next_cursor = max_returned_revision if len(changes) >= limit else high_water
+    return {
+        "schemaVersion": 1,
+        "serverRevision": high_water,
+        "nextCursor": next_cursor,
+        "hasMore": len(changes) >= limit and next_cursor < high_water,
+        "sources": await asyncio.to_thread(
+            _sync_source_payloads,
+            section or "",
+            source_id,
+        ),
+        "upserts": upserts,
+        "deletes": deletes,
+    }
+
+
 @app.get("/api/admin/status")
 async def admin_status() -> dict[str, Any]:
     feed_sources = source_registry.ids("feed")
@@ -3325,6 +3700,7 @@ async def add_source(payload: MediaSourceRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="相同地址、目录和板块的媒体源已存在") from exc
     await source_registry.reload_source(source["id"])
     await asyncio.to_thread(refresh_source_states)
+    await catalog_cache.invalidate()
     if source["provider"] == "tvbox":
         spawn_background(
             scan_tvbox_source(source["id"]),
@@ -3357,6 +3733,7 @@ async def reorder_sources(payload: MediaSourceOrderRequest) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"媒体源不存在: {unknown[0]}")
     moved = await asyncio.to_thread(database.reorder_media_sources, payload.ids)
     await source_registry.reload()
+    await catalog_cache.invalidate()
     sources = await asyncio.to_thread(database.list_media_sources)
     return {
         "moved": moved,
@@ -3386,6 +3763,7 @@ async def update_source(source_id: str, payload: MediaSourceRequest) -> dict[str
         raise HTTPException(status_code=409, detail="相同地址、目录和板块的媒体源已存在") from exc
     await source_registry.reload_source(source_id)
     await asyncio.to_thread(refresh_source_states)
+    await catalog_cache.invalidate()
     source = await asyncio.to_thread(database.get_media_source, source_id)
     return public_source(source)
 
@@ -3404,6 +3782,7 @@ async def delete_source(source_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="媒体源不存在")
     await source_registry.reload()
     await asyncio.to_thread(refresh_source_states)
+    await catalog_cache.invalidate()
     return {"deleted": True, "source": source_id}
 
 
@@ -4190,6 +4569,7 @@ async def save_watch_progress(payload: WatchProgressRequest) -> Response:
 
 
 @app.get("/api/asmr/authors")
+@cached_catalog_endpoint(catalog_cache, "asmr-authors", database.catalog_revision)
 async def asmr_authors(
     q: str = Query(default="", max_length=100),
     limit: int | None = Query(default=None, ge=1, le=100),
@@ -4228,6 +4608,7 @@ async def asmr_authors(
 
 
 @app.get("/api/asmr/authors/{author}/items")
+@cached_catalog_endpoint(catalog_cache, "asmr-author-items", database.catalog_revision)
 async def asmr_author_items(
     author: str,
     kind: str = Query(default="all", pattern="^(all|video|audio)$"),
@@ -4399,6 +4780,7 @@ def _section_source_selection(
 
 
 @app.get("/api/movies/groups")
+@cached_catalog_endpoint(catalog_cache, "movie-groups", database.catalog_revision)
 async def movie_groups(
     q: str = Query(default="", max_length=100),
     perGroup: int = Query(default=6, ge=1, le=24),
@@ -4497,6 +4879,7 @@ async def movie_groups(
 
 
 @app.get("/api/movies/groups/{source_id}")
+@cached_catalog_endpoint(catalog_cache, "movie-group-items", database.catalog_revision)
 async def movie_group_items(
     source_id: str,
     q: str = Query(default="", max_length=100),
@@ -4532,6 +4915,7 @@ async def movie_group_items(
 
 
 @app.get("/api/movies")
+@cached_catalog_endpoint(catalog_cache, "movies", database.catalog_revision)
 async def movies(
     q: str = Query(default="", max_length=100),
     limit: int = Query(default=24, ge=1, le=60),
@@ -4834,6 +5218,7 @@ def _drama_group_payload(
 
 
 @app.get("/api/dramas/groups")
+@cached_catalog_endpoint(catalog_cache, "drama-groups", database.catalog_revision)
 async def drama_groups(
     q: str = Query(default="", max_length=100),
     perGroup: int = Query(default=6, ge=1, le=24),
@@ -4941,6 +5326,7 @@ async def drama_groups(
 
 
 @app.get("/api/dramas")
+@cached_catalog_endpoint(catalog_cache, "dramas", database.catalog_revision)
 async def dramas(
     q: str = Query(default="", max_length=100),
     limit: int = Query(default=24, ge=1, le=60),

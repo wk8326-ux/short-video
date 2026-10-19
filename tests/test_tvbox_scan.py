@@ -41,6 +41,7 @@ class FakeDatabase:
         self.last_values: dict = {}
         self.existing_source: dict | None = None
         self.by_key: dict[tuple[str, str, str], dict] = {}
+        self.category_snapshots: list[dict] = []
 
     def get_media_source(self, source_id: str):
         if self.existing_source and self.existing_source["id"] == source_id:
@@ -74,6 +75,12 @@ class FakeDatabase:
 
     def delete_tvbox_children_not_in(self, *args, **kwargs):
         return None
+
+    def delete_tvbox_category_snapshots_not_in(self, *args, **kwargs):
+        return None
+
+    def record_tvbox_category_snapshot(self, **values):
+        self.category_snapshots.append(values)
 
     def update_source_scan_state(self, source_id, **kwargs):
         self.scan_states.append((source_id, kwargs))

@@ -19,6 +19,9 @@ class PlaybackPreferences(context: Context) {
     private val applicationContext = context.applicationContext
     private val preferences = context.getSharedPreferences("short_video", Context.MODE_PRIVATE)
 
+    internal val appContext: Context
+        get() = applicationContext
+
     internal val apiCacheDirectory: File
         get() = File(applicationContext.cacheDir, "api-responses")
 

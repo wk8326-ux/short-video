@@ -23,6 +23,7 @@ class ApiException(val statusCode: Int, message: String) : IOException(message)
 class MediaApi(private val preferences: PlaybackPreferences) {
     private val baseUrl = BASE_URL.toHttpUrl()
     private val responseCache = ApiResponseCache(preferences.apiCacheDirectory)
+    private val localStore = LocalMediaStore(preferences.appContext)
     private val client = OkHttpClient.Builder()
         .followRedirects(false)
         .followSslRedirects(false)
@@ -98,6 +99,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         startId?.let { builder.addQueryParameter("start", it.toString()) }
         val payload = getJson(builder.build().toString())
         val items = payload.optJSONArray("items")
+        cacheCatalogPage(surface.apiValue, items)
         return FeedPage(
             items = buildList {
                 if (items != null) for (index in 0 until items.length()) {
@@ -130,6 +132,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         }.build()
         val payload = getJson(target.toString())
         val items = payload.optJSONArray("items")
+        if (items != null) preferences.apiCacheAccount?.let { localStore.cacheAsmrAuthors(it, items) }
         val parsed = buildList {
             if (items == null) return@buildList
             for (index in 0 until items.length()) {
@@ -163,6 +166,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .build()
         val payload = getJson(target.toString())
         val items = payload.optJSONArray("items")
+        cacheCatalogPage("asmr", items)
         val parsed = buildList {
             if (items == null) return@buildList
             for (index in 0 until items.length()) {
@@ -188,6 +192,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .build()
         val payload = getJson(target.toString())
         val items = payload.optJSONArray("items")
+        cacheCatalogPage("movie", items)
         val parsed = buildList {
             if (items == null) return@buildList
             for (index in 0 until items.length()) {
@@ -202,8 +207,10 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         )
     }
 
-    fun movieDetail(movieId: Long): MovieItem =
-        MovieItem.fromJson(getJson("/api/movies/$movieId"))
+    fun movieDetail(movieId: Long): MovieItem = getJson("/api/movies/$movieId").let { payload ->
+        cacheCatalogPage("movie", JSONArray().put(payload))
+        MovieItem.fromJson(payload)
+    }
 
     fun movieMetadataMovies(
         entityId: Long,
@@ -216,7 +223,9 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .addQueryParameter("offset", offset.toString())
             .addQueryParameter("sort", sort)
             .build()
-        return MovieMetadataPage.fromJson(getJson(target.toString()))
+        return MovieMetadataPage.fromJson(getJson(target.toString()).also { payload ->
+            cacheCatalogPage("movie", payload.optJSONArray("items"))
+        })
     }
 
     /**
@@ -249,6 +258,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .apply { if (!sourceId.isNullOrBlank()) addQueryParameter("sourceId", sourceId) }
             .build()
         val payload = getJson(target.toString())
+        cacheGroupedItems("movie", payload.optJSONArray("groups"))
         return MovieGroupPage(
             groups = payload.optObjectList("groups", MovieGroup::fromJson),
             total = payload.optInt("total"),
@@ -275,6 +285,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .apply { if (query.isNotBlank()) addQueryParameter("q", query) }
             .build()
         val payload = getJson(target.toString())
+        cacheCatalogPage("movie", payload.optJSONArray("items"))
         return MovieGroupItems(
             sourceId = sourceId,
             items = payload.optObjectList("items", MovieItem::fromJson),
@@ -298,6 +309,27 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .addQueryParameter("offset", offset.toString())
             .build()
         val payload = getJson(target.toString())
+        val rawItems = payload.optJSONArray("items")
+        cacheCatalogPage("movie", payload.optJSONArray("items"))
+        preferences.apiCacheAccount?.let { account ->
+            val favoriteItems = buildList {
+                if (rawItems != null) for (index in 0 until rawItems.length()) {
+                    val movie = rawItems.optJSONObject(index) ?: continue
+                    val movieId = movie.optString("id")
+                    if (movieId.isBlank()) continue
+                    add(JSONObject()
+                        .put("id", "movie:$movieId")
+                        .put("type", "movie")
+                        .put("section", "movie")
+                        .put("title", movie.optString("title"))
+                        .put("subtitle", "电影")
+                        .put("posterUrl", movie.opt("posterUrl"))
+                        .put("favorite", true)
+                        .put("movie", JSONObject(movie.toString()).put("favorite", true)))
+                }
+            }
+            localStore.cacheFavoriteResults(account, favoriteItems)
+        }
         return MovieFavoritesPage(
             items = payload.optObjectList("items", MovieItem::fromJson),
             total = payload.optInt("total"),
@@ -345,6 +377,38 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             total = payload.optInt("total"),
             nextOffset = payload.optIntOrNull("nextOffset"),
         )
+    }
+
+    fun syncBootstrap(
+        section: String,
+        sourceId: String? = null,
+        limit: Int = 300,
+        offset: Int = 0,
+    ): CatalogSyncPage {
+        val target = url("/api/sync/bootstrap").newBuilder()
+            .addQueryParameter("section", section)
+            .addQueryParameter("limit", limit.coerceIn(1, 500).toString())
+            .addQueryParameter("offset", offset.coerceAtLeast(0).toString())
+            .apply { if (!sourceId.isNullOrBlank()) addQueryParameter("sourceId", sourceId) }
+            .build()
+        return CatalogSyncPage.fromJson(getJson(target.toString()))
+    }
+
+    fun syncChanges(
+        cursor: Long,
+        section: String? = null,
+        sourceId: String? = null,
+        limit: Int = 300,
+    ): CatalogSyncPage {
+        val target = url("/api/sync/changes").newBuilder()
+            .addQueryParameter("cursor", cursor.coerceAtLeast(0L).toString())
+            .addQueryParameter("limit", limit.coerceIn(1, 500).toString())
+            .apply {
+                if (!section.isNullOrBlank()) addQueryParameter("section", section)
+                if (!sourceId.isNullOrBlank()) addQueryParameter("sourceId", sourceId)
+            }
+            .build()
+        return CatalogSyncPage.fromJson(getJson(target.toString()))
     }
 
     fun favoriteStatuses(section: String, ids: List<String>): Set<String> {
@@ -418,6 +482,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .build()
         val payload = getJson(target.toString())
         val items = payload.optJSONArray("items")
+        cacheCatalogPage("drama", items)
         val parsed = buildList {
             if (items == null) return@buildList
             for (index in 0 until items.length()) {
@@ -447,6 +512,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .apply { if (sourceId.isNotBlank()) addQueryParameter("sourceId", sourceId) }
             .build()
         val payload = getJson(target.toString())
+        cacheGroupedItems("drama", payload.optJSONArray("groups"))
         return DramaGroupPage(
             groups = payload.optObjectList("groups", DramaGroup::fromJson),
             total = payload.optInt("total"),
@@ -456,8 +522,10 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         )
     }
 
-    fun dramaDetail(dramaId: String): DramaDetail =
-        DramaDetail.fromJson(getJson("/api/dramas/$dramaId"))
+    fun dramaDetail(dramaId: String): DramaDetail = getJson("/api/dramas/$dramaId").let { payload ->
+        cacheCatalogPage("drama", JSONArray().put(payload))
+        DramaDetail.fromJson(payload)
+    }
 
     /**
      * The films to pick back up. The server keeps the position per media row,
@@ -507,6 +575,12 @@ class MediaApi(private val preferences: PlaybackPreferences) {
         val fastStart = payload.getJSONObject("fastStart")
         val summary = fastStart.getJSONObject("summary")
         val sources = payload.optJSONArray("sources")
+        val sourceItems = buildList {
+            if (sources != null) for (index in 0 until sources.length()) {
+                sources.optJSONObject(index)?.let(::add)
+            }
+        }
+        preferences.apiCacheAccount?.let { account -> localStore.cacheSources(account, sourceItems) }
         return AdminStatus(
             totalItems = library.optInt("videos"),
             totalBytes = library.optLong("bytes"),
@@ -517,11 +591,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             scanRunning = scan.optBoolean("running"),
             scanLastSuccess = scan.optLong("lastSuccess").takeIf { it > 0L },
             scanLastError = scan.optNullableString("lastError"),
-            sources = buildList {
-                if (sources != null) for (index in 0 until sources.length()) {
-                    sources.optJSONObject(index)?.let { add(MediaLibrarySource.fromJson(it)) }
-                }
-            },
+            sources = sourceItems.map(MediaLibrarySource::fromJson),
             movieMetadata = MovieMetadataStatus.fromJson(movieMetadata),
             dramaMetadata = MovieMetadataStatus.fromJson(dramaMetadata),
             fastStartRunning = fastStart.optBoolean("running"),
@@ -709,6 +779,26 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     /** Called after a scan or source edit so a local catalogue cannot hide it. */
     internal fun invalidateLibraryCache() {
         preferences.apiCacheAccount?.let(responseCache::clear)
+    }
+
+    private fun cacheCatalogPage(section: String, items: JSONArray?) {
+        val account = preferences.apiCacheAccount ?: return
+        if (items == null) return
+        for (index in 0 until items.length()) {
+            items.optJSONObject(index)?.let { localStore.cacheCatalogItem(account, section, it) }
+        }
+    }
+
+    private fun cacheGroupedItems(section: String, groups: JSONArray?) {
+        if (groups == null) return
+        val items = JSONArray()
+        for (index in 0 until groups.length()) {
+            val groupItems = groups.optJSONObject(index)?.optJSONArray("items") ?: continue
+            for (itemIndex in 0 until groupItems.length()) {
+                groupItems.optJSONObject(itemIndex)?.let(items::put)
+            }
+        }
+        cacheCatalogPage(section, items)
     }
 
     private fun invalidateFavoriteResponses() {

@@ -64,6 +64,92 @@ def test_scan_and_stable_shuffle_cursor(tmp_path):
     assert not ({row["id"] for row in first} & {row["id"] for row in second})
 
 
+def test_catalog_changes_are_revisioned_and_collapsed(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+
+    database.replace_scan(_records()[:2], source="sync")
+    first_batch, first_revision = database.catalog_changes_since(0)
+    assert first_batch
+    assert all(change["operation"] == "upsert" for change in first_batch)
+    first_cursor = max(int(change["revision"]) for change in first_batch)
+    assert first_revision == first_cursor
+
+    # A second scan updates one row and retires the other. The consumer should
+    # receive one current change per media id, rather than every intermediate
+    # write generated while the scan was being committed.
+    changed = _records()[0] | {"name": "updated-title.mp4"}
+    database.replace_scan([changed], source="sync")
+    second_batch, second_revision = database.catalog_changes_since(first_cursor)
+    by_id = {change["entity_id"]: change for change in second_batch}
+    assert by_id["1"]["operation"] == "upsert"
+    assert by_id["2"]["operation"] == "delete"
+    assert second_revision == database.catalog_revision()
+
+
+def test_tvbox_category_snapshots_are_independent_and_prunable(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+
+    database.record_tvbox_category_snapshot(
+        source_id="forest",
+        remote_category_id="movie",
+        name="电影",
+        upstream_total=120,
+        page_count=6,
+        item_count=120,
+        last_error=None,
+    )
+    database.record_tvbox_category_snapshot(
+        source_id="forest",
+        remote_category_id="empty",
+        name="空分类",
+        upstream_total=0,
+        page_count=0,
+        item_count=0,
+        last_error="upstream timeout",
+    )
+
+    snapshots = database.tvbox_category_snapshots("forest")
+    assert [row["remote_category_id"] for row in snapshots] == ["movie", "empty"]
+    assert snapshots[1]["last_error"] == "upstream timeout"
+
+    database.delete_tvbox_category_snapshots_not_in("forest", ("movie",))
+    assert [row["remote_category_id"] for row in database.tvbox_category_snapshots("forest")] == ["movie"]
+
+
+def test_movie_metadata_link_changes_advance_catalog_revision(tmp_path):
+    database = LibraryDatabase(str(tmp_path / "library.db"))
+    database.initialize()
+    database.replace_scan(
+        [{
+            "path": "/movies/example.mp4",
+            "name": "example.mp4",
+            "size": 100,
+            "modified": "2026-10-18",
+            "thumb": "",
+        }],
+        source="movies",
+    )
+    database.sync_movie_index("movies", parse_movie_filename)
+    movie = database.movies(sources=("movies",), limit=1)[0]
+    before = database.catalog_revision()
+
+    database.update_movie_metadata(
+        int(movie["id"]),
+        metadata_entities={"performer": ["演员甲"]},
+    )
+
+    changes, after = database.catalog_changes_since(before)
+    assert any(
+        change["entity_type"] == "movie"
+        and change["entity_id"] == str(movie["id"])
+        and change["operation"] == "upsert"
+        for change in changes
+    )
+    assert after > before
+
+
 def test_seed_skips_a_default_source_the_user_already_added_under_another_id(tmp_path):
     """Boot must survive a default source that is already present by other key."""
     database = LibraryDatabase(str(tmp_path / "library.db"))
@@ -145,7 +231,9 @@ def test_incremental_scan_deactivates_only_missing_source_rows(tmp_path):
         for statement in statements
         if statement.startswith("update videos set active = 0")
     ]
-    assert len(cleanup) == 1
+    # SQLite's trace callback reports a trigger's inner statements once per
+    # affected row; assert the scanner still issued one distinct cleanup query.
+    assert len(set(cleanup)) == 1
     assert "scan_id is not" in cleanup[0]
     current_ids = {
         item["path"]: item["id"]

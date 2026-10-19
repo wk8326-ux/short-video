@@ -1,8 +1,8 @@
 {
-  "versionCode": 200,
-  "versionName": "1.7.3",
-  "apkFile": "deepfuck-android-v1.7.3.apk",
-  "sha256": "7745045C5F307503D4CBE9C2BB5B86221EE6AF3458132A8FE3DBDB9B44D2E06E",
-  "size": 4578277,
-  "notes": "增加账号隔离的目录与搜索缓存、完善失效策略，压缩并重新排布各类播放器底部控件和进度条。"
+  "versionCode": 211,
+  "versionName": "1.9.0",
+  "apkFile": "deepfuck-android-v1.9.0.apk",
+  "sha256": "9085852f58134b312ef023c3e80c4a3f2ab8f4988c727af127ce93e22a62967a",
+  "size": 4611045,
+  "notes": "完成服务器与 APK 的本地读模型、全文搜索、收藏本地优先、增量同步、媒体源切换和播放缓存架构重构。"
 }
