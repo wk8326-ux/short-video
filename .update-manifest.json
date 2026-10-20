@@ -1,8 +1,8 @@
 {
-  "versionCode": 212,
-  "versionName": "1.9.1",
-  "apkFile": "deepfuck-android-v1.9.1.apk",
-  "sha256": "ac5b816322670db53aa1774c7fef308d4bdd249a8914804f911599b47ada47c1",
+  "versionCode": 213,
+  "versionName": "1.9.2",
+  "apkFile": "deepfuck-android-v1.9.2.apk",
+  "sha256": "67262f4c6d699d3d5cd83c97a7538a761efc74e74a1a29910ca2b57b90e1f80b",
   "size": 4611045,
-  "notes": "修复冷启动时管理页和电影墙首请求与本地目录同步竞争导致的无法载入；目录同步延后并按当前媒体源执行，幂等 GET 请求增加有限退避重试。"
+  "notes": "统一媒体源解析与播放代理，修复 AList 请求头、HLS、Range 播放、前端首屏加载、管理页轮询、电影墙和缓存问题。"
 }

@@ -439,6 +439,90 @@ select:focus-visible {
   margin: 0 auto;
 }
 
+.movie-source-controls {
+  display: flex;
+  width: min(100%, 1120px);
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 auto 26px;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.movie-source-picker {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+.movie-source-picker select {
+  min-width: 0;
+  max-width: min(58vw, 440px);
+  height: 40px;
+  padding: 0 34px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.055);
+  font: inherit;
+}
+
+.movie-source-single {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.movie-inline-error {
+  width: min(100%, 1120px);
+  margin: -14px auto 18px;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.movie-group-list {
+  display: grid;
+  width: min(100%, 1120px);
+  gap: 38px;
+  margin: 0 auto;
+}
+
+.movie-group {
+  min-width: 0;
+}
+
+.movie-group > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--line);
+}
+
+.movie-group > header h2,
+.movie-group > header span {
+  margin: 0;
+}
+
+.movie-group > header h2 {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.movie-group > header span {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .movie-card {
   display: block;
   min-width: 0;
@@ -723,6 +807,21 @@ select:focus-visible {
 
   .movie-search {
     width: 100%;
+  }
+
+  .movie-source-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .movie-source-picker {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .movie-source-picker select {
+    width: 100%;
+    max-width: none;
   }
 }
 

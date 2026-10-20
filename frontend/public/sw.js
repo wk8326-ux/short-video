@@ -1,15 +1,55 @@
-const CACHE_NAME = "short-video-shell-v5";
-const SHELL = ["/", "/manifest.webmanifest", "/icon.png"];
+const CACHE_NAME = "short-video-shell-v6";
+const SHELL = ["/", "/manifest.webmanifest", "/icon.svg"];
+
+function isCacheableResponse(response) {
+  const cacheControl = response.headers.get("cache-control") || "";
+  return response.ok
+    && response.status === 200
+    && response.type === "basic"
+    && !response.redirected
+    && !response.headers.has("content-range")
+    && !/\bno-store\b/i.test(cacheControl);
+}
+
+function isCacheableAsset(request, response) {
+  const url = new URL(request.url);
+  return request.method === "GET"
+    && url.origin === self.location.origin
+    && !url.pathname.startsWith("/api/")
+    && url.pathname.startsWith("/assets/")
+    && isCacheableResponse(response);
+}
+
+function isShellRequest(request) {
+  const url = new URL(request.url);
+  return url.origin === self.location.origin
+    && (url.pathname === "/"
+      || url.pathname === "/manifest.webmanifest"
+      || url.pathname === "/icon.svg");
+}
+
+async function fetchForCache(path) {
+  const response = await fetch(new Request(new URL(path, self.location.origin), {
+    cache: "no-store",
+    redirect: "error",
+  }));
+  if (!isCacheableResponse(response)) {
+    throw new Error(`Static resource request failed: ${path}`);
+  }
+  return response;
+}
 
 async function cacheShell() {
   const cache = await caches.open(CACHE_NAME);
-  const home = await fetch("/", { cache: "no-store" });
-  if (!home.ok) throw new Error(`Shell request failed: ${home.status}`);
+  const home = await fetchForCache("/");
   await cache.put("/", home.clone());
   const html = await home.text();
   const assets = [...html.matchAll(/(?:src|href)="(\/assets\/[^"?]+)"/g)]
     .map((match) => match[1]);
-  await cache.addAll([...SHELL.slice(1), ...new Set(assets)]);
+  await Promise.all([...SHELL.slice(1), ...new Set(assets)].map(async (path) => {
+    const response = await fetchForCache(path);
+    await cache.put(path, response);
+  }));
 }
 
 self.addEventListener("install", (event) => {
@@ -36,30 +76,36 @@ self.addEventListener("fetch", (event) => {
   if (request.mode === "navigate") {
     event.respondWith((async () => {
       const cache = await caches.open(CACHE_NAME);
-      const cached = await cache.match("/");
-      const update = fetch(request).then(async (response) => {
-        if (response.ok) await cache.put("/", response.clone());
+      try {
+        const response = await fetch(request, { cache: "no-store" });
+        if (isCacheableResponse(response)) await cache.put("/", response.clone());
         return response;
-      });
-      if (cached) {
-        event.waitUntil(update.catch(() => undefined));
-        return cached;
+      } catch {
+        const cached = await cache.match("/");
+        if (cached) return cached;
+        throw new Error("Application shell is unavailable");
       }
-      return update;
     })());
     return;
   }
 
+  if (!isShellRequest(request) && !url.pathname.startsWith("/assets/")) return;
+
   event.respondWith(
     caches.match(request).then((cached) => {
-      if (cached) return cached;
-      return fetch(request).then((response) => {
-        if (response.ok) {
+      const network = fetch(request).then((response) => {
+        if (isCacheableAsset(request, response)
+          || (isShellRequest(request) && isCacheableResponse(response))) {
           const copy = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
         }
         return response;
       });
+      if (cached) {
+        event.waitUntil(network.catch(() => undefined));
+        return cached;
+      }
+      return network;
     }),
   );
 });

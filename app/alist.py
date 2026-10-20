@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import posixpath
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from collections import deque
 from pathlib import PurePosixPath
 from typing import Any
@@ -11,6 +11,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from app.direct_urls import ResolvedMedia, normalize_media_headers
 from app.settings import Settings
 
 USER_AGENT = (
@@ -638,23 +639,25 @@ class AListClient:
             return parts[1] if len(parts) > 1 else ""
         return parts[0]
 
-    async def resolve(self, path: str) -> tuple[str, bool]:
+    async def resolve(self, path: str) -> ResolvedMedia:
         payload = await self._post("/api/fs/get", {"path": path, "password": ""})
         data = payload.get("data") or {}
         raw_url = str(data.get("raw_url") or "")
         parsed = urlparse(raw_url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise AListError("AList did not return a valid raw URL")
-        return raw_url, bool(data.get("header"))
+        return ResolvedMedia(
+            url=raw_url,
+            headers=normalize_media_headers(data.get("header")),
+        )
 
     async def read_prefix(self, path: str, *, max_bytes: int) -> bytes:
-        raw_url, requires_headers = await self.resolve(path)
-        if requires_headers:
-            raise AListError("This media source requires proxy headers")
+        resolved = await self.resolve(path)
         return await self.read_url_range(
-            raw_url,
+            resolved.url,
             range_header=f"bytes=0-{max_bytes - 1}",
             max_bytes=max_bytes,
+            headers=resolved.headers,
         )
 
     async def read_url_range(
@@ -663,16 +666,20 @@ class AListClient:
         *,
         range_header: str,
         max_bytes: int,
+        headers: Mapping[str, str] | None = None,
     ) -> bytes:
-        headers = {
-            "Accept": "*/*",
-            "Accept-Encoding": "identity",
-            "Range": range_header,
-            "User-Agent": USER_AGENT,
+        request_headers = {
+            "accept": "*/*",
+            "accept-encoding": "identity",
+            "range": range_header,
+            "user-agent": USER_AGENT,
         }
+        request_headers.update(normalize_media_headers(headers))
+        request_headers["accept-encoding"] = "identity"
+        request_headers["range"] = range_header
         try:
             async with self._client.stream(
-                "GET", raw_url, headers=headers, follow_redirects=True
+                "GET", raw_url, headers=request_headers, follow_redirects=True
             ) as response:
                 if response.status_code not in (200, 206):
                     raise AListError(f"Media prefix returned HTTP {response.status_code}")

@@ -39,6 +39,11 @@ import {
   type PlaybackState,
 } from "./playbackStore";
 import type { MediaSurface } from "./playbackStore";
+import {
+  attachPlaybackSource,
+  withPlaybackAttempt,
+  type PlaybackSession,
+} from "./playback";
 
 const AsmrLibrary = lazy(() => import("./AsmrLibrary"));
 const MovieLibrary = lazy(() => import("./MovieLibrary"));
@@ -48,6 +53,7 @@ type VideoItem = {
   title: string;
   size: number;
   modified: string | null;
+  format: string | null;
   playUrl: string;
   posterUrl: string | null;
   duration: number | null;
@@ -76,23 +82,29 @@ type FastStartSummary = {
   pending: number;
 };
 
-type LibrarySection = "feed" | "asmr" | "movie";
+type MediaProvider = "alist" | "openlist" | "tvbox" | "html";
+type LibrarySection = "feed" | "asmr" | "movie" | "drama";
+type SourceScanMode = "tree" | "authors" | "authors_recursive" | "tvbox" | "remote_pages";
 
 type MediaLibrarySource = {
   id: string;
   name: string;
-  provider: "alist" | "openlist";
+  provider: MediaProvider;
   baseUrl: string;
   rootPath: string;
+  rootPaths: string[];
   excludedPaths: string[];
   section: LibrarySection;
-  scanMode: "tree" | "authors" | "authors_recursive";
+  scanMode: SourceScanMode;
   anonymous: boolean;
   usernameConfigured: boolean;
   tokenConfigured: boolean;
   enabled: boolean;
   videos: number;
   bytes: number;
+  parentSourceId?: string | null;
+  sourceGroupId?: string;
+  sourceGroupName?: string;
   scan: {
     running: boolean;
     lastSuccess: number | null;
@@ -113,6 +125,7 @@ type AdminStatus = {
     guangya: { videos: number; bytes: number };
     asmr: { videos: number; bytes: number };
     movie: { videos: number; bytes: number };
+    drama: { videos: number; bytes: number };
   };
   scan: {
     running: boolean;
@@ -127,6 +140,14 @@ type AdminStatus = {
     }>;
   };
   movieMetadata?: {
+    running: boolean;
+    checked: number;
+    total: number;
+    matched: number;
+    lastSuccess: number | null;
+    lastError: string | null;
+  };
+  dramaMetadata?: {
     running: boolean;
     checked: number;
     total: number;
@@ -171,6 +192,24 @@ const GESTURE_AXIS_THRESHOLD_PX = 14;
 const AUTH_HINT_KEY = "short-video-authenticated";
 const FEED_CACHE_KEY = "short-video-feed-cache-v1";
 const FEED_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const PROVIDER_LABELS: Record<MediaProvider, string> = {
+  alist: "AList",
+  openlist: "OpenList",
+  tvbox: "TVBox",
+  html: "HTML",
+};
+const SECTION_LABELS: Record<LibrarySection, string> = {
+  feed: "短视频 / 长视频",
+  asmr: "ASMR",
+  movie: "电影",
+  drama: "短剧",
+};
+
+function sourceAddress(source: MediaLibrarySource): string {
+  if (source.provider === "tvbox" || source.provider === "html") return source.baseUrl;
+  const roots = source.rootPaths?.length ? source.rootPaths : [source.rootPath];
+  return `${source.baseUrl}${roots.join(" · ")}`;
+}
 
 function hasAuthenticationHint(): boolean {
   try {
@@ -855,15 +894,38 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
   const sourceDialogTrigger = useRef<HTMLElement | null>(null);
   const closeSourceDialog = useCallback(() => setEditingSource(undefined), []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (diagnostics = true) => {
     try {
-      const response = await fetch("/api/admin/status", { cache: "no-store" });
+      const response = await fetch(`/api/admin/status?diagnostics=${diagnostics ? "true" : "false"}`, { cache: "no-store" });
       if (response.status === 401) {
         onUnauthorized();
         return;
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      setStatus((await response.json()) as AdminStatus);
+      const next = (await response.json()) as AdminStatus;
+      setStatus((current) => {
+        if (diagnostics || !current) return next;
+        const previousSources = new Map(current.sources.map((source) => [source.id, source]));
+        return {
+          ...current,
+          scan: next.scan,
+          sources: next.sources.map((source) => ({
+            ...source,
+            videos: previousSources.get(source.id)?.videos ?? 0,
+            bytes: previousSources.get(source.id)?.bytes ?? 0,
+          })),
+          movieMetadata: next.movieMetadata ?? current.movieMetadata,
+          dramaMetadata: next.dramaMetadata ?? current.dramaMetadata,
+          fastStart: {
+            ...current.fastStart,
+            running: next.fastStart.running,
+            checked: next.fastStart.checked,
+            total: next.fastStart.total,
+            lastSuccess: next.fastStart.lastSuccess,
+            lastError: next.fastStart.lastError,
+          },
+        };
+      });
       setError("");
     } catch {
       setError("无法读取服务状态");
@@ -871,10 +933,27 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
   }, [onUnauthorized]);
 
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 3000);
-    return () => window.clearInterval(timer);
+    void refresh(true);
   }, [refresh]);
+
+  const busy = Boolean(
+    status && (
+      status.scan.running
+      || status.fastStart.running
+      || status.movieMetadata?.running
+      || status.dramaMetadata?.running
+      || status.sources.some((source) => source.scan.running)
+    ),
+  );
+
+  useEffect(() => {
+    if (!status) return;
+    const timer = window.setInterval(
+      () => void refresh(false),
+      busy ? 2500 : 30000,
+    );
+    return () => window.clearInterval(timer);
+  }, [busy, refresh, status]);
 
   const runAction = async (kind: AdminAction) => {
     if (actions.has(kind)) return;
@@ -893,7 +972,7 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
         return;
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      await refresh();
+      await refresh(true);
     } catch {
       setError(kind.startsWith("metadata-") ? "无法启动电影刮削" : kind.startsWith("scan-") ? "无法启动目录扫描" : "无法启动 Fast Start 检查");
     } finally {
@@ -926,7 +1005,7 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
       const body = await response.json().catch(() => ({})) as { detail?: string };
       if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
       setEditingSource(undefined);
-      await refresh();
+      await refresh(true);
     } catch (sourceError) {
       setError(sourceError instanceof Error ? sourceError.message : "无法保存媒体源");
     } finally {
@@ -1009,9 +1088,9 @@ function ManagementView({ onBack, onUnauthorized }: ManagementViewProps) {
                     <div className="source-scan-copy">
                       <div className="source-scan-heading">
                         <h3>{source.name}</h3>
-                        <span>{source.section === "feed" ? "短视频 / 长视频" : source.section === "asmr" ? "ASMR" : "电影"}</span>
+                        <span>{PROVIDER_LABELS[source.provider]} · {SECTION_LABELS[source.section]}</span>
                       </div>
-                      <p className="source-address">{source.baseUrl}{source.rootPath}</p>
+                      <p className="source-address">{sourceAddress(source)}</p>
                       <p>{source.videos} 项 · {source.scan.directories} 个目录 · {source.enabled ? formatDate(source.scan.lastSuccess) : "已停用"}</p>
                       {source.scan.lastError && <p className="source-scan-error" role="alert">{source.scan.lastError}</p>}
                     </div>
@@ -1152,20 +1231,59 @@ type MediaSourceDialogProps = {
 function MediaSourceDialog({ source, saving, returnFocus, onClose, onSave }: MediaSourceDialogProps) {
   const dialogRef = useRef<HTMLElement>(null);
   const [name, setName] = useState(source?.name ?? "");
-  const [provider, setProvider] = useState<"alist" | "openlist">(source?.provider ?? "alist");
+  const [provider, setProvider] = useState<MediaProvider>(source?.provider ?? "alist");
   const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
-  const [rootPath, setRootPath] = useState(source?.rootPath ?? "/");
+  const [rootPaths, setRootPaths] = useState<string[]>(
+    source?.rootPaths?.length ? source.rootPaths : [source?.rootPath ?? "/"],
+  );
   const [excludedPaths, setExcludedPaths] = useState(source?.excludedPaths ?? []);
   const [section, setSection] = useState<LibrarySection>(source?.section ?? "feed");
-  const [scanMode, setScanMode] = useState<"tree" | "authors" | "authors_recursive">(
-    source?.scanMode ?? "tree",
+  const [scanMode, setScanMode] = useState<SourceScanMode>(
+    source?.scanMode === "authors" || source?.scanMode === "authors_recursive"
+      ? source.scanMode
+      : "tree",
   );
   const [anonymous, setAnonymous] = useState(source?.anonymous ?? true);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [token, setToken] = useState("");
   const [enabled, setEnabled] = useState(source?.enabled ?? true);
-  const valid = Boolean(name.trim() && /^https?:\/\//i.test(baseUrl.trim()) && rootPath.trim());
+  const remoteSource = provider === "tvbox" || provider === "html";
+  const availableSections: LibrarySection[] = provider === "tvbox"
+    ? ["movie"]
+    : provider === "html"
+      ? ["drama"]
+      : ["feed", "asmr", "movie", "drama"];
+  const cleanRoots = rootPaths.map((path) => path.trim()).filter(Boolean);
+  const valid = Boolean(
+    name.trim()
+    && baseUrl.trim()
+    && (remoteSource || cleanRoots.length > 0),
+  );
+
+  const normalizeSection = (nextProvider: MediaProvider, nextSection: LibrarySection) => {
+    if (nextProvider === "tvbox") return "movie";
+    if (nextProvider === "html") return "drama";
+    return nextSection;
+  };
+
+  const scanModeFor = (nextProvider: MediaProvider, nextSection: LibrarySection): SourceScanMode => {
+    if (nextProvider === "tvbox") return "tvbox";
+    if (nextProvider === "html") return "remote_pages";
+    return nextSection === "asmr" ? "authors_recursive" : "tree";
+  };
+
+  const changeProvider = (nextProvider: MediaProvider) => {
+    setProvider(nextProvider);
+    const nextSection = normalizeSection(nextProvider, section);
+    setSection(nextSection);
+    setScanMode(scanModeFor(nextProvider, nextSection));
+  };
+
+  const changeSection = (nextSection: LibrarySection) => {
+    setSection(nextSection);
+    setScanMode(scanModeFor(provider, nextSection));
+  };
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -1205,18 +1323,20 @@ function MediaSourceDialog({ source, saving, returnFocus, onClose, onSave }: Med
           onSubmit={(event) => {
             event.preventDefault();
             if (!valid || saving) return;
+            const roots = remoteSource ? ["/"] : cleanRoots;
             onSave({
               name: name.trim(),
               provider,
               baseUrl: baseUrl.trim(),
-              rootPath: rootPath.trim(),
-              excludedPaths: excludedPaths.map((path) => path.trim()).filter(Boolean),
+              rootPath: roots[0],
+              rootPaths: roots,
+              excludedPaths: remoteSource ? [] : excludedPaths.map((path) => path.trim()).filter(Boolean),
               section,
-              scanMode: section === "feed" ? "tree" : scanMode === "tree" ? "authors_recursive" : scanMode,
-              anonymous,
-              username,
-              password,
-              token,
+              scanMode: scanModeFor(provider, section),
+              anonymous: remoteSource ? true : anonymous,
+              username: remoteSource ? "" : username,
+              password: remoteSource ? "" : password,
+              token: remoteSource ? "" : token,
               enabled,
             });
           }}
@@ -1228,71 +1348,84 @@ function MediaSourceDialog({ source, saving, returnFocus, onClose, onSave }: Med
           <div className="source-form-pair">
             <label>
               <span>服务类型</span>
-              <select value={provider} onChange={(event) => setProvider(event.target.value as "alist" | "openlist")}>
+              <select value={provider} onChange={(event) => changeProvider(event.target.value as MediaProvider)}>
                 <option value="alist">AList</option>
                 <option value="openlist">OpenList</option>
+                <option value="tvbox">TVBox</option>
+                <option value="html">HTML</option>
               </select>
             </label>
             <label>
               <span>归属板块</span>
               <select
                 value={section}
-                onChange={(event) => {
-                  const value = event.target.value as LibrarySection;
-                  setSection(value);
-                  setScanMode(value === "feed" || value === "movie" ? "tree" : "authors_recursive");
-                }}
+                onChange={(event) => changeSection(event.target.value as LibrarySection)}
               >
-                <option value="feed">短视频 / 长视频</option>
-                <option value="asmr">ASMR</option>
-                <option value="movie">电影</option>
+                {availableSections.map((value) => (
+                  <option key={value} value={value}>{SECTION_LABELS[value]}</option>
+                ))}
               </select>
             </label>
           </div>
           <label>
-            <span>服务地址</span>
-            <input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://example.com" required />
-          </label>
-          <label>
-            <span>根目录</span>
-            <input value={rootPath} onChange={(event) => setRootPath(event.target.value)} placeholder="/media" required />
-          </label>
-          <label>
-            <span>排除路径（每行一条）</span>
-            <textarea
-              value={excludedPaths.join("\n")}
-              onChange={(event) => setExcludedPaths(event.target.value.split("\n"))}
-              placeholder="/asmr/中文音声/小元"
-              rows={3}
+            <span>{provider === "tvbox" ? "配置地址或 JSON" : "服务地址"}</span>
+            <input
+              type={provider === "tvbox" ? "text" : "url"}
+              value={baseUrl}
+              onChange={(event) => setBaseUrl(event.target.value)}
+              placeholder={provider === "tvbox" ? "https://example.com/tvbox.json" : "https://example.com"}
+              required
             />
           </label>
-          {section === "asmr" && (
-            <label>
-              <span>作者目录结构</span>
-              <select value={scanMode} onChange={(event) => setScanMode(event.target.value as "authors" | "authors_recursive")}>
-                <option value="authors">一级作者目录</option>
-                <option value="authors_recursive">嵌套作者目录</option>
-              </select>
-            </label>
-          )}
-          <label className="source-toggle">
-            <span>匿名访问</span>
-            <input type="checkbox" checked={anonymous} onChange={(event) => setAnonymous(event.target.checked)} />
-          </label>
-          {!anonymous && (
+          {!remoteSource && (
             <>
               <label>
-                <span>用户名{source?.usernameConfigured ? "（已配置）" : ""}</span>
-                <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
+                <span>根目录（每行一条）</span>
+                <textarea
+                  value={rootPaths.join("\n")}
+                  onChange={(event) => setRootPaths(event.target.value.split("\n"))}
+                  placeholder="/media"
+                  rows={3}
+                />
               </label>
               <label>
-                <span>密码</span>
-                <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="留空保持不变" autoComplete="new-password" />
+                <span>排除路径（每行一条）</span>
+                <textarea
+                  value={excludedPaths.join("\n")}
+                  onChange={(event) => setExcludedPaths(event.target.value.split("\n"))}
+                  placeholder="/asmr/中文音声/小元"
+                  rows={3}
+                />
               </label>
-              <label>
-                <span>令牌{source?.tokenConfigured ? "（已配置）" : ""}</span>
-                <input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="可选，留空保持不变" autoComplete="off" />
+              {section === "asmr" && (
+                <label>
+                  <span>作者目录结构</span>
+                  <select value={scanMode} onChange={(event) => setScanMode(event.target.value as "authors" | "authors_recursive")}>
+                    <option value="authors">一级作者目录</option>
+                    <option value="authors_recursive">嵌套作者目录</option>
+                  </select>
+                </label>
+              )}
+              <label className="source-toggle">
+                <span>匿名访问</span>
+                <input type="checkbox" checked={anonymous} onChange={(event) => setAnonymous(event.target.checked)} />
               </label>
+              {!anonymous && (
+                <>
+                  <label>
+                    <span>用户名{source?.usernameConfigured ? "（已配置）" : ""}</span>
+                    <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" />
+                  </label>
+                  <label>
+                    <span>密码</span>
+                    <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="留空保持不变" autoComplete="new-password" />
+                  </label>
+                  <label>
+                    <span>令牌{source?.tokenConfigured ? "（已配置）" : ""}</span>
+                    <input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="可选，留空保持不变" autoComplete="off" />
+                  </label>
+                </>
+              )}
             </>
           )}
           <label className="source-toggle">
@@ -1352,6 +1485,7 @@ function VideoSlide({
   const gestureRef = useRef<LandscapeGesture | null>(null);
   const suppressClickRef = useRef(false);
   const retryTimerRef = useRef<number | null>(null);
+  const playbackSessionRef = useRef<PlaybackSession | null>(null);
   const chromeTimerRef = useRef<number | null>(null);
   const chromeVisibleRef = useRef(true);
   const restoredRef = useRef(false);
@@ -1359,6 +1493,7 @@ function VideoSlide({
   const currentTimeRef = useRef(initialTime);
   const durationRef = useRef(0);
   const lastPersistedRef = useRef(initialTime);
+  const initialTimeRef = useRef(initialTime);
   const [paused, setPaused] = useState(true);
   const [buffering, setBuffering] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -1369,7 +1504,7 @@ function VideoSlide({
   const [seeking, setSeeking] = useState(false);
   const [gestureSeek, setGestureSeek] = useState<{ targetTime: number; delta: number } | null>(null);
   const engaged = active;
-  const source = attempt ? `${item.playUrl}?refresh=1&attempt=${attempt}` : item.playUrl;
+  const source = withPlaybackAttempt(item.playUrl, attempt);
 
   const saveProgress = useCallback(() => {
     if (durationRef.current > 0) {
@@ -1433,20 +1568,54 @@ function VideoSlide({
   }, [muted]);
 
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (engaged) {
-      const promise = video.play();
-      if (promise) promise.catch(() => setPaused(true));
-    } else {
-      video.pause();
-    }
-  }, [engaged, source]);
+    initialTimeRef.current = initialTime;
+  }, [initialTime]);
 
   useEffect(() => {
     const video = videoRef.current;
-    if (nearby && video && video.readyState === HTMLMediaElement.HAVE_NOTHING) video.load();
-  }, [nearby]);
+    if (!video || (!engaged && !nearby)) {
+      video?.pause();
+      return;
+    }
+    let cancelled = false;
+    setBuffering(engaged);
+    void attachPlaybackSource(video, {
+      url: source,
+      format: item.format,
+      initialTime: initialTimeRef.current,
+      autoPlay: engaged,
+      isCancelled: () => cancelled,
+      onFatalError: () => {
+        if (cancelled) return;
+        setBuffering(false);
+        if (attempt === 0) {
+          retryTimerRef.current = window.setTimeout(() => setAttempt(1), 350);
+        } else {
+          setFailed(true);
+        }
+      },
+    }).then((session) => {
+      if (cancelled) {
+        session.destroy();
+        return;
+      }
+      playbackSessionRef.current = session;
+    }).catch(() => {
+      if (cancelled) return;
+      setBuffering(false);
+      if (attempt === 0) {
+        retryTimerRef.current = window.setTimeout(() => setAttempt(1), 350);
+      } else {
+        setFailed(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+      playbackSessionRef.current?.destroy();
+      playbackSessionRef.current = null;
+      video.pause();
+    };
+  }, [attempt, engaged, item.format, nearby, source]);
 
   useEffect(() => {
     if (!engaged) return;
@@ -1677,7 +1846,6 @@ function VideoSlide({
     >
       <video
         ref={videoRef}
-        src={source}
         poster={item.posterUrl ?? undefined}
         preload={nearby ? "auto" : "none"}
         muted={muted}

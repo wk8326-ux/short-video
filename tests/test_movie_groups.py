@@ -140,6 +140,36 @@ async def test_loading_more_stays_inside_the_section_it_was_asked_for(
 
 
 @pytest.mark.asyncio
+async def test_group_ids_load_every_library_in_their_connection(
+    monkeypatch, tmp_path
+):
+    main = await boot(monkeypatch, tmp_path)
+    first = await add_movie_source(main, "电影 / 主目录", "/movies/main")
+    second = await add_movie_source(main, "电影 / 归档", "/movies/archive")
+    index_movies(main, first, ["AAA-001", "AAA-002", "AAA-003"])
+    index_movies(main, second, ["BBB-001", "BBB-002"])
+
+    with TestClient(main.app) as client:
+        groups = client.get(
+            "/api/movies/groups", headers=headers_for(main)
+        ).json()
+        group_id = groups["sources"][0]["id"]
+        detail = client.get(
+            f"/api/movies/groups/{group_id}",
+            params={"limit": 20},
+            headers=headers_for(main),
+        )
+
+    assert group_id.startswith("connection:")
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["sourceId"] == group_id
+    assert body["name"] == "AList"
+    assert body["total"] == 5
+    assert {item["source"] for item in body["items"]} == {first, second}
+
+
+@pytest.mark.asyncio
 async def test_search_filters_every_section_and_drops_the_rest(monkeypatch, tmp_path):
     main = await boot(monkeypatch, tmp_path)
     first = await add_movie_source(main, "光鸭 / 电影", "/movies/guangya")

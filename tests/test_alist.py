@@ -149,10 +149,21 @@ async def test_read_prefix_requests_range_and_caps_response():
         if request.url.path == "/api/fs/get":
             return httpx.Response(
                 200,
-                json={"code": 200, "data": {"raw_url": "https://cdn.example/video.mp4"}},
+                json={
+                    "code": 200,
+                    "data": {
+                        "raw_url": "https://cdn.example/video.mp4",
+                        "header": {
+                            "Authorization": "Bearer media-token",
+                            "Referer": "https://alist.example",
+                        },
+                    },
+                },
             )
         assert request.headers["range"] == "bytes=0-15"
         assert request.headers["user-agent"].startswith("Mozilla/5.0")
+        assert request.headers["authorization"] == "Bearer media-token"
+        assert request.headers["referer"] == "https://alist.example"
         return httpx.Response(200, content=b"a" * 100)
 
     http_client = httpx.AsyncClient(

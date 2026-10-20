@@ -33,6 +33,7 @@ from app.database import (
     normalize_excluded_paths,
     normalize_root_paths,
 )
+from app.direct_urls import ResolvedMedia, coerce_resolved_media
 from app.drama import (
     CATEGORY_SLUGS,
     build_series,
@@ -43,6 +44,12 @@ from app.drama import (
 )
 from app.faststart import inspect_mp4_prefix
 from app.media_metadata import mp4_duration_seconds
+from app.media_proxy import (
+    MediaPlaybackProxy,
+    MediaProxyError,
+    UnknownPlaybackToken,
+    is_hls_url,
+)
 from app.media_sources import MediaSourceRegistry
 from app.scanner import ResumableScanner, initial_steps
 from app.movie_metadata import parse_movie_filename
@@ -70,7 +77,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("short-video")
 
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.9.2"
 settings = Settings.from_env()
 settings.validate()
 database = LibraryDatabase(settings.database_path)
@@ -83,6 +90,7 @@ session_manager = SessionManager(
 )
 login_limiter = LoginRateLimiter()
 catalog_cache = AsyncCatalogCache(ttl_seconds=3.0, max_entries=512)
+playback_proxy = MediaPlaybackProxy()
 
 scan_state: dict[str, Any] = {
     "running": False,
@@ -1286,24 +1294,26 @@ async def check_media_metadata(*, force: bool) -> None:
                 try:
                     runtime = source_registry.get(video["source"])
                     async with semaphore:
-                        raw_url, requires_headers = await runtime.direct_urls.get(
-                            video["id"], video["path"]
+                        resolved = coerce_resolved_media(
+                            await runtime.direct_urls.get(
+                                video["id"], video["path"]
+                            )
                         )
-                        if requires_headers:
-                            raise AListError("This media source requires proxy headers")
                         prefix_size = 256 * 1024
                         prefix = await runtime.client.read_url_range(
-                            raw_url,
+                            resolved.url,
                             range_header=f"bytes=0-{prefix_size - 1}",
                             max_bytes=prefix_size,
+                            headers=resolved.headers,
                         )
                         duration = mp4_duration_seconds(prefix)
                         if duration is None and int(video.get("size") or 0) > prefix_size:
                             suffix_size = min(1024 * 1024, int(video["size"]))
                             suffix = await runtime.client.read_url_range(
-                                raw_url,
+                                resolved.url,
                                 range_header=f"bytes=-{suffix_size}",
                                 max_bytes=suffix_size,
+                                headers=resolved.headers,
                             )
                             duration = mp4_duration_seconds(prefix, suffix)
                     if duration is not None:
@@ -1752,6 +1762,7 @@ async def lifespan(_: FastAPI):
         await asyncio.to_thread(database.movie_image_failed_urls)
     )
     await source_registry.initialize()
+    await playback_proxy.open()
     orphaned = await asyncio.to_thread(database.reconcile_orphaned_scan_jobs)
     if orphaned:
         logger.warning(
@@ -1809,6 +1820,7 @@ async def lifespan(_: FastAPI):
         shared_metadata_client = None
         if metadata_client is not None:
             await metadata_client.close()
+        await playback_proxy.close()
         await source_registry.close()
 
 
@@ -1904,6 +1916,12 @@ async def security_headers(request: Request, call_next):
     )
     if request.url.path.startswith("/api/") and "cache-control" not in response.headers:
         response.headers["Cache-Control"] = "no-store"
+    elif (
+        request.url.path.startswith("/assets/")
+        and response.status_code == 200
+        and "cache-control" not in response.headers
+    ):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     return response
 
 
@@ -2052,6 +2070,7 @@ def public_source(
     *,
     movie_metadata: dict[str, int | None] | None = None,
     drama_metadata: dict[str, int | None] | None = None,
+    include_details: bool = True,
 ) -> dict[str, Any]:
     state = scan_state["sources"].get(
         source["id"],
@@ -2085,7 +2104,7 @@ def public_source(
         payload["movieMetadata"] = movie_metadata
     if drama_metadata is not None:
         payload["dramaMetadata"] = drama_metadata
-    if str(source.get("provider") or "").lower() == "tvbox":
+    if include_details and str(source.get("provider") or "").lower() == "tvbox":
         payload["tvboxCategories"] = [
             {
                 "sourceId": row["source_id"],
@@ -2254,11 +2273,11 @@ def public_movie(row: dict[str, Any], *, detail: bool = False) -> dict[str, Any]
         "source": row.get("source"),
         "modified": row.get("modified"),
         "duration": row.get("duration_seconds"),
+        "format": row.get("media_format"),
     }
     if detail:
         payload["path"] = row.get("path")
         payload["size"] = row.get("size")
-        payload["format"] = row.get("media_format")
         payload["metadataProvider"] = row.get("metadata_provider")
         payload["releaseDate"] = normalize_release_date(row.get("release_date")) or None
         entities = row.get("metadata_entities") or {}
@@ -2419,6 +2438,7 @@ def public_drama_episode(video: dict[str, Any], position: int) -> dict[str, Any]
         "title": Path(str(video.get("name") or "")).stem,
         "duration": video.get("duration_seconds"),
         "modified": video.get("modified"),
+        "format": video.get("media_format"),
         "playUrl": f"/api/videos/{video_id}/play",
         "episodeIndex": position - 1,
     }
@@ -3588,11 +3608,50 @@ async def sync_changes(
 
 
 @app.get("/api/admin/status")
-async def admin_status() -> dict[str, Any]:
+async def admin_status(
+    diagnostics: bool = Query(default=True),
+) -> dict[str, Any]:
     feed_sources = source_registry.ids("feed")
     asmr_sources = source_registry.ids("asmr")
     movie_sources = source_registry.ids("movie")
     drama_sources = source_registry.ids("drama")
+
+    if not diagnostics:
+        sources = await asyncio.to_thread(
+            database.list_media_sources,
+            stats={},
+        )
+        empty_library = {"videos": 0, "bytes": 0}
+        return {
+            "library": {
+                **empty_library,
+                "guangya": dict(empty_library),
+                "asmr": dict(empty_library),
+                "movie": dict(empty_library),
+                "drama": dict(empty_library),
+            },
+            "scan": dict(scan_state),
+            "sources": [
+                public_source(source, include_details=False)
+                for source in sources
+            ],
+            "metadata": dict(metadata_state),
+            "movieMetadata": dict(movie_metadata_state),
+            "dramaMetadata": dict(drama_metadata_state),
+            "fastStart": {
+                **fast_start_state,
+                "summary": {
+                    "total": 0,
+                    "checked": 0,
+                    "optimized": 0,
+                    "notOptimized": 0,
+                    "inconclusive": 0,
+                    "errors": 0,
+                    "pending": 0,
+                },
+            },
+            "issues": [],
+        }
 
     # ``stats_by_source`` scans the whole catalogue, so ask for it once and
     # hand the result to ``list_media_sources`` rather than letting that
@@ -3856,12 +3915,39 @@ def parse_excluded_ids(value: str | None) -> set[int]:
     return result
 
 
+async def resolve_playback_media(
+    video: dict[str, Any],
+    runtime: Any | None = None,
+    *,
+    episode: int = 0,
+    refresh: bool = False,
+) -> ResolvedMedia:
+    """Resolve all providers through the same playback contract."""
+    runtime = runtime or source_registry.get(video["source"])
+    provider = runtime.config["provider"]
+    if provider == "tvbox":
+        remote_id = str(video["path"]).rstrip("/").rsplit("/", 1)[-1]
+        return coerce_resolved_media(
+            await runtime.client.resolve(remote_id, episode)
+        )
+    if provider == "html":
+        return coerce_resolved_media(
+            await runtime.client.resolve(str(video["path"]), episode)
+        )
+    video_id = video.get("id")
+    if video_id is None:
+        video_id = video["video_id"]
+    return coerce_resolved_media(
+        await runtime.direct_urls.get(int(video_id), video["path"], refresh=refresh)
+    )
+
+
 async def prewarm_play_url(video: dict[str, Any]) -> None:
     try:
         runtime = source_registry.get(video["source"])
-        await runtime.direct_urls.get(video["id"], video["path"])
+        await resolve_playback_media(video, runtime)
     except Exception as exc:
-        logger.warning("Direct URL prewarm failed for video %s: %s", video["id"], exc)
+        logger.warning("Playback prewarm failed for video %s: %s", video["id"], exc)
 
 
 async def prewarm_play_urls(videos: list[dict[str, Any]], *, limit: int = 6) -> None:
@@ -4467,6 +4553,7 @@ async def feed(
                 "size": row["size"],
                 "modified": row["modified"],
                 "duration": row.get("duration_seconds"),
+                "format": row.get("media_format"),
                 "playUrl": f"/api/videos/{row['id']}/play",
                 "posterUrl": f"/api/videos/{row['id']}/poster" if row.get("thumb") else None,
             }
@@ -4486,40 +4573,54 @@ async def play(video_id: int, refresh: bool = False, episode: int = 0):
 
     try:
         runtime = source_registry.get(video["source"])
-        if runtime.config["provider"] == "tvbox":
-            remote_id = str(video["path"]).rstrip("/").rsplit("/", 1)[-1]
-            raw_url, requires_headers = await runtime.client.resolve(
-                remote_id,
-                episode,
-            )
-        elif runtime.config["provider"] == "html":
-            raw_url, requires_headers = await runtime.client.resolve(
-                str(video["path"]),
-                episode,
-            )
-        else:
-            raw_url, requires_headers = await runtime.direct_urls.get(
-                video_id,
-                video["path"],
-                refresh=refresh,
-            )
+        resolved = await resolve_playback_media(
+            video,
+            runtime,
+            episode=episode,
+            refresh=refresh,
+        )
     except (AListError, TVBoxError, HtmlSourceError, KeyError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    if requires_headers:
-        raise HTTPException(status_code=422, detail="This media source requires proxy headers")
+
+    playlist = is_hls_url(resolved.url, video.get("media_format"))
+    if resolved.requires_headers or playlist:
+        token = playback_proxy.register(
+            resolved.url,
+            resolved.headers,
+            playlist_hint=playlist,
+        )
+        location = f"/api/playback/{token}"
+    else:
+        location = resolved.url
 
     return RedirectResponse(
-        raw_url,
+        location,
         status_code=302,
         headers={
             "Cache-Control": (
-                "no-store" if runtime.config["provider"] == "html"
+                "no-store"
+                if runtime.config["provider"] == "html" or playlist
                 else "private, max-age=300"
             ),
             "Vary": "Cookie",
             "X-Robots-Tag": "noindex",
         },
     )
+
+
+@app.api_route(
+    "/api/playback/{token}",
+    methods=["GET", "HEAD"],
+    include_in_schema=False,
+)
+async def playback_stream(token: str, request: Request):
+    try:
+        return await playback_proxy.handle(token, request)
+    except UnknownPlaybackToken as exc:
+        raise HTTPException(status_code=404, detail="Playback URL expired") from exc
+    except MediaProxyError as exc:
+        logger.warning("Playback proxy failed: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 class MediaMetadataReport(BaseModel):
@@ -4676,11 +4777,12 @@ def _movie_group_payload(
     *,
     total: int,
     offset: int,
+    name: str | None = None,
 ) -> dict[str, Any]:
     loaded = offset + len(rows)
     return {
         "sourceId": source_id,
-        "name": source_registry.name(source_id),
+        "name": name or source_registry.name(source_id),
         "items": [public_movie(row) for row in rows],
         "total": total,
         "nextOffset": loaded if loaded < total else None,
@@ -4888,8 +4990,20 @@ async def movie_group_items(
     sort: str = Query(default="cover", pattern="^(cover|title|time)$"),
     dir: str = Query(default="", pattern="^(asc|desc|)$"),
 ) -> dict[str, Any]:
-    if source_id not in source_registry.ids("movie"):
-        raise HTTPException(status_code=404, detail="Media source not found")
+    library_ids, selected_source_id, source_catalog = _section_source_selection(
+        "movie", source_id
+    )
+    selected_source = next(
+        (item for item in source_catalog if item["id"] == selected_source_id),
+        None,
+    )
+    group_name = (
+        str(selected_source["name"])
+        if selected_source is not None
+        and source_id == selected_source_id
+        and len(library_ids) > 1
+        else None
+    )
     search = q.strip()
     rows, total = await asyncio.gather(
         asyncio.to_thread(
@@ -4897,11 +5011,15 @@ async def movie_group_items(
             search=search,
             limit=limit,
             offset=offset,
-            sources=(source_id,),
+            sources=library_ids,
             sort=sort,
             direction=dir,
         ),
-        asyncio.to_thread(database.movie_count, search=search, sources=(source_id,)),
+        asyncio.to_thread(
+            database.movie_count,
+            search=search,
+            sources=library_ids,
+        ),
     )
     if offset == 0 and rows:
         # Opening a library used to draw its first six cards from the network one
@@ -4911,7 +5029,13 @@ async def movie_group_items(
             prewarm_movie_wall_images(rows, limit=MOVIE_LIBRARY_PREWARM_LIMIT),
             name=f"prewarm-movie-library-{source_id}",
         )
-    return _movie_group_payload(source_id, rows, total=total, offset=offset)
+    return _movie_group_payload(
+        source_id,
+        rows,
+        total=total,
+        offset=offset,
+        name=group_name,
+    )
 
 
 @app.get("/api/movies")
@@ -5586,25 +5710,37 @@ if assets_dir.is_dir():
 
 @app.api_route("/manifest.webmanifest", methods=["GET", "HEAD"], include_in_schema=False)
 async def manifest():
-    return FileResponse(static_dir / "manifest.webmanifest", media_type="application/manifest+json")
+    return FileResponse(
+        static_dir / "manifest.webmanifest",
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @app.api_route("/sw.js", methods=["GET", "HEAD"], include_in_schema=False)
 async def service_worker():
-    return FileResponse(static_dir / "sw.js", media_type="application/javascript", headers={"Cache-Control": "no-cache"})
+    return FileResponse(
+        static_dir / "sw.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 @app.api_route("/icon.svg", methods=["GET", "HEAD"], include_in_schema=False)
 async def icon():
-    return FileResponse(static_dir / "icon.svg", media_type="image/svg+xml")
+    return FileResponse(
+        static_dir / "icon.svg",
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
 
 
 @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
 async def spa(path: str):
     candidate = static_dir / path
     if path and candidate.is_file() and static_dir in candidate.resolve().parents:
-        return FileResponse(candidate)
+        return FileResponse(candidate, headers={"Cache-Control": "no-cache"})
     index = static_dir / "index.html"
     if not index.is_file():
         raise HTTPException(status_code=503, detail="Frontend not built")
-    return FileResponse(index)
+    return FileResponse(index, headers={"Cache-Control": "no-cache"})

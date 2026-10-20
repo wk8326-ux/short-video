@@ -15,6 +15,12 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { updatePlaybackState, type SavedPosition } from "./playbackStore";
+import {
+  attachPlaybackSource,
+  preloadHlsEngine,
+  withPlaybackAttempt,
+  type PlaybackSession,
+} from "./playback";
 
 type AsmrAuthor = {
   name: string;
@@ -48,10 +54,6 @@ const ASMR_PLAYER_HISTORY_KEY = "__shortVideoAsmrPlayer";
 const ASMR_CHROME_VISIBLE_MS = 1500;
 const ASMR_GESTURE_AXIS_THRESHOLD_PX = 12;
 
-type HlsConstructor = typeof import("hls.js").default;
-
-let hlsEnginePromise: Promise<HlsConstructor> | null = null;
-
 function asmrItemKind(item: AsmrItem): "audio" | "video" {
   return item.format.toLowerCase() === "m3u8" ? "video" : item.kind;
 }
@@ -59,11 +61,6 @@ function asmrItemKind(item: AsmrItem): "audio" | "video" {
 function normalizeAsmrItem(item: AsmrItem): AsmrItem {
   const kind = asmrItemKind(item);
   return kind === item.kind ? item : { ...item, kind };
-}
-
-function preloadHlsEngine(): Promise<HlsConstructor> {
-  hlsEnginePromise ??= import("hls.js").then(({ default: Hls }) => Hls);
-  return hlsEnginePromise;
 }
 
 function primeAsmrItem(item: AsmrItem): void {
@@ -456,6 +453,7 @@ function AsmrPlayer({
   const chromeVisibleRef = useRef(true);
   const suppressClickRef = useRef(false);
   const wakeOnlyClickRef = useRef(false);
+  const fatalPlaybackRef = useRef<() => void>(() => undefined);
   const [paused, setPaused] = useState(true);
   const [buffering, setBuffering] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -466,6 +464,7 @@ function AsmrPlayer({
   const [metadataReady, setMetadataReady] = useState(false);
   const [chromeVisible, setChromeVisible] = useState(true);
   const [gestureSeek, setGestureSeek] = useState<GestureSeek | null>(null);
+  const playbackSessionRef = useRef<PlaybackSession | null>(null);
 
   useEffect(() => {
     onProgressRef.current = onProgress;
@@ -505,10 +504,6 @@ function AsmrPlayer({
   useEffect(() => {
     const media = mediaRef.current;
     if (!media) return;
-    const source = attempt
-      ? `${item.playUrl}?refresh=1&attempt=${attempt}`
-      : item.playUrl;
-    let hls: import("hls.js").default | null = null;
     let cancelled = false;
     setBuffering(true);
     setFailed(false);
@@ -516,43 +511,33 @@ function AsmrPlayer({
     setMetadataReady(false);
     setGestureSeek(null);
     restoredRef.current = false;
+    let retryRequested = false;
+    const handleFatalPlayback = () => {
+      if (cancelled || retryRequested) return;
+      retryRequested = true;
+      if (attempt < 2) setAttempt(attempt + 1);
+      else {
+        setBuffering(false);
+        setFailed(true);
+      }
+    };
+    fatalPlaybackRef.current = handleFatalPlayback;
 
     const attachSource = async () => {
       try {
-        media.preload = "auto";
-        if (item.format.toLowerCase() === "m3u8") {
-          const Hls = await preloadHlsEngine();
-          if (cancelled) return;
-          if (Hls.isSupported()) {
-            hls = new Hls({
-              enableWorker: true,
-              maxBufferLength: 18,
-              backBufferLength: 24,
-              startFragPrefetch: true,
-              startPosition: initialTimeRef.current > 1 ? initialTimeRef.current : -1,
-            });
-            hls.on(Hls.Events.ERROR, (_, data) => {
-              if (!data.fatal) return;
-              if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-                hls?.recoverMediaError();
-              } else if (attempt < 2) {
-                setAttempt((value) => value + 1);
-              } else {
-                setBuffering(false);
-                setFailed(true);
-              }
-            });
-            hls.loadSource(source);
-            hls.attachMedia(media);
-          } else {
-            media.src = source;
-            media.load();
-          }
-        } else {
-          media.src = source;
-          media.load();
+        const session = await attachPlaybackSource(media, {
+          url: withPlaybackAttempt(item.playUrl, attempt),
+          format: item.format,
+          initialTime: initialTimeRef.current,
+          autoPlay: true,
+          isCancelled: () => cancelled,
+          onFatalError: handleFatalPlayback,
+        });
+        if (cancelled) {
+          session.destroy();
+          return;
         }
-        if (!cancelled) void media.play().catch(() => setPaused(true));
+        playbackSessionRef.current = session;
       } catch {
         if (!cancelled) {
           setBuffering(false);
@@ -563,11 +548,10 @@ function AsmrPlayer({
     void attachSource();
     return () => {
       cancelled = true;
+      fatalPlaybackRef.current = () => undefined;
       saveProgress();
-      media.pause();
-      hls?.destroy();
-      media.removeAttribute("src");
-      media.load();
+      playbackSessionRef.current?.destroy();
+      playbackSessionRef.current = null;
     };
   }, [attempt, item.format, item.playUrl, saveProgress]);
 
@@ -778,11 +762,7 @@ function AsmrPlayer({
               setBuffering(false);
             }
           }}
-          onError={() => {
-            if (item.format.toLowerCase() === "m3u8") return;
-            if (attempt < 2) setAttempt((value) => value + 1);
-            else { setBuffering(false); setFailed(true); }
-          }}
+          onError={() => fatalPlaybackRef.current()}
         />
         {expanded && detectedKind === "audio" && (
           <div className="audio-stage" aria-hidden="true">
