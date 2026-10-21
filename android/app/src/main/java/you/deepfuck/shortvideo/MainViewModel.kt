@@ -192,6 +192,8 @@ data class AppUiState(
     val adminLoading: Boolean = false,
     val adminActions: Set<String> = emptySet(),
     val adminError: String? = null,
+    val catalogCacheClearing: Boolean = false,
+    val catalogCacheMessage: String? = null,
     val appUpdate: AppUpdateUiState = AppUpdateUiState(),
     val showRuntimeLogs: Boolean = false,
     val runtimeLogText: String = "",
@@ -464,6 +466,165 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearSearchHistory() {
         preferences.clearSearchHistory()
         mutableState.value = mutableState.value.copy(searchHistory = emptyList())
+    }
+
+    fun clearCatalogCache() {
+        if (mutableState.value.catalogCacheClearing) return
+        val account = preferences.apiCacheAccount
+        if (account == null) {
+            mutableState.value = mutableState.value.copy(catalogCacheMessage = "请先登录")
+            return
+        }
+        mutableState.value = mutableState.value.copy(
+            catalogCacheClearing = true,
+            catalogCacheMessage = null,
+        )
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    workManager.cancelAllWorkByTag(CatalogSyncWorker.TAG)
+                    api.clearCachedResponses(account)
+                    localStore.clearCatalog(account)
+                }
+            }
+            if (preferences.apiCacheAccount != account) return@launch
+            result.onSuccess {
+                resetCatalogMemoryAfterCacheClear()
+                scheduleCatalogSyncForSection("all")
+                restoreCurrentSurface()
+                if (mutableState.value.searchQuery.isNotBlank()) searchLibrary()
+                if (mutableState.value.surface == MediaSurface.MOVIE && mutableState.value.openMovieFavorites) {
+                    loadMovieFavorites(reset = true)
+                }
+                mutableState.value = mutableState.value.copy(
+                    catalogCacheClearing = false,
+                    catalogCacheMessage = "目录缓存已清除，正在从服务器更新",
+                )
+            }.onFailure {
+                logs.error("catalog_cache_clear_failed", "account=$account", it)
+                mutableState.value = mutableState.value.copy(
+                    catalogCacheClearing = false,
+                    catalogCacheMessage = "清除失败，请稍后重试",
+                )
+            }
+        }
+    }
+
+    private fun resetCatalogMemoryAfterCacheClear() {
+        librarySearchJob?.cancel()
+        librarySearchGeneration += 1L
+        feedJob?.cancel()
+        feedTotalJob?.cancel()
+        feedRequestGeneration += 1L
+        feedSessions.clear()
+        preferences.clearFeedSessions()
+        feedCursor = null
+        feedExcludedIds = emptyList()
+        feedStartId = null
+        activeFeedItemId = null
+
+        asmrAuthorsJob?.cancel()
+        asmrAuthorsJob = null
+        asmrAuthorsLoaded = false
+        asmrAuthorIndexRestored = false
+        preferences.clearAsmrAuthorIndex()
+        asmrItemJobs.forEach { (key, job) ->
+            asmrItemGenerations[key] = (asmrItemGenerations[key] ?: 0L) + 1L
+            job.cancel()
+        }
+        asmrItemJobs.clear()
+        asmrItemsCache.clear()
+        asmrItemsNextOffsets.clear()
+        asmrItemsTotals.clear()
+
+        movieJob?.cancel()
+        movieSearchJob?.cancel()
+        movieDetailJob?.cancel()
+        movieMetadataJob?.cancel()
+        movieRecommendationsJob?.cancel()
+        cancelMovieGroupPageLoad()
+        cancelMovieFavoritesLoad()
+        movieRequestGeneration += 1L
+        movieGroupPageGeneration += 1L
+        movieFavoritesGeneration += 1L
+        movieMetadataGeneration += 1L
+        movieDetailCache.clear()
+        movieMetadataCache.clear()
+        movieCatalogDirty = true
+
+        dramaJob?.cancel()
+        dramaSearchJob?.cancel()
+        dramaDetailJob?.cancel()
+        cancelDramaGroupPageLoad()
+        dramaRequestGeneration += 1L
+        dramaGroupPageGeneration += 1L
+        dramaCatalogDirty = true
+
+        mutableState.value = mutableState.value.copy(
+            searchResults = emptyList(),
+            searchLoading = false,
+            searchError = null,
+            feedItems = emptyList(),
+            activeIndex = 0,
+            feedTotal = 0,
+            feedLoading = false,
+            feedError = null,
+            asmrAuthors = emptyList(),
+            asmrAuthorsTotal = 0,
+            asmrItems = emptyList(),
+            asmrTotal = 0,
+            asmrItemsHasMore = false,
+            asmrLoading = false,
+            asmrError = null,
+            movieItems = emptyList(),
+            movieTotal = 0,
+            movieNextOffset = 0,
+            movieLoading = false,
+            movieError = null,
+            movieGroups = emptyList(),
+            movieSources = emptyList(),
+            selectedMovieSourceId = preferences.movieSourceId,
+            movieGroupsLoading = false,
+            recentMovies = emptyList(),
+            openMovieGroupId = null,
+            openMovieGroupName = "",
+            openMovieGroupItems = emptyList(),
+            openMovieGroupTotal = 0,
+            openMovieGroupNextOffset = 0,
+            openMovieGroupLoading = false,
+            openMovieGroupError = null,
+            selectedMovie = null,
+            movieDetailLoading = false,
+            movieMetadataEntity = null,
+            movieMetadataItems = emptyList(),
+            movieMetadataTotal = 0,
+            movieMetadataNextOffset = 0,
+            movieMetadataLoading = false,
+            movieMetadataError = null,
+            movieRecommendations = emptyList(),
+            movieRecommendationsLoading = false,
+            dramaItems = emptyList(),
+            dramaTotal = 0,
+            dramaNextOffset = 0,
+            dramaLoading = false,
+            dramaError = null,
+            dramaGroups = emptyList(),
+            dramaSources = emptyList(),
+            selectedDramaSourceId = preferences.dramaSourceId,
+            dramaGroupsLoading = false,
+            recentDramas = emptyList(),
+            openDramaGroupId = null,
+            openDramaGroupSourceId = "",
+            openDramaGroupCategory = "",
+            openDramaGroupName = "",
+            openDramaGroupItems = emptyList(),
+            openDramaGroupTotal = 0,
+            openDramaGroupNextOffset = 0,
+            openDramaGroupLoading = false,
+            openDramaGroupError = null,
+            selectedDrama = null,
+            dramaDetailLoading = false,
+        )
     }
 
     fun ensureFavoritesLoaded() {
@@ -3446,7 +3607,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val selectable = sourcePayloads.values.filter { source ->
             val id = source.optString("id").trim()
             val provider = source.optString("provider", "alist").lowercase()
-            !(source.optString("parentSourceId").isBlank() &&
+            id in pages && !(source.optString("parentSourceId").isBlank() &&
                 provider in setOf("tvbox", "html") && id in childParents)
         }
         val grouped = linkedMapOf<String, MutableList<org.json.JSONObject>>()

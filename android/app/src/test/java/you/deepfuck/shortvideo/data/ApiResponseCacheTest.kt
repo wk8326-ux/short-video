@@ -77,4 +77,22 @@ class ApiResponseCacheTest {
         assertEquals(2, cache.fresh("/api/movies", "account-a", 10_000L, nowMs = 2L)?.getInt("v"))
         assertEquals(3, cache.fresh("/api/search?q=x", "account-b", 10_000L, nowMs = 2L)?.getInt("v"))
     }
+
+    @Test
+    fun clearInvalidatesAnInFlightWriterGeneration() {
+        val directory = Files.createTempDirectory("api-cache-test").toFile()
+        val cache = ApiResponseCache(directory)
+        val generation = cache.generation("account-a")
+
+        cache.clear("account-a")
+        cache.put(
+            "/api/movies",
+            "account-a",
+            JSONObject().put("v", "old"),
+            nowMs = 1L,
+            expectedGeneration = generation,
+        )
+
+        assertNull(cache.fresh("/api/movies", "account-a", 10_000L, nowMs = 2L))
+    }
 }

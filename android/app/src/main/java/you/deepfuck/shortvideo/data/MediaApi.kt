@@ -764,12 +764,18 @@ class MediaApi(private val preferences: PlaybackPreferences) {
                 executeJson(Request.Builder().url(target).get().build())
             }
         }
+        val cacheGeneration = responseCache.generation(account)
         responseCache.fresh(target.toString(), account, ttlMs)?.let { return it }
         return try {
             withTransientReadRetry {
                 executeJson(Request.Builder().url(target).get().build())
             }.also { payload ->
-                responseCache.put(target.toString(), account, payload)
+                responseCache.put(
+                    target.toString(),
+                    account,
+                    payload,
+                    expectedGeneration = cacheGeneration,
+                )
             }
         } catch (error: IOException) {
             if (error is ApiException && error.statusCode !in setOf(408, 429) && error.statusCode < 500) {
@@ -783,6 +789,10 @@ class MediaApi(private val preferences: PlaybackPreferences) {
     /** Called after a scan or source edit so a local catalogue cannot hide it. */
     internal fun invalidateLibraryCache() {
         preferences.apiCacheAccount?.let(responseCache::clear)
+    }
+
+    internal fun clearCachedResponses(account: String) {
+        responseCache.clear(account)
     }
 
     private fun cacheCatalogPage(section: String, items: JSONArray?) {

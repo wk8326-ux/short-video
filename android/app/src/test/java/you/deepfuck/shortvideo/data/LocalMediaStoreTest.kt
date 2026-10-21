@@ -147,6 +147,32 @@ class LocalMediaStoreTest {
     }
 
     @Test
+    fun clearingCatalogKeepsFavoritesRecentItemsAndRemovesSyncState() {
+        val store = store()
+        val movie = JSONObject()
+            .put("id", 73)
+            .put("title", "本地电影")
+            .put("source", "source-a")
+        store.cacheSources(
+            "account-a",
+            listOf(JSONObject().put("id", "source-a").put("name", "媒体源").put("section", "movie")),
+        )
+        store.cacheCatalogItem("account-a", "movie", movie)
+        store.setFavorite("account-a", "movie", "73", null, true)
+        store.recordRecent("account-a", "movie", movie)
+        store.saveCursor("account-a", "source:movie:source-a", 42L)
+
+        store.clearCatalog("account-a")
+
+        assertTrue(store.cachedSources("account-a", "movie").isEmpty())
+        assertEquals(0, store.cachedPage("account-a", "movie", 0, 20).total)
+        assertTrue(store.search("account-a", "本地电影", "movie", 20).isEmpty())
+        assertFalse(store.hasCursor("account-a", "source:movie:source-a"))
+        assertEquals(1, store.favoritePage("account-a", "movie", 0, 20).total)
+        assertEquals(1, store.recentItems("account-a", "movie", 10).size)
+    }
+
+    @Test
     fun detailFieldsSurviveLaterSummaryUpserts() {
         val store = store()
         store.cacheCatalogItem(

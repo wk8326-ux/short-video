@@ -41,6 +41,7 @@ import androidx.compose.material.icons.outlined.Business
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Headphones
@@ -72,6 +73,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -485,8 +487,34 @@ internal fun SettingsScreen(
     onManagement: () -> Unit,
     onUpdate: () -> Unit,
     onThemes: () -> Unit,
+    onClearCatalogCache: () -> Unit,
     onLogout: () -> Unit,
 ) {
+    var confirmCacheClear by remember { mutableStateOf(false) }
+    if (confirmCacheClear) {
+        AlertDialog(
+            onDismissRequest = { if (!state.catalogCacheClearing) confirmCacheClear = false },
+            title = { Text("清除目录缓存") },
+            text = {
+                Text("将从服务器重新加载媒体列表。收藏、最近播放、登录状态和已缓存的视频文件不会删除。")
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !state.catalogCacheClearing,
+                    onClick = {
+                        confirmCacheClear = false
+                        onClearCatalogCache()
+                    },
+                ) { Text("清除并刷新") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !state.catalogCacheClearing,
+                    onClick = { confirmCacheClear = false },
+                ) { Text("取消") }
+            },
+        )
+    }
     Column(
         Modifier
             .fillMaxSize()
@@ -499,6 +527,26 @@ internal fun SettingsScreen(
     ) {
         SettingsRow("管理", "媒体库、扫描、元数据和排除目录", Icons.Outlined.Tune, onManagement)
         SettingsRow("更新", "当前版本 ${BuildConfig.VERSION_NAME}", Icons.Outlined.SystemUpdate, onUpdate)
+        SettingsRow(
+            "清除目录缓存",
+            if (state.catalogCacheClearing) "正在清除并重新加载目录" else "从服务器重新加载媒体列表",
+            Icons.Outlined.DeleteSweep,
+            onClick = { confirmCacheClear = true },
+            enabled = !state.catalogCacheClearing,
+            loading = state.catalogCacheClearing,
+        )
+        state.catalogCacheMessage?.let { message ->
+            Text(
+                message,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
+                color = if (message.startsWith("清除失败") || message == "请先登录") {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.primary
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         SettingsRow(
             "主题配色",
             AppSkinOptions.firstOrNull { it.id == state.skin }?.label ?: AppSkinOptions.first().label,
@@ -515,11 +563,14 @@ private fun SettingsRow(
     subtitle: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     onClick: () -> Unit,
+    enabled: Boolean = true,
+    loading: Boolean = false,
 ) {
     Surface(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth().height(76.dp).padding(horizontal = 8.dp),
         color = Color.Transparent,
+        enabled = enabled,
     ) {
         Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -531,7 +582,11 @@ private fun SettingsRow(
                 Text(title, style = MaterialTheme.typography.bodyLarge)
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (loading) {
+                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            } else {
+                Icon(Icons.Outlined.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }

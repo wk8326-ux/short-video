@@ -248,14 +248,14 @@ rm -f /tmp/stale-update-body
 当前已构建 APK：
 
 ```text
-versionName: 1.8.0
-versionCode: 201
-size: 4578277
-sha256: 2BDBB8F1F84B8D4125AFF5BAF80090B0C2317CC6F303B68E75D25E4ABCF32A15
-GitHub tag: v1.8.0
-GitHub asset: deepfuck-android-v1.8.0.apk
-GitHub asset URL: https://github.com/wk8326-ux/short-video/releases/download/v1.8.0/deepfuck-android-v1.8.0.apk
-oracle2 APK path: /home/ubuntu/short-video/data/app-update/deepfuck-android-v1.8.0.apk
+versionName: 1.9.3
+versionCode: 214
+size: 4611045
+sha256: 7351A4E65DB2BF1DCF8CB5F06977BD5DBF6DF08F08670FABDAA632599E400441
+GitHub tag: v1.9.3
+GitHub asset: deepfuck-android-v1.9.3.apk
+GitHub asset URL: https://github.com/wk8326-ux/short-video/releases/download/v1.9.3/deepfuck-android-v1.9.3.apk
+oracle2 APK path: /home/ubuntu/short-video/data/app-update/deepfuck-android-v1.9.3.apk
 ```
 
-1.8.0 已完成线上验收：服务端版本为 `1.8.0`，APK `HEAD` 返回 `200`，`Range: bytes=0-1023` 返回 `206`，旧版本号返回 `409`。GitHub Release 只保留规范资产。
+1.9.3 增加 Android 目录缓存清理与重新同步入口；清除媒体源、媒体目录、API 响应缓存及同步游标，同时保留登录状态、收藏、观看进度和视频播放缓存。发布完成后记录线上验收结果。

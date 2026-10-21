@@ -9,6 +9,10 @@ internal class ApiResponseCache(
     private val directory: File,
     private val maxBytes: Long = DEFAULT_MAX_BYTES,
 ) {
+    fun generation(account: String): Long = synchronized(lock) {
+        accountGenerations[account] ?: 0L
+    }
+
     fun fresh(url: String, account: String, ttlMs: Long, nowMs: Long = System.currentTimeMillis()): JSONObject? =
         synchronized(lock) {
             read(url, account)?.takeIf { nowMs - it.savedAtMs in 0..ttlMs }?.also {
@@ -23,7 +27,13 @@ internal class ApiResponseCache(
             }?.payload
         }
 
-    fun put(url: String, account: String, payload: JSONObject, nowMs: Long = System.currentTimeMillis()) {
+    fun put(
+        url: String,
+        account: String,
+        payload: JSONObject,
+        nowMs: Long = System.currentTimeMillis(),
+        expectedGeneration: Long? = null,
+    ) {
         val content = JSONObject()
             .put("account", digest(account))
             .put("url", url)
@@ -33,6 +43,7 @@ internal class ApiResponseCache(
             .toByteArray(Charsets.UTF_8)
         if (content.size > MAX_ENTRY_BYTES) return
         synchronized(lock) {
+            if (expectedGeneration != null && accountGenerations[account] != expectedGeneration) return
             if (!directory.exists() && !directory.mkdirs()) return
             val target = file(url, account)
             val temporary = File(directory, "${target.name}.tmp")
@@ -59,7 +70,12 @@ internal class ApiResponseCache(
         }
     }
 
-    fun clear(account: String) = invalidate(account) { true }
+    fun clear(account: String) {
+        synchronized(lock) {
+            accountGenerations[account] = (accountGenerations[account] ?: 0L) + 1L
+            invalidate(account) { true }
+        }
+    }
 
     private fun read(url: String, account: String): CacheEntry? =
         read(file(url, account))?.takeIf { it.accountHash == digest(account) && it.url == url }
@@ -107,6 +123,7 @@ internal class ApiResponseCache(
 
     private companion object {
         val lock = Any()
+        val accountGenerations = mutableMapOf<String, Long>()
         const val DEFAULT_MAX_BYTES = 64L * 1024 * 1024
         const val MAX_ENTRY_BYTES = 8 * 1024 * 1024
     }

@@ -230,6 +230,7 @@ internal class CatalogSyncWorker(
     }
 
     companion object {
+        const val TAG = "catalog-sync"
         const val KEY_SECTION = "catalog_section"
         const val KEY_SOURCE_ID = "catalog_source_id"
         private const val BOOTSTRAP_LIMIT = 300
@@ -254,6 +255,7 @@ internal class CatalogSyncWorker(
                         .setRequiredNetworkType(NetworkType.CONNECTED)
                         .build(),
                 )
+                .addTag(TAG)
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.SECONDS)
                 .build()
 

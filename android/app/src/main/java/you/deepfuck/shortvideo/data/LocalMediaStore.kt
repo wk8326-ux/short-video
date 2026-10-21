@@ -604,6 +604,16 @@ internal class LocalMediaStore(
         }
     }
 
+    fun clearCatalog(account: String) {
+        if (account.isBlank()) return
+        transaction { database ->
+            database.delete("catalog_items", "account = ?", arrayOf(account))
+            database.delete("catalog_fts", "account = ?", arrayOf(account))
+            database.delete("catalog_sources", "account = ?", arrayOf(account))
+            database.delete("sync_state", "account = ?", arrayOf(account))
+        }
+    }
+
     private fun upsertSource(database: SQLiteDatabase, account: String, source: JSONObject) {
         val sourceId = source.optString("id").trim()
         if (sourceId.isEmpty()) return
