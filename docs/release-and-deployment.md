@@ -258,4 +258,4 @@ GitHub asset URL: https://github.com/wk8326-ux/short-video/releases/download/v1.
 oracle2 APK path: /home/ubuntu/short-video/data/app-update/deepfuck-android-v1.9.3.apk
 ```
 
-1.9.3 增加 Android 目录缓存清理与重新同步入口；清除媒体源、媒体目录、API 响应缓存及同步游标，同时保留登录状态、收藏、观看进度和视频播放缓存。发布完成后记录线上验收结果。
+1.9.3 增加 Android 目录缓存清理与重新同步入口；清除媒体源、媒体目录、API 响应缓存及同步游标，同时保留登录状态、收藏、观看进度和视频播放缓存。已完成线上验收：服务端容器为 `healthy`，更新接口返回 `1.9.3 / 214`，APK `HEAD` 返回 `200`，`Range: bytes=0-1023` 返回 `206`，旧版本号 `213` 返回 `409`，GitHub Release 与服务器 APK 的大小和 SHA-256 一致。
