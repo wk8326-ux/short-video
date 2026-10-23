@@ -1,8 +1,8 @@
 {
-  "versionCode": 215,
-  "versionName": "1.9.4",
-  "apkFile": "deepfuck-android-v1.9.4.apk",
-  "sha256": "91d276469f2bc5758143bf900c1f1efb00bf69f670595cee2b8d1cfd1816ad29",
-  "size": 4611045,
-  "notes": "修复电影墙、短剧墙媒体源缓存和缓存清理竞态。"
+  "versionCode": 216,
+  "versionName": "1.9.5",
+  "apkFile": "deepfuck-android-v1.9.5.apk",
+  "sha256": "9cb4870a521046367bd5341193f0db01a6172b3c0f2c7e40d42d7be74760ae7a",
+  "size": 4627425,
+  "notes": "增加目录同步进度、网络错误提示和失败重试，避免清缓存后无法判断更新状态。"
 }

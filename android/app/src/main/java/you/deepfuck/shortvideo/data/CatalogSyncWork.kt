@@ -16,10 +16,54 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+internal data class CatalogSyncProgress(
+    val section: String = "",
+    val sourceId: String? = null,
+    val sourceName: String? = null,
+    val sourceIndex: Int = 0,
+    val sourceCount: Int = 0,
+    val phase: String = "",
+    val pages: Int = 0,
+    val records: Int = 0,
+) {
+    fun toData(): Data = Data.Builder()
+        .putString(KEY_SECTION, section)
+        .putString(KEY_SOURCE_ID, sourceId)
+        .putString(KEY_SOURCE_NAME, sourceName)
+        .putInt(KEY_SOURCE_INDEX, sourceIndex)
+        .putInt(KEY_SOURCE_COUNT, sourceCount)
+        .putString(KEY_PHASE, phase)
+        .putInt(KEY_PAGES, pages)
+        .putInt(KEY_RECORDS, records)
+        .build()
+
+    companion object {
+        private const val KEY_SECTION = "section"
+        private const val KEY_SOURCE_ID = "sourceId"
+        private const val KEY_SOURCE_NAME = "sourceName"
+        private const val KEY_SOURCE_INDEX = "sourceIndex"
+        private const val KEY_SOURCE_COUNT = "sourceCount"
+        private const val KEY_PHASE = "phase"
+        private const val KEY_PAGES = "pages"
+        private const val KEY_RECORDS = "records"
+
+        fun fromData(data: Data): CatalogSyncProgress = CatalogSyncProgress(
+            section = data.getString(KEY_SECTION).orEmpty(),
+            sourceId = data.getString(KEY_SOURCE_ID).orEmpty().ifBlank { null },
+            sourceName = data.getString(KEY_SOURCE_NAME).orEmpty().ifBlank { null },
+            sourceIndex = data.getInt(KEY_SOURCE_INDEX, 0),
+            sourceCount = data.getInt(KEY_SOURCE_COUNT, 0),
+            phase = data.getString(KEY_PHASE).orEmpty(),
+            pages = data.getInt(KEY_PAGES, 0),
+            records = data.getInt(KEY_RECORDS, 0),
+        )
+    }
+}
+
 /** Consume every bootstrap page while keeping the caller's write operation incremental. */
-internal fun walkCatalogBootstrapPages(
+internal suspend fun walkCatalogBootstrapPages(
     fetch: (offset: Int) -> CatalogSyncPage,
-    consume: (CatalogSyncPage) -> Unit,
+    consume: suspend (CatalogSyncPage) -> Unit,
 ) {
     var offset = 0
     while (true) {
@@ -32,10 +76,10 @@ internal fun walkCatalogBootstrapPages(
 }
 
 /** Consume all change pages and return the cursor that was applied last. */
-internal fun walkCatalogChangePages(
+internal suspend fun walkCatalogChangePages(
     initialCursor: Long,
     fetch: (cursor: Long) -> CatalogSyncPage,
-    consume: (CatalogSyncPage) -> Unit,
+    consume: suspend (CatalogSyncPage) -> Unit,
 ): Long {
     var cursor = initialCursor.coerceAtLeast(0L)
     while (true) {
@@ -55,6 +99,10 @@ internal class CatalogSyncWorker(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val preferences = PlaybackPreferences(applicationContext)
         val account = preferences.apiCacheAccount ?: return@withContext Result.success()
+        val requestedAccount = inputData.getString(KEY_ACCOUNT).orEmpty()
+        if (requestedAccount.isNotBlank() && requestedAccount != account) {
+            return@withContext Result.success()
+        }
         val store = LocalMediaStore(applicationContext)
         val api = MediaApi(preferences)
         val requestedSection = inputData.getString(KEY_SECTION).orEmpty()
@@ -69,19 +117,77 @@ internal class CatalogSyncWorker(
         val scope = if (requestedSection == "feed") "feed" else requestedSection
         if (!isFavoritesOnly && sections.isEmpty()) return@withContext Result.success()
 
+        var pages = 0
+        var records = 0
+        var lastSourceId: String? = requestedSourceId
+        var lastSourceName: String? = null
+        var lastSourceIndex = 0
+        var sourceCount = 0
+        var lastSnapshot = CatalogSyncProgress()
+        var lastReportedAt = 0L
+        suspend fun report(
+            phase: String,
+            section: String = requestedSection,
+            sourceId: String? = lastSourceId,
+            sourceName: String? = lastSourceName,
+            sourceIndex: Int = lastSourceIndex,
+            page: CatalogSyncPage? = null,
+        ) {
+            page?.let {
+                pages += 1
+                records += it.upserts.size + it.deletes.size
+            }
+            lastSourceId = sourceId
+            lastSourceName = sourceName
+            lastSourceIndex = sourceIndex
+            val progress = CatalogSyncProgress(
+                section = section,
+                sourceId = sourceId,
+                sourceName = sourceName,
+                sourceIndex = sourceIndex,
+                sourceCount = sourceCount,
+                phase = phase,
+                pages = pages,
+                records = records,
+            )
+            val now = System.nanoTime()
+            val samePhase = progress.copy(pages = lastSnapshot.pages, records = lastSnapshot.records) == lastSnapshot
+            if (samePhase && now - lastReportedAt < PROGRESS_INTERVAL_NS) return
+            setProgress(progress.toData())
+            lastSnapshot = progress
+            lastReportedAt = now
+        }
+
         try {
+            report("favorites")
             flushFavorites(store, api, account)
             if (isFavoritesOnly) return@withContext Result.success()
-            syncSources(store, api, account, requestedSection, sections, scope, requestedSourceId)
+            report("discovering")
+            syncSources(
+                store = store,
+                api = api,
+                account = account,
+                requestedSection = requestedSection,
+                sections = sections,
+                legacyScope = scope,
+                requestedSourceId = requestedSourceId,
+                report = { phase, section, sourceId, sourceName, sourceIndex, count, page ->
+                    sourceCount = count
+                    report(phase, section, sourceId, sourceName, sourceIndex, page)
+                },
+            )
+            report("complete")
             Result.success()
         } catch (error: ApiException) {
+            report("retrying")
             if (error.statusCode == 401) Result.success() else Result.retry()
         } catch (_: IOException) {
+            report("retrying")
             Result.retry()
         }
     }
 
-    private fun syncSources(
+    private suspend fun syncSources(
         store: LocalMediaStore,
         api: MediaApi,
         account: String,
@@ -89,6 +195,15 @@ internal class CatalogSyncWorker(
         sections: List<String>,
         legacyScope: String,
         requestedSourceId: String?,
+        report: suspend (
+            phase: String,
+            section: String,
+            sourceId: String?,
+            sourceName: String?,
+            sourceIndex: Int,
+            sourceCount: Int,
+            page: CatalogSyncPage?,
+        ) -> Unit,
     ) {
         // A bootstrap with one row is used only as a cheap source snapshot.
         // The actual media bootstrap/change pass is then isolated per source.
@@ -104,10 +219,14 @@ internal class CatalogSyncWorker(
             sourceId = requestedSourceId,
             limit = 1,
         )
+        report("discovering", requestedSection, requestedSourceId, null, 0, 0, discovery)
         store.cacheSources(account, discovery.sources)
-        val sourceIds = discovery.sources.mapNotNull { source ->
-            source.optString("id").trim().takeIf(String::isNotEmpty)
-        }.toSet()
+        val sourceNames = discovery.sources.mapNotNull { source ->
+            val id = source.optString("id").trim().takeIf(String::isNotEmpty) ?: return@mapNotNull null
+            id to source.optString("name").trim().ifBlank { id }
+        }.toMap()
+        val sourceIds = sourceNames.keys
+        report("discovering", requestedSection, null, null, 0, sourceIds.size, null)
         if (requestedSourceId == null) {
             store.deleteMissingSources(account, discoverySection, sourceIds)
         }
@@ -115,7 +234,9 @@ internal class CatalogSyncWorker(
         val legacyCursor = store.cursor(account, legacyScope).takeIf {
             store.hasCursor(account, legacyScope)
         }
-        sourceIds.forEach { sourceId ->
+        sourceIds.forEachIndexed { sourceOffset, sourceId ->
+            val sourceName = sourceNames[sourceId]
+            val sourceIndex = sourceOffset + 1
             val sourceScope = sourceScope(requestedSection, sourceId)
             val sourceCursor = store.cursor(account, sourceScope).takeIf {
                 store.hasCursor(account, sourceScope)
@@ -139,6 +260,15 @@ internal class CatalogSyncWorker(
                             bootstrapRevision = minOf(bootstrapRevision, page.serverRevision)
                             store.cacheSources(account, page.sources)
                             page.upserts.forEach { upsert -> applyUpsert(store, account, upsert) }
+                            report(
+                                "bootstrap",
+                                section,
+                                sourceId,
+                                sourceName,
+                                sourceIndex,
+                                sourceIds.size,
+                                page,
+                            )
                         },
                     )
                 }
@@ -163,6 +293,15 @@ internal class CatalogSyncWorker(
                             page,
                         )
                         store.saveCursor(account, sourceScope, page.nextCursor)
+                        report(
+                            "changes",
+                            requestedSection,
+                            sourceId,
+                            sourceName,
+                            sourceIndex,
+                            sourceIds.size,
+                            page,
+                        )
                     },
                 )
             }
@@ -231,6 +370,7 @@ internal class CatalogSyncWorker(
 
     companion object {
         const val TAG = "catalog-sync"
+        const val KEY_ACCOUNT = "catalog_account"
         const val KEY_SECTION = "catalog_section"
         const val KEY_SOURCE_ID = "catalog_source_id"
         private const val BOOTSTRAP_LIMIT = 300
@@ -242,14 +382,28 @@ internal class CatalogSyncWorker(
         fun uniqueName(account: String, section: String, sourceId: String? = null): String =
             "catalog-sync-${account.take(16)}-$section-${sourceId?.take(32) ?: "all"}"
 
-        fun request(section: String, sourceId: String? = null): OneTimeWorkRequest =
-            OneTimeWorkRequestBuilder<CatalogSyncWorker>()
-                .setInputData(
-                    Data.Builder()
-                        .putString(KEY_SECTION, section)
-                        .apply { sourceId?.let { putString(KEY_SOURCE_ID, it) } }
-                        .build(),
-                )
+        fun refreshTag(refreshId: String): String = "catalog-sync-refresh:$refreshId"
+
+        fun inputData(
+            account: String,
+            section: String,
+            sourceId: String? = null,
+            refreshId: String? = null,
+        ): Data = Data.Builder()
+            .putString(KEY_ACCOUNT, account)
+            .putString(KEY_SECTION, section)
+            .apply { sourceId?.let { putString(KEY_SOURCE_ID, it) } }
+            .apply { refreshId?.let { putString(KEY_REFRESH_ID, it) } }
+            .build()
+
+        fun request(
+            account: String,
+            section: String,
+            sourceId: String? = null,
+            refreshId: String? = null,
+        ): OneTimeWorkRequest = OneTimeWorkRequestBuilder<CatalogSyncWorker>()
+                .setInputData(inputData(account, section, sourceId, refreshId))
+                .apply { refreshId?.let { addTag(refreshTag(it)) } }
                 .setConstraints(
                     Constraints.Builder()
                         .setRequiredNetworkType(NetworkType.CONNECTED)
@@ -259,14 +413,23 @@ internal class CatalogSyncWorker(
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.SECONDS)
                 .build()
 
-        fun enqueue(context: Context, account: String, section: String, sourceId: String? = null) {
+        fun enqueue(
+            context: Context,
+            account: String,
+            section: String,
+            sourceId: String? = null,
+            refreshId: String? = null,
+        ) {
             if (account.isBlank()) return
             WorkManager.getInstance(context).enqueueUniqueWork(
                 uniqueName(account, section, sourceId),
                 ExistingWorkPolicy.APPEND_OR_REPLACE,
-                request(section, sourceId),
+                request(account, section, sourceId, refreshId),
             )
         }
+
+        const val KEY_REFRESH_ID = "catalog_refresh_id"
+        private const val PROGRESS_INTERVAL_NS = 750_000_000L
 
     }
 }

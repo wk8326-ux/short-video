@@ -2,10 +2,11 @@ package you.deepfuck.shortvideo.data
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 
 class CatalogSyncWorkTest {
     @Test
-    fun bootstrapWalkerFollowsEveryOffset() {
+    fun bootstrapWalkerFollowsEveryOffset() = runBlocking {
         val requestedOffsets = mutableListOf<Int>()
         val consumedOffsets = mutableListOf<Int>()
 
@@ -22,7 +23,7 @@ class CatalogSyncWorkTest {
     }
 
     @Test
-    fun changeWalkerFollowsCursorUntilServerSaysDone() {
+    fun changeWalkerFollowsCursorUntilServerSaysDone() = runBlocking {
         val requestedCursors = mutableListOf<Long>()
         val consumedCursors = mutableListOf<Long>()
 
@@ -42,6 +43,37 @@ class CatalogSyncWorkTest {
         assertEquals(listOf(10L, 20L, 30L), requestedCursors)
         assertEquals(listOf(20L, 30L, 30L), consumedCursors)
         assertEquals(30L, finalCursor)
+    }
+
+    @Test
+    fun progressDataPreservesCurrentSourceAndCounts() {
+        val expected = CatalogSyncProgress(
+            section = "movie",
+            sourceId = "source-1",
+            sourceName = "电影库",
+            sourceIndex = 2,
+            sourceCount = 5,
+            phase = "bootstrap",
+            pages = 14,
+            records = 4_200,
+        )
+
+        assertEquals(expected, CatalogSyncProgress.fromData(expected.toData()))
+    }
+
+    @Test
+    fun queuedRefreshIsBoundToItsAccountAndRunId() {
+        val data = CatalogSyncWorker.inputData(
+            account = "account-hash",
+            section = "movie",
+            sourceId = "source-1",
+            refreshId = "refresh-1",
+        )
+
+        assertEquals("account-hash", data.getString(CatalogSyncWorker.KEY_ACCOUNT))
+        assertEquals("movie", data.getString(CatalogSyncWorker.KEY_SECTION))
+        assertEquals("source-1", data.getString(CatalogSyncWorker.KEY_SOURCE_ID))
+        assertEquals("refresh-1", data.getString(CatalogSyncWorker.KEY_REFRESH_ID))
     }
 
     private fun syncPage(

@@ -8,6 +8,7 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import java.io.File
 import java.io.IOException
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
@@ -30,6 +32,7 @@ import you.deepfuck.shortvideo.data.AppSettings
 import you.deepfuck.shortvideo.data.AsmrAuthor
 import you.deepfuck.shortvideo.data.AsmrFilter
 import you.deepfuck.shortvideo.data.CatalogSyncWorker
+import you.deepfuck.shortvideo.data.CatalogSyncProgress
 import you.deepfuck.shortvideo.data.DramaDetail
 import you.deepfuck.shortvideo.data.DramaEpisode
 import you.deepfuck.shortvideo.data.DramaGroup
@@ -46,6 +49,7 @@ import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
 import you.deepfuck.shortvideo.data.MediaSourceDraft
+import you.deepfuck.shortvideo.data.mediaRequestErrorMessage
 import you.deepfuck.shortvideo.data.MovieGroup
 import you.deepfuck.shortvideo.data.MovieGroupPage
 import you.deepfuck.shortvideo.data.MovieBrowseDestination
@@ -68,6 +72,24 @@ import you.deepfuck.shortvideo.update.AppUpdateWork
 import you.deepfuck.shortvideo.update.sha256Matches
 
 enum class AuthenticationState { CHECKING, SIGNED_IN, SIGNED_OUT }
+
+data class CatalogSyncUiState(
+    val visible: Boolean = false,
+    val running: Boolean = false,
+    val phase: String = "",
+    val section: String = "",
+    val sourceName: String? = null,
+    val sourceIndex: Int = 0,
+    val sourceCount: Int = 0,
+    val pages: Int = 0,
+    val records: Int = 0,
+    val completedWorkers: Int = 0,
+    val failedWorkers: Int = 0,
+    val totalWorkers: Int = 0,
+    val pendingWorkers: Int = 0,
+    val retryCount: Int = 0,
+    val error: String? = null,
+)
 
 internal val LIBRARY_SECTIONS = setOf("all", "short", "long", "asmr", "movie", "drama")
 internal val LIBRARY_MEDIA_SECTIONS = setOf("short", "long", "asmr", "movie", "drama")
@@ -196,6 +218,7 @@ data class AppUiState(
     val adminError: String? = null,
     val catalogCacheClearing: Boolean = false,
     val catalogCacheMessage: String? = null,
+    val catalogSync: CatalogSyncUiState = CatalogSyncUiState(),
     val appUpdate: AppUpdateUiState = AppUpdateUiState(),
     val showRuntimeLogs: Boolean = false,
     val runtimeLogText: String = "",
@@ -304,6 +327,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var appUpdateObserverJob: Job? = null
     private var skinSaveGeneration = 0L
     private val catalogSyncJobs = mutableMapOf<String, Job>()
+    private var catalogSyncObserverJob: Job? = null
     val movieImageLoader by lazy { api.movieImageLoader(application) }
 
     init {
@@ -472,7 +496,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = mutableState.value.copy(
             catalogCacheClearing = true,
             catalogCacheMessage = null,
+            catalogSync = CatalogSyncUiState(),
         )
+        catalogSyncObserverJob?.cancel()
         viewModelScope.launch {
             cancelCatalogLoadsAndWait()
             val result = runCatching {
@@ -490,16 +516,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (preferences.apiCacheAccount != account) return@launch
             result.onSuccess {
                 resetCatalogMemoryAfterCacheClear()
-                scheduleCatalogSyncForSection("all")
+                val refreshId = UUID.randomUUID().toString()
+                mutableState.value = mutableState.value.copy(
+                    catalogCacheClearing = false,
+                    catalogCacheMessage = "目录缓存已清除，正在从服务器更新",
+                    catalogSync = CatalogSyncUiState(
+                        visible = true,
+                        running = true,
+                        phase = "scheduled",
+                        totalWorkers = CATALOG_REFRESH_WORKER_COUNT,
+                        pendingWorkers = CATALOG_REFRESH_WORKER_COUNT,
+                    ),
+                )
+                observeCatalogSyncProgress(refreshId, CATALOG_REFRESH_WORKER_COUNT)
+                scheduleCatalogSyncForSection("all", refreshId = refreshId)
                 restoreCurrentSurface()
                 if (mutableState.value.searchQuery.isNotBlank()) searchLibrary()
                 if (mutableState.value.surface == MediaSurface.MOVIE && mutableState.value.openMovieFavorites) {
                     loadMovieFavorites(reset = true)
                 }
-                mutableState.value = mutableState.value.copy(
-                    catalogCacheClearing = false,
-                    catalogCacheMessage = "目录缓存已清除，正在从服务器更新",
-                )
             }.onFailure {
                 logs.error("catalog_cache_clear_failed", "account=$account", it)
                 mutableState.value = mutableState.value.copy(
@@ -3166,7 +3201,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!handleUnauthorized(error)) {
                         mutableState.value = current.copy(
                             dramaLoading = false,
-                            dramaError = "短剧目录暂时无法载入",
+                            dramaError = mediaRequestErrorMessage(error, "短剧目录暂时无法载入"),
                         )
                     }
                 }
@@ -3249,7 +3284,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         dramaGroupsLoading = false,
                         dramaError = null,
                     )
-                    if (sourceSnapshotMissing && selectedSource != null) {
+                    if (sourceSnapshotMissing && selectedSource != null && !mutableState.value.catalogSync.running) {
                         scheduleCatalogSyncForSection("drama", selectedSource.libraryIds)
                     }
                     if (sourceChanged) loadRecentDramas()
@@ -3267,7 +3302,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!handleUnauthorized(error)) {
                         mutableState.value = current.copy(
                             dramaGroupsLoading = false,
-                            dramaError = "短剧目录暂时无法载入".takeIf {
+                            dramaError = mediaRequestErrorMessage(error, "短剧目录暂时无法载入").takeIf {
                                 current.dramaGroups.isEmpty()
                             },
                         )
@@ -3417,7 +3452,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!handleUnauthorized(error)) {
                         mutableState.value = current.copy(
                             movieLoading = false,
-                            movieError = "电影目录暂时无法载入",
+                            movieError = mediaRequestErrorMessage(error, "电影目录暂时无法载入"),
                         )
                     }
                 }
@@ -3531,7 +3566,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         movieLoading = false,
                         movieError = null,
                     )
-                    if (sourceSnapshotMissing && selectedSource != null) {
+                    if (sourceSnapshotMissing && selectedSource != null && !mutableState.value.catalogSync.running) {
                         scheduleCatalogSyncForSection("movie", selectedSource.libraryIds)
                     }
                     if (page.groups.isEmpty() && page.scanRunning) {
@@ -3556,7 +3591,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         mutableState.value = current.copy(
                             movieGroupsLoading = false,
                             movieLoading = false,
-                            movieError = "电影目录暂时无法载入".takeIf {
+                            movieError = mediaRequestErrorMessage(error, "电影目录暂时无法载入").takeIf {
                                 current.movieGroups.isEmpty()
                             },
                         )
@@ -3849,7 +3884,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (!handleUnauthorized(error)) {
                         mutableState.value = mutableState.value.copy(
                             feedLoading = false,
-                            feedError = if (mutableState.value.feedItems.isEmpty()) "无法载入视频列表" else null,
+                            feedError = if (mutableState.value.feedItems.isEmpty()) {
+                                mediaRequestErrorMessage(error, "无法载入视频列表")
+                            } else {
+                                null
+                            },
                         )
                     }
                 }
@@ -3920,7 +3959,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             val page = runApi { api.asmrAuthors() }.getOrElse {
                 if (mutableState.value.asmrAuthors.isEmpty()) {
-                    handleAsmrError(it, "无法载入 ASMR 目录")
+                    handleAsmrError(it, mediaRequestErrorMessage(it, "无法载入 ASMR 目录"))
                 } else {
                     logs.error("asmr_authors_refresh_failed", error = it)
                     mutableState.value = mutableState.value.copy(asmrLoading = false)
@@ -4212,7 +4251,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 api.asmrItems(key.author, kind = key.filter.apiValue, offset = offset)
             }.getOrElse {
                 if (isSelectedAsmrKey(key)) {
-                    handleAsmrError(it, "无法载入作者媒体")
+                    handleAsmrError(it, mediaRequestErrorMessage(it, "无法载入作者媒体"))
                 }
                 return@launch
             }
@@ -4432,7 +4471,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         scheduleCatalogSyncForSection(section, sourceIds)
     }
 
-    private fun scheduleCatalogSyncForSection(section: String, sourceIds: List<String>? = null) {
+    private fun scheduleCatalogSyncForSection(
+        section: String,
+        sourceIds: List<String>? = null,
+        refreshId: String? = null,
+    ) {
+        if (refreshId == null && mutableState.value.catalogSync.running) return
         val account = preferences.apiCacheAccount ?: return
         val targets = when (section) {
             "all" -> listOf("feed", "asmr", "movie", "drama")
@@ -4452,10 +4496,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 delay(CATALOG_SYNC_START_DELAY_MS)
                 if (preferences.apiCacheAccount != account) return@launch
                 if (selected.isEmpty()) {
-                    CatalogSyncWorker.enqueue(getApplication(), account, target)
+                    CatalogSyncWorker.enqueue(getApplication(), account, target, refreshId = refreshId)
                 } else {
                     selected.forEach { sourceId ->
-                        CatalogSyncWorker.enqueue(getApplication(), account, target, sourceId)
+                        CatalogSyncWorker.enqueue(getApplication(), account, target, sourceId, refreshId)
                     }
                 }
             }
@@ -4465,6 +4509,115 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun scheduleFavoriteSync() {
         val account = preferences.apiCacheAccount ?: return
         CatalogSyncWorker.enqueue(getApplication(), account, "favorites")
+    }
+
+    fun retryCatalogSync() {
+        if (preferences.apiCacheAccount == null) {
+            mutableState.value = mutableState.value.copy(catalogCacheMessage = "请先登录")
+            return
+        }
+        val refreshId = UUID.randomUUID().toString()
+        mutableState.value = mutableState.value.copy(
+            catalogCacheMessage = "正在重试媒体列表更新",
+            catalogSync = CatalogSyncUiState(
+                visible = true,
+                running = true,
+                phase = "scheduled",
+                totalWorkers = CATALOG_REFRESH_WORKER_COUNT,
+                pendingWorkers = CATALOG_REFRESH_WORKER_COUNT,
+            ),
+        )
+        observeCatalogSyncProgress(refreshId, CATALOG_REFRESH_WORKER_COUNT)
+        scheduleCatalogSyncForSection("all", refreshId = refreshId)
+    }
+
+    private fun observeCatalogSyncProgress(refreshId: String, totalWorkers: Int) {
+        catalogSyncObserverJob?.cancel()
+        catalogSyncObserverJob = viewModelScope.launch {
+            workManager.getWorkInfosByTagFlow(CatalogSyncWorker.TAG).collect { infos ->
+                val relevant = infos.filter { info ->
+                    CatalogSyncWorker.refreshTag(refreshId) in info.tags
+                }
+                if (relevant.isEmpty()) return@collect
+                val active = relevant.filter { info ->
+                    info.state !in setOf(
+                        WorkInfo.State.SUCCEEDED,
+                        WorkInfo.State.FAILED,
+                        WorkInfo.State.CANCELLED,
+                    )
+                }
+                val progress = relevant.map { info -> CatalogSyncProgress.fromData(info.progress) }
+                val current = active
+                    .sortedBy { if (it.state == WorkInfo.State.RUNNING) 0 else 1 }
+                    .firstOrNull()
+                    ?.let { CatalogSyncProgress.fromData(it.progress) }
+                    ?: progress.lastOrNull()
+                    ?: CatalogSyncProgress()
+                val completed = relevant.count { info ->
+                    info.state in setOf(
+                        WorkInfo.State.SUCCEEDED,
+                        WorkInfo.State.FAILED,
+                        WorkInfo.State.CANCELLED,
+                    )
+                }
+                val failed = relevant.count {
+                    it.state == WorkInfo.State.FAILED || it.state == WorkInfo.State.CANCELLED
+                }
+                val allEnqueued = relevant.size >= totalWorkers
+                if (allEnqueued && active.isEmpty()) {
+                    val hasFailure = failed > 0
+                    mutableState.update { state ->
+                        state.copy(
+                            catalogCacheMessage = if (hasFailure) {
+                                "媒体列表更新失败，请检查网络后重试"
+                            } else {
+                                "媒体列表更新完成"
+                            },
+                            catalogSync = state.catalogSync.copy(
+                                visible = true,
+                                running = false,
+                                phase = if (hasFailure) "failed" else "complete",
+                                completedWorkers = completed,
+                                failedWorkers = failed,
+                                totalWorkers = totalWorkers,
+                                pages = progress.sumOf(CatalogSyncProgress::pages),
+                                records = progress.sumOf(CatalogSyncProgress::records),
+                                error = if (hasFailure) "有 $failed 个目录任务未完成" else null,
+                                pendingWorkers = 0,
+                            ),
+                        )
+                    }
+                    catalogSyncObserverJob?.cancel()
+                    return@collect
+                }
+                val retrying = active.any {
+                    it.runAttemptCount > 0 && it.state != WorkInfo.State.RUNNING
+                }
+                mutableState.update {
+                    it.copy(
+                        catalogSync = CatalogSyncUiState(
+                            visible = true,
+                            running = true,
+                            phase = when {
+                                retrying -> "retrying"
+                                active.any { info -> info.state == WorkInfo.State.RUNNING } -> current.phase
+                                else -> "scheduled"
+                            },
+                            section = current.section,
+                            sourceName = current.sourceName,
+                            sourceIndex = current.sourceIndex,
+                            sourceCount = current.sourceCount,
+                            pages = progress.sumOf(CatalogSyncProgress::pages),
+                            records = progress.sumOf(CatalogSyncProgress::records),
+                            completedWorkers = completed,
+                            totalWorkers = totalWorkers,
+                            pendingWorkers = (totalWorkers - completed).coerceAtLeast(0),
+                            retryCount = active.sumOf { info -> info.runAttemptCount },
+                        ),
+                    )
+                }
+            }
+        }
     }
 
     private fun handleUnauthorized(error: Throwable): Boolean {
@@ -4546,6 +4699,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         appUpdateJob?.cancel()
         appUpdateObserverJob?.cancel()
+        catalogSyncObserverJob?.cancel()
         saveCurrentPosition(forceReport = true)
         playback.setOnPlaybackEndedListener(null)
         playback.setOnMediaTransitionListener(null)
@@ -4554,6 +4708,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val CATALOG_SYNC_START_DELAY_MS = 10_000L
+        const val CATALOG_REFRESH_WORKER_COUNT = 4
     }
 }
 

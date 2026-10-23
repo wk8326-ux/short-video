@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -54,6 +55,7 @@ import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PlayCircle
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SystemUpdate
@@ -69,6 +71,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.AssistChip
@@ -488,6 +491,7 @@ internal fun SettingsScreen(
     onUpdate: () -> Unit,
     onThemes: () -> Unit,
     onClearCatalogCache: () -> Unit,
+    onRetryCatalogSync: () -> Unit,
     onLogout: () -> Unit,
 ) {
     var confirmCacheClear by remember { mutableStateOf(false) }
@@ -523,29 +527,116 @@ internal fun SettingsScreen(
                 top = UiDimens.NavigationHeight + UiDimens.RootTopContentInset,
                 bottom = UiDimens.RootBottomContentInset,
             )
-            .navigationBarsPadding(),
+            .navigationBarsPadding()
+            .verticalScroll(rememberScrollState()),
     ) {
         SettingsRow("管理", "媒体库、扫描、元数据和排除目录", Icons.Outlined.Tune, onManagement)
         SettingsRow("更新", "当前版本 ${BuildConfig.VERSION_NAME}", Icons.Outlined.SystemUpdate, onUpdate)
         SettingsRow(
             "清除目录缓存",
-            if (state.catalogCacheClearing) "正在清除并重新加载目录" else "从服务器重新加载媒体列表",
+            when {
+                state.catalogCacheClearing -> "正在清除本地目录"
+                state.catalogSync.running -> "正在从服务器重新加载媒体列表"
+                else -> "从服务器重新加载媒体列表"
+            },
             Icons.Outlined.DeleteSweep,
             onClick = { confirmCacheClear = true },
-            enabled = !state.catalogCacheClearing,
+            enabled = !state.catalogCacheClearing && !state.catalogSync.running,
             loading = state.catalogCacheClearing,
         )
         state.catalogCacheMessage?.let { message ->
             Text(
                 message,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
-                color = if (message.startsWith("清除失败") || message == "请先登录") {
+                color = if (message.startsWith("清除失败") || message.startsWith("媒体列表更新失败") || message == "请先登录") {
                     MaterialTheme.colorScheme.error
                 } else {
                     MaterialTheme.colorScheme.primary
                 },
                 style = MaterialTheme.typography.bodySmall,
             )
+        }
+        state.catalogSync.takeIf { it.visible }?.let { sync ->
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when (sync.phase) {
+                            "scheduled" -> "等待同步任务启动"
+                            "retrying" -> "连接异常，正在自动重试"
+                            "failed" -> "目录更新未完成"
+                            "complete" -> "目录更新完成"
+                            "discovering" -> "正在读取媒体源"
+                            "bootstrap" -> "正在同步完整目录"
+                            "changes" -> "正在同步目录变更"
+                            else -> "正在更新媒体目录"
+                        },
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (sync.error != null) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        "${sync.completedWorkers}/${sync.totalWorkers}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (sync.running) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+                val section = when (sync.section) {
+                    "feed" -> "短视频/长视频"
+                    "short" -> "短视频"
+                    "long" -> "长视频"
+                    "asmr" -> "ASMR"
+                    "movie" -> "电影"
+                    "drama" -> "短剧"
+                    else -> "媒体目录"
+                }
+                val source = sync.sourceName?.let { name ->
+                    if (sync.sourceCount > 0) "$name（${sync.sourceIndex}/${sync.sourceCount}）" else name
+                }
+                val retry = if (sync.phase == "retrying" && sync.retryCount > 0) {
+                    " · 第 ${sync.retryCount} 次重试"
+                } else {
+                    ""
+                }
+                Text(
+                    buildString {
+                        if (sync.section.isNotBlank()) append(section)
+                        if (!source.isNullOrBlank()) {
+                            if (isNotEmpty()) append(" · ")
+                            append(source)
+                        }
+                        if (sync.pages > 0 || sync.records > 0) {
+                            if (isNotEmpty()) append(" · ")
+                            append("${sync.records} 条 · ${sync.pages} 页")
+                        }
+                        if (retry.isNotBlank()) append(retry)
+                        if (isEmpty()) append("${sync.pendingWorkers} 个目录任务等待或处理中")
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                sync.error?.let { error ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            error,
+                            modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        TextButton(onClick = onRetryCatalogSync) {
+                            Icon(Icons.Outlined.Refresh, contentDescription = null)
+                            Spacer(Modifier.size(6.dp))
+                            Text("重试")
+                        }
+                    }
+                }
+            }
         }
         SettingsRow(
             "主题配色",

@@ -254,6 +254,7 @@ fun ShortVideoApp(
                             onUpdate = viewModel::checkForAppUpdate,
                             onThemes = { showingThemes = true },
                             onClearCatalogCache = viewModel::clearCatalogCache,
+                            onRetryCatalogSync = viewModel::retryCatalogSync,
                             onLogout = viewModel::logout,
                         )
                     }
