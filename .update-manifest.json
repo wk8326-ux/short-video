@@ -1,8 +1,8 @@
 {
-  "versionCode": 213,
-  "versionName": "1.9.2",
-  "apkFile": "deepfuck-android-v1.9.2.apk",
-  "sha256": "67262f4c6d699d3d5cd83c97a7538a761efc74e74a1a29910ca2b57b90e1f80b",
+  "versionCode": 215,
+  "versionName": "1.9.4",
+  "apkFile": "deepfuck-android-v1.9.4.apk",
+  "sha256": "91d276469f2bc5758143bf900c1f1efb00bf69f670595cee2b8d1cfd1816ad29",
   "size": 4611045,
-  "notes": "统一媒体源解析与播放代理，修复 AList 请求头、HLS、Range 播放、前端首屏加载、管理页轮询、电影墙和缓存问题。"
+  "notes": "修复电影墙、短剧墙媒体源缓存和缓存清理竞态。"
 }
