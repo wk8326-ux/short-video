@@ -12,11 +12,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import you.deepfuck.shortvideo.data.AdminStatus
@@ -202,14 +204,6 @@ data class AppUiState(
 private data class AsmrItemsKey(
     val author: String,
     val filter: AsmrFilter,
-)
-
-private data class CachedSourceGroup(
-    val id: String,
-    val name: String,
-    val provider: String,
-    val libraryIds: List<String>,
-    val total: Int,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -480,9 +474,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             catalogCacheMessage = null,
         )
         viewModelScope.launch {
+            cancelCatalogLoadsAndWait()
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    workManager.cancelAllWorkByTag(CatalogSyncWorker.TAG)
+                    // Wait until WorkManager has recorded cancellation before the
+                    // database is cleared; otherwise a finishing worker can write
+                    // stale rows straight back into the fresh catalog.
+                    workManager.cancelAllWorkByTag(CatalogSyncWorker.TAG).result.get()
+                    workManager.getWorkInfosByTagFlow(CatalogSyncWorker.TAG)
+                        .first { infos -> infos.all { it.state.isFinished } }
                     api.clearCachedResponses(account)
                     localStore.clearCatalog(account)
                 }
@@ -508,6 +508,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+    }
+
+    private suspend fun cancelCatalogLoadsAndWait() {
+        val jobs = buildList {
+            addAll(listOfNotNull(
+                librarySearchJob,
+                favoritesJob,
+                feedJob,
+                feedTotalJob,
+                asmrAuthorsJob,
+                movieJob,
+                movieSearchJob,
+                movieDetailJob,
+                movieMetadataJob,
+                movieRecommendationsJob,
+                movieGroupPageJob,
+                movieFavoritesJob,
+                recentJob,
+                recentDramaJob,
+                dramaJob,
+                dramaSearchJob,
+                dramaDetailJob,
+                dramaGroupPageJob,
+            ))
+            addAll(asmrItemJobs.values)
+            addAll(favoriteStatusJobs.values)
+            addAll(favoriteMutationJobs.values)
+            addAll(catalogSyncJobs.values)
+        }.distinct()
+        jobs.forEach(Job::cancel)
+        jobs.joinAll()
     }
 
     private fun resetCatalogMemoryAfterCacheClear() {
@@ -3253,7 +3284,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         if (pages.isEmpty()) return null
         val sourceGroups = cachedSourceGroups(account, "drama", pages)
-        val parsed = pages.flatMap { (sourceId, page) ->
+        val knownLibraryIds = sourceGroups.flatMap { it.libraryIds }.toSet()
+        val parsed = pages.filterKeys { it in knownLibraryIds }.flatMap { (sourceId, page) ->
             page.items.mapNotNull { wrapper ->
                 wrapper.optJSONObject("drama")?.let { drama ->
                     runCatching {
@@ -3541,7 +3573,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         if (groups.isEmpty()) return null
         val sourceGroups = cachedSourceGroups(account, "movie", groups)
-        val parsedGroups = groups.mapNotNull { (sourceId, page) ->
+        val knownLibraryIds = sourceGroups.flatMap { it.libraryIds }.toSet()
+        val parsedGroups = groups.filterKeys { it in knownLibraryIds }.mapNotNull { (sourceId, page) ->
             val items = page.items.mapNotNull { wrapper ->
                 wrapper.optJSONObject("movie")?.let { movie ->
                     runCatching { MovieItem.fromJson(movie).withResumePosition() }.getOrNull()
@@ -3590,48 +3623,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         account: String,
         section: String,
         pages: Map<String, LocalMediaStore.LocalPage>,
-    ): List<CachedSourceGroup> {
-        val sourcePayloads = localStore.cachedSources(account, section)
-            .associateBy { it.optString("id").trim() }
-            .filterKeys(String::isNotBlank)
-            .toMutableMap()
-        pages.keys.forEach { sourceId ->
-            sourcePayloads.putIfAbsent(
-                sourceId,
-                org.json.JSONObject().put("id", sourceId).put("name", sourceId),
-            )
-        }
-        val childParents = sourcePayloads.values.mapNotNull { source ->
-            source.optString("parentSourceId").trim().takeIf(String::isNotBlank)
-        }.toSet()
-        val selectable = sourcePayloads.values.filter { source ->
-            val id = source.optString("id").trim()
-            val provider = source.optString("provider", "alist").lowercase()
-            id in pages && !(source.optString("parentSourceId").isBlank() &&
-                provider in setOf("tvbox", "html") && id in childParents)
-        }
-        val grouped = linkedMapOf<String, MutableList<org.json.JSONObject>>()
-        selectable.forEach { source ->
-            val sourceId = source.optString("id").trim()
-            val groupId = source.optString("sourceGroupId").trim().ifBlank {
-                "source:$sourceId"
-            }
-            grouped.getOrPut(groupId) { mutableListOf() }.add(source)
-        }
-        return grouped.map { (groupId, members) ->
-            val first = members.first()
-            val groupName = first.optString("sourceGroupName").trim().ifBlank {
-                first.optString("name").trim().ifBlank { groupId }
-            }
-            CachedSourceGroup(
-                id = groupId,
-                name = groupName,
-                provider = first.optString("provider", "alist").lowercase(),
-                libraryIds = members.map { it.optString("id").trim() },
-                total = members.sumOf { pages[it.optString("id").trim()]?.total ?: 0 },
-            )
-        }
-    }
+    ): List<CachedSourceGroup> = cachedSourceGroups(
+        sourcePayloads = localStore.cachedSources(account, section),
+        pageTotals = pages.mapValues { (_, page) -> page.total },
+    )
 
     private fun updateMovieResumePosition() {
         val state = mutableState.value

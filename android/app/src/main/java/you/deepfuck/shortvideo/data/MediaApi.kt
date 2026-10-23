@@ -259,6 +259,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .build()
         val payload = getJson(target.toString())
         cacheGroupedItems("movie", payload.optJSONArray("groups"))
+        cacheGroupedSources("movie", payload.optJSONArray("sources"))
         return MovieGroupPage(
             groups = payload.optObjectList("groups", MovieGroup::fromJson),
             total = payload.optInt("total"),
@@ -513,6 +514,7 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             .build()
         val payload = getJson(target.toString())
         cacheGroupedItems("drama", payload.optJSONArray("groups"))
+        cacheGroupedSources("drama", payload.optJSONArray("sources"))
         return DramaGroupPage(
             groups = payload.optObjectList("groups", DramaGroup::fromJson),
             total = payload.optInt("total"),
@@ -805,6 +807,10 @@ class MediaApi(private val preferences: PlaybackPreferences) {
 
     private fun cacheGroupedItems(section: String, groups: JSONArray?) {
         if (groups == null) return
+        val account = preferences.apiCacheAccount
+        if (section == "movie" && account != null) {
+            localStore.cacheSourceLabels(account, section, groups)
+        }
         val items = JSONArray()
         for (index in 0 until groups.length()) {
             val groupItems = groups.optJSONObject(index)?.optJSONArray("items") ?: continue
@@ -813,6 +819,11 @@ class MediaApi(private val preferences: PlaybackPreferences) {
             }
         }
         cacheCatalogPage(section, items)
+    }
+
+    private fun cacheGroupedSources(section: String, groups: JSONArray?) {
+        val account = preferences.apiCacheAccount ?: return
+        localStore.cacheSourceGroups(account, section, groups)
     }
 
     private fun invalidateFavoriteResponses() {

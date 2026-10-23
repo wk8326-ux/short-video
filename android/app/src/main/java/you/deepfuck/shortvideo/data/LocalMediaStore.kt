@@ -163,6 +163,55 @@ internal class LocalMediaStore(
         transaction { database -> sources.forEach { upsertSource(database, account, it) } }
     }
 
+    fun cacheSourceGroups(account: String, section: String, groups: JSONArray?) {
+        if (account.isBlank() || section.isBlank() || groups == null) return
+        val sources = buildList {
+            for (index in 0 until groups.length()) {
+                val group = groups.optJSONObject(index) ?: continue
+                val groupId = group.optString("id").trim()
+                val groupName = group.optString("name").trim()
+                val provider = group.optString("provider").trim().ifBlank { "unknown" }
+                val libraryIds = group.optJSONArray("libraryIds") ?: continue
+                for (libraryIndex in 0 until libraryIds.length()) {
+                    val libraryId = libraryIds.optString(libraryIndex).trim()
+                    if (libraryId.isBlank()) continue
+                    add(JSONObject()
+                        .put("id", libraryId)
+                        .put("section", section)
+                        .put("name", groupName)
+                        .put("provider", provider)
+                        .put("sourceGroupId", groupId)
+                        .put("sourceGroupName", groupName)
+                        .apply {
+                            groupId.removePrefix("parent:")
+                                .takeIf { groupId.startsWith("parent:") && it.isNotBlank() }
+                                ?.let { put("parentSourceId", it) }
+                        })
+                }
+            }
+        }
+        if (sources.isEmpty()) return
+        transaction { database -> sources.forEach { mergeSource(database, account, it, preserveName = true) } }
+    }
+
+    fun cacheSourceLabels(account: String, section: String, groups: JSONArray?) {
+        if (account.isBlank() || section.isBlank() || groups == null) return
+        val labels = buildList {
+            for (index in 0 until groups.length()) {
+                val group = groups.optJSONObject(index) ?: continue
+                val sourceId = group.optString("sourceId").trim()
+                val name = group.optString("name").trim()
+                if (sourceId.isBlank() || name.isBlank()) continue
+                add(JSONObject()
+                    .put("id", sourceId)
+                    .put("section", section)
+                    .put("name", name))
+            }
+        }
+        if (labels.isEmpty()) return
+        transaction { database -> labels.forEach { mergeSource(database, account, it) } }
+    }
+
     fun cachedSources(account: String, section: String? = null): List<JSONObject> {
         if (account.isBlank()) return emptyList()
         val result = mutableListOf<JSONObject>()
@@ -626,6 +675,31 @@ internal class LocalMediaStore(
             put("updated_at", System.currentTimeMillis())
         }
         database.insertWithOnConflict("catalog_sources", null, values, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    /** Add display-only group fields without discarding source hierarchy metadata. */
+    private fun mergeSource(
+        database: SQLiteDatabase,
+        account: String,
+        source: JSONObject,
+        preserveName: Boolean = false,
+    ) {
+        val sourceId = source.optString("id").trim()
+        if (sourceId.isEmpty()) return
+        val merged = database.rawQuery(
+            "SELECT payload FROM catalog_sources WHERE account = ? AND source_id = ?",
+            arrayOf(account, sourceId),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) JSONObject(source.toString())
+            else runCatching { JSONObject(cursor.getString(0)) }.getOrElse { JSONObject(source.toString()) }
+        }
+        val keys = source.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            if (preserveName && key == "name" && merged.optString("name").isNotBlank()) continue
+            merged.put(key, source.opt(key))
+        }
+        upsertSource(database, account, merged)
     }
 
     private fun upsert(database: SQLiteDatabase, account: String, wrapper: JSONObject) {

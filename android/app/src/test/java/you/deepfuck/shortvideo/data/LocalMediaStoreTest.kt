@@ -147,6 +147,48 @@ class LocalMediaStoreTest {
     }
 
     @Test
+    fun groupedSourceCachePreservesTvboxHierarchy() {
+        val store = store()
+        store.cacheSources(
+            "account-a",
+            listOf(
+                JSONObject()
+                    .put("id", "tv-child")
+                    .put("section", "movie")
+                    .put("provider", "tvbox")
+                    .put("parentSourceId", "tv-parent")
+                    .put("name", "旧源名称"),
+            ),
+        )
+        store.cacheSourceLabels(
+            "account-a",
+            "movie",
+            JSONArray().put(
+                JSONObject().put("sourceId", "tv-child").put("name", "电影分类"),
+            ),
+        )
+
+        store.cacheSourceGroups(
+            "account-a",
+            "movie",
+            JSONArray().put(
+                JSONObject()
+                    .put("id", "parent:tv-parent")
+                    .put("name", "TVBox")
+                    .put("provider", "tvbox")
+                    .put("libraryIds", JSONArray().put("tv-child")),
+            ),
+        )
+
+        val cached = store.cachedSources("account-a", "movie").single()
+
+        assertEquals("电影分类", cached.getString("name"))
+        assertEquals("tv-parent", cached.getString("parentSourceId"))
+        assertEquals("parent:tv-parent", cached.getString("sourceGroupId"))
+        assertEquals("TVBox", cached.getString("sourceGroupName"))
+    }
+
+    @Test
     fun clearingCatalogKeepsFavoritesRecentItemsAndRemovesSyncState() {
         val store = store()
         val movie = JSONObject()

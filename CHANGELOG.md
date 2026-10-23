@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.9.4] - 2026-10-23
+
+### Fixed
+- 修复 Android 电影墙和短剧墙本地缓存缺少媒体源元数据时把内部源 ID 显示成媒体库的问题。
+- 保留 AList 多根目录与 TVBox 父子分类关系，避免不同播放源被错误合并或拆分。
+- 修复清除目录缓存时后台同步任务和页面请求把旧列表写回本地的问题。
+
 ## [1.8.9] - 2026-10-16
 
 ### Fixed
