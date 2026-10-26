@@ -10,13 +10,13 @@ GitHub 是唯一发布源。oracle2 不再通过本机 SFTP 接收源码或 APK�
 
 ## 版本信息
 
-每次发布必须同步修改：
+客户端发布必须修改：
 
 - `android/app/build.gradle.kts`
   - `versionCode`：只能递增
   - `versionName`：例如 `1.6.0-beta.40`
-- `app/main.py`
-  - `APP_VERSION`：必须与 APK 的 `versionName` 相同
+
+从 1.10.0 起，独立 TVBox 客户端与服务端分别发布。`app/main.py` 的 `APP_VERSION` 表示服务端版本，只在服务端发布时修改；无需与 APK 相同。仅发布 APK 时，只更新 GitHub Release 与兼容旧客户端的更新文件，无需重建后端。
 
 APK 必须使用 `android/signing.properties` 指向的稳定签名，否则 Android 无法覆盖安装旧版本。
 
@@ -49,7 +49,7 @@ $apk = "android/app/build/outputs/apk/release/app-release.apk"
 (Get-FileHash $apk -Algorithm SHA256).Hash
 ```
 
-同时验证 PWA：
+涉及 PWA 变更时同时验证：
 
 ```powershell
 cd frontend
@@ -69,7 +69,7 @@ git log -1 --oneline
 提交并推送当前发布分支：
 
 ```powershell
-git add app android frontend docs
+git add <本次发布实际修改的文件>
 git commit -m "release: v<versionName>"
 git push origin feature/movie-library
 ```
@@ -196,7 +196,7 @@ mv /home/ubuntu/short-video/data/app-update/manifest.json.tmp \
    /home/ubuntu/short-video/data/app-update/manifest.json
 ```
 
-重建服务：
+只有服务端源码发生变更时才重建服务；仅更新 APK 和 manifest 无需重建：
 
 ```bash
 cd /home/ubuntu/short-video
@@ -234,7 +234,7 @@ rm -f /tmp/stale-update-body
 
 必须确认：
 
-- `/api/health` 的 `version` 是本次 `APP_VERSION`
+- 服务端发布时，`/api/health` 的 `version` 是本次 `APP_VERSION`；仅客户端发布时保留原服务端版本
 - `/api/app/update` 返回正确的 `versionCode`、`versionName`、大小和 SHA-256
 - APK `HEAD` 返回 `200`、正确的 `Content-Length`、`X-APK-SHA256` 和规范文件名
 - APK `Range` 请求返回 `206`、`Content-Range` 和正确的分段长度
@@ -248,14 +248,14 @@ rm -f /tmp/stale-update-body
 当前已构建 APK：
 
 ```text
-versionName: 1.9.3
-versionCode: 214
-size: 4611045
-sha256: 7351A4E65DB2BF1DCF8CB5F06977BD5DBF6DF08F08670FABDAA632599E400441
-GitHub tag: v1.9.3
-GitHub asset: deepfuck-android-v1.9.3.apk
-GitHub asset URL: https://github.com/wk8326-ux/short-video/releases/download/v1.9.3/deepfuck-android-v1.9.3.apk
-oracle2 APK path: /home/ubuntu/short-video/data/app-update/deepfuck-android-v1.9.3.apk
+versionName: 1.10.0
+versionCode: 217
+size: 4742516
+sha256: f4dc61b010f1a3a513336c4112375871e48e62983ec35e087f8993e4b787469c
+GitHub tag: v1.10.0
+GitHub asset: deepfuck-android-v1.10.0.apk
+GitHub asset URL: https://github.com/wk8326-ux/short-video/releases/download/v1.10.0/deepfuck-android-v1.10.0.apk
+oracle2 APK path: /home/ubuntu/short-video/data/app-update/deepfuck-android-v1.10.0.apk
 ```
 
-1.9.3 增加 Android 目录缓存清理与重新同步入口；清除媒体源、媒体目录、API 响应缓存及同步游标，同时保留登录状态、收藏、观看进度和视频播放缓存。已完成线上验收：服务端容器为 `healthy`，更新接口返回 `1.9.3 / 214`，APK `HEAD` 返回 `200`，`Range: bytes=0-1023` 返回 `206`，旧版本号 `213` 返回 `409`，GitHub Release 与服务器 APK 的大小和 SHA-256 一致。
+1.10.0 将电影页改为独立 TVBox 客户端，内置五个 CMS 配置，并保留旧服务器媒体库入口。已完成 157 个 JVM 测试、lint（无错误）、五源公网视频抽测，以及关闭外网后的独立 CMS/HLS 设备测试；最终经过压缩的 release APK 也完成了画面渲染与播放进度检查。客户端版本独立递增，本次不重建后端。详细支持范围与复现命令见 [android-tvbox.md](android-tvbox.md)。

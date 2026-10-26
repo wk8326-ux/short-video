@@ -16,6 +16,34 @@ class MediaMimeTypeTest {
         assertNull(mediaMimeType(media(format = "unknown")))
     }
 
+    @Test
+    fun `direct playlist paths override generic container hints without inspecting query values`() {
+        for (format in listOf<String?>(null, "unknown", "mp4")) {
+            assertEquals(
+                "application/x-mpegURL",
+                mediaMimeType(media(format = "mp4").copy(
+                    format = format,
+                    playUrl = "http://cms.example/series/MASTER.M3U8?token=one#player",
+                )),
+            )
+        }
+        assertEquals(
+            "application/x-mpegURL",
+            mediaMimeType(media(format = "unknown").copy(playUrl = "https://cms.example/master.m3u?id=1")),
+        )
+        assertEquals(
+            "video/mp4",
+            mediaMimeType(media(format = "mp4").copy(playUrl = "https://cms.example/movie.mp4?next=master.m3u8")),
+        )
+    }
+
+    @Test
+    fun `extensionless playlists accept normalized CMS HLS format hints`() {
+        for (format in listOf(" .M3U8 ", "hls", "application/vnd.apple.mpegurl", "application/x-mpegURL; charset=UTF-8")) {
+            assertEquals("application/x-mpegURL", mediaMimeType(media(format = format)))
+        }
+    }
+
     private fun media(format: String, kind: String = "video") = MediaEntry(
         id = 1L,
         title = "media",

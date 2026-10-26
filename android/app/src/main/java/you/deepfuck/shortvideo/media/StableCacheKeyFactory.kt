@@ -17,12 +17,23 @@ class StableCacheKeyFactory : CacheKeyFactory {
 
         fun stableCacheKey(rawUrl: String): String = runCatching {
             val uri = URI(rawUrl)
-            if (uri.host.equals("short.deepfuck.you", ignoreCase = true)) {
-                playPath.matchEntire(uri.path)?.groupValues?.get(1)?.let { return "media:$it" }
+            if (uri.scheme.equals("https", ignoreCase = true) &&
+                uri.host.equals("short.deepfuck.you", ignoreCase = true) &&
+                uri.port in setOf(-1, 443) && uri.rawUserInfo == null
+            ) {
+                playPath.matchEntire(uri.rawPath.orEmpty())?.groupValues?.get(1)?.let { id ->
+                    val query = uri.rawQuery?.split('&')
+                        ?.filterNot { it.substringBefore('=') == "refresh" }
+                        ?.joinToString("&")
+                        .orEmpty()
+                    return "media:$id" + if (query.isEmpty()) "" else "?$query"
+                }
             }
-            URI(uri.scheme, uri.authority, uri.path, null, null).toASCIIString()
+            // External query values can select episodes, variants, keys or segments.
+            // Version these keys so bytes stored by the old query-stripping policy are not reused.
+            "url:v2:${uri.toASCIIString().substringBefore('#')}"
         }.getOrElse {
-            rawUrl.substringBefore('#').substringBefore('?')
+            "url:v2:${rawUrl.substringBefore('#')}"
         }
     }
 }

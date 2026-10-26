@@ -14,6 +14,11 @@ val signingProperties = Properties().apply {
     signingPropertiesFile.inputStream().use(::load)
 }
 
+val bundleTvBoxConfig by tasks.registering(Sync::class) {
+    from(rootProject.file("../frontend/public")) { include("tvbox.json") }
+    into(layout.buildDirectory.dir("generated/tvboxAssets"))
+}
+
 android {
     namespace = "you.deepfuck.shortvideo"
     compileSdk = 35
@@ -22,8 +27,8 @@ android {
         applicationId = "you.deepfuck.shortvideo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 216
-        versionName = "1.9.5"
+        versionCode = 217
+        versionName = "1.10.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -62,6 +67,7 @@ android {
         buildConfig = true
     }
     testOptions.unitTests.isIncludeAndroidResources = true
+    sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/tvboxAssets"))
     packaging.resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     lint {
         // androidx.lifecycle 2.8.7's detector is incompatible with the
@@ -81,6 +87,10 @@ android {
     }
 }
 
+tasks.named("preBuild") {
+    dependsOn(bundleTvBoxConfig)
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.11.00")
     implementation(composeBom)
@@ -95,6 +105,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.media3:media3-datasource:1.5.1")
+    implementation("androidx.media3:media3-datasource-okhttp:1.5.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.5.1")
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-session:1.5.1")
@@ -105,5 +116,8 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.robolectric:robolectric:4.14.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:core:1.6.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

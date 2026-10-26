@@ -26,6 +26,8 @@ The user resumes media at the saved position, sees no recent repeats in shuffle 
 
 # Learned constraints
 
+- **2026-10-26** - APK 默认进入独立 TVBox 电影流程，配置、分类、搜索、详情与播放均直接访问 CMS/CDN，不依赖业务服务器。保留其他板块入口，AList 后续处理。此约束优先于旧的默认短视频入口和强制服务器更新要求。
+
 - **2026-08-21** - Keep movie source scanning and TMDB metadata scraping as two separate, manual, source-scoped actions. *Why:* Large OpenList libraries change infrequently; scanning or scraping one source must never refresh another library or start playback.
 
 - **2026-08-21** - Persistent ASMR playback occupies a real bottom layout region rather than overlaying the scroll viewport. *Why:* Backdrop blur is not reliable across supported Android versions, and list text or hit targets must never bleed through a fixed player.

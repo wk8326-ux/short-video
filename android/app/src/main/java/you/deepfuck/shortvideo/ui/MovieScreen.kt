@@ -11,6 +11,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -162,6 +163,10 @@ internal fun MovieScreen(
     onFullscreen: (Boolean) -> Unit,
     onPip: () -> Unit,
     onListPosition: (ListPosition) -> Unit,
+    standalone: Boolean = false,
+    detailExtras: @Composable (() -> Unit)? = null,
+    onOpenSources: (() -> Unit)? = null,
+    playEnabled: Boolean = true,
 ) {
     // The wall is a list of library sections, so position memory tracks section
     // indexes rather than individual posters.
@@ -201,7 +206,8 @@ internal fun MovieScreen(
             muted = state.muted,
             fullscreen = fullscreen,
             pipMode = pipMode,
-            playbackStarted = state.nowPlaying?.id == movie.videoId || player.mediaId == movie.videoId,
+            playbackStarted = !standalone &&
+                (state.nowPlaying?.id == movie.videoId || player.mediaId == movie.videoId),
             onBack = onBack,
             onPlay = { onPlay(movie) },
             onTogglePlayback = onTogglePlayback,
@@ -214,6 +220,12 @@ internal fun MovieScreen(
             onToggleFavorite = { onToggleFavorite(movie) },
             onOpenMetadata = onOpenMetadata,
             onSelectRecommendation = onSelect,
+            standalone = standalone,
+            detailExtras = detailExtras,
+            playEnabled = playEnabled,
+            sourceLabel = if (standalone) movie.source ?: state.movieSources.firstOrNull {
+                it.id == state.selectedMovieSourceId
+            }?.name else null,
         )
         return
     }
@@ -251,6 +263,7 @@ internal fun MovieScreen(
             onLoadMore = onLoadMoreFavorites,
             initialPosition = favoritesListPosition,
             onListPosition = onFavoritesListPosition,
+            standalone = standalone,
         )
         return
     }
@@ -271,6 +284,11 @@ internal fun MovieScreen(
             onLoadMore = onLoadMoreGroup,
             initialPosition = groupListPosition,
             onListPosition = { onGroupListPosition(groupId, it) },
+            standalone = standalone,
+            hasMore = if (standalone) state.openMovieGroupNextOffset != null else null,
+            sourceLabel = if (standalone) state.movieSources.firstOrNull {
+                it.id == state.selectedMovieSourceId
+            }?.name else null,
         )
         return
     }
@@ -285,8 +303,32 @@ internal fun MovieScreen(
         onOpenFavorites = onOpenFavorites,
         onWallView = onWallView,
         onRetry = onRetry,
+        standalone = standalone,
+        onOpenSources = onOpenSources,
     )
 }
+
+@Composable
+private fun MoviePageScaffold(
+    standalone: Boolean,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (standalone) {
+        Column(Modifier.fillMaxSize().background(Canvas), content = content)
+    } else {
+        AppScreenScaffold(content = content)
+    }
+}
+
+private fun movieCountLabel(total: Int): String =
+    if (total < 0) "未查询" else "$total 部"
+
+private fun movieLoadedCountLabel(loaded: Int, total: Int): String =
+    if (total < 0) {
+        if (loaded > 0) "已载入 $loaded 部" else "未查询"
+    } else {
+        "$loaded/$total"
+    }
 
 /** Remembers which library section the user scrolled away from. */
 @Composable
@@ -345,6 +387,8 @@ private fun MovieCatalog(
     onOpenFavorites: () -> Unit,
     onWallView: (MovieWallView) -> Unit,
     onRetry: () -> Unit,
+    standalone: Boolean = false,
+    onOpenSources: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     var jumpMenuOpen by remember { mutableStateOf(false) }
@@ -354,7 +398,7 @@ private fun MovieCatalog(
         MovieWallView.ROWS -> MovieWallView.LIBRARIES
         MovieWallView.LIBRARIES -> MovieWallView.SHELVES
     }
-    AppScreenScaffold {
+    MoviePageScaffold(standalone) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -383,7 +427,7 @@ private fun MovieCatalog(
                                 Column {
                                     Text(source.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(
-                                        "${source.libraryCount} 个媒体库 · ${source.total} 部",
+                                        "${if (source.libraryCount < 0) "分类未查询" else "${source.libraryCount} 个媒体库"} · ${movieCountLabel(source.total)}",
                                         color = TextFaint,
                                         style = MaterialTheme.typography.labelSmall,
                                     )
@@ -402,14 +446,25 @@ private fun MovieCatalog(
                     }
                 }
             }
-            Spacer(Modifier.weight(1f))
+            if (standalone) {
+                Text(
+                    state.movieSources.firstOrNull { it.id == state.selectedMovieSourceId }?.name ?: "未选择片源",
+                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                    color = TextPrimary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
             GlassIconButton(
                 label = "电影墙：${state.movieWallView.label}，点击切换为${nextWallView.label}",
                 onClick = { onWallView(nextWallView) },
             ) {
                 Icon(Icons.Outlined.GridView, contentDescription = null)
             }
-            Spacer(Modifier.weight(1f))
+            if (!standalone) Spacer(Modifier.weight(1f))
             // Quick jump between libraries: the wall is grouped by media source,
             // so the menu only shows the active source's libraries.
             Box {
@@ -460,9 +515,9 @@ private fun MovieCatalog(
             state.movieGroups.isEmpty() && state.movieLoading -> MovieSkeletonGrid()
             state.movieGroups.isEmpty() -> MovieCatalogState(
                 icon = Icons.Outlined.Movie,
-                title = "还没有电影索引",
-                action = null,
-                onAction = {},
+                title = if (standalone) "暂无影片" else "还没有电影索引",
+                action = if (standalone && onOpenSources != null) "管理片源" else null,
+                onAction = { onOpenSources?.invoke() },
             )
             else -> LazyColumn(
                 state = wallState,
@@ -690,7 +745,7 @@ private fun MovieLibraryTile(
         onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .semantics { contentDescription = "${group.name}，共 ${group.total} 部" },
+            .semantics { contentDescription = "${group.name}，${movieCountLabel(group.total)}" },
         color = Color.Transparent,
         contentColor = TextPrimary,
         shape = MediaCardShape,
@@ -736,7 +791,7 @@ private fun MovieLibraryTile(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                "${group.total} 部",
+                movieCountLabel(group.total),
                 color = TextFaint,
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 1,
@@ -762,7 +817,7 @@ private fun MovieRowSection(
     Column(Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 12.dp)) {
         MovieSectionHeader(
             title = group.name,
-            trailing = "${group.items.size}/${group.total}",
+            trailing = movieLoadedCountLabel(group.items.size, group.total),
             onClick = onOpenGroup,
         )
         LazyRow(
@@ -855,7 +910,7 @@ private fun MovieGroupSection(
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                "${group.items.size}/${group.total}",
+                movieLoadedCountLabel(group.items.size, group.total),
                 color = TextFaint,
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 1,
@@ -933,6 +988,9 @@ private fun MovieLibraryPage(
     onLoadMore: () -> Unit,
     initialPosition: ListPosition,
     onListPosition: (ListPosition) -> Unit,
+    standalone: Boolean = false,
+    hasMore: Boolean? = null,
+    sourceLabel: String? = null,
 ) {
     // The grid reopens where it was left, so coming back from a detail page
     // lands on the poster that was tapped instead of the top of the library.
@@ -948,7 +1006,7 @@ private fun MovieLibraryPage(
         }
     }
     var sortMenuOpen by remember { mutableStateOf(false) }
-    AppScreenScaffold {
+    MoviePageScaffold(standalone) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -969,13 +1027,16 @@ private fun MovieLibraryPage(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    if (total > 0) "共 $total 部" else "正在统计…",
+                    listOfNotNull(
+                        sourceLabel,
+                        if (standalone || total >= 0) movieCountLabel(total) else "正在统计…",
+                    ).joinToString(" · "),
                     color = TextFaint,
                     style = MaterialTheme.typography.labelSmall,
                     maxLines = 1,
                 )
             }
-            Box {
+            if (!standalone) Box {
                 GlassIconButton(
                     label = "排序",
                     onClick = { sortMenuOpen = true },
@@ -1028,6 +1089,7 @@ private fun MovieLibraryPage(
             imageLoader = imageLoader,
             onSelect = onSelect,
             onLoadMore = onLoadMore,
+            hasMoreOverride = hasMore,
         )
     }
 }
@@ -1051,6 +1113,7 @@ private fun MovieFavoritesPage(
     onLoadMore: () -> Unit,
     initialPosition: ListPosition,
     onListPosition: (ListPosition) -> Unit,
+    standalone: Boolean = false,
 ) {
     val gridState = rememberLazyGridState(
         initialFirstVisibleItemIndex = initialPosition.index.coerceAtLeast(0),
@@ -1063,7 +1126,7 @@ private fun MovieFavoritesPage(
             )
         }
     }
-    AppScreenScaffold {
+    MoviePageScaffold(standalone) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1097,7 +1160,7 @@ private fun MovieFavoritesPage(
             total = total,
             loading = loading,
             error = error,
-            emptyTitle = "还没有收藏，点影片详情页的心形就能收藏",
+            emptyTitle = if (standalone) "还没有收藏" else "还没有收藏，点影片详情页的心形就能收藏",
             gridState = gridState,
             imageLoader = imageLoader,
             onSelect = onSelect,
@@ -1208,13 +1271,15 @@ private fun MoviePosterGrid(
     imageLoader: ImageLoader,
     onSelect: (MovieItem) -> Unit,
     onLoadMore: () -> Unit,
+    hasMoreOverride: Boolean? = null,
 ) {
-    val hasMore = items.size < total
+    // CMS totals can be unknown; a supplied cursor decides whether paging continues.
+    val hasMore = hasMoreOverride ?: (items.size < total)
     TrackMovieGrid(
         gridState = gridState,
         itemCount = items.size,
         loading = loading,
-        hasMore = hasMore,
+        hasMore = hasMore && error == null,
         onLoadMore = onLoadMore,
     )
     when {
@@ -1248,10 +1313,20 @@ private fun MoviePosterGrid(
                         CircularProgressIndicator(Modifier.size(22.dp), color = TextSecondary, strokeWidth = 2.dp)
                     }
                 }
+            } else if (error != null) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(error, color = MaterialTheme.colorScheme.error)
+                        TextButton(onClick = onLoadMore) { Text("重试") }
+                    }
+                }
             } else if (hasMore) {
                 item(span = { GridItemSpan(maxLineSpan) }) {
                     Box(Modifier.fillMaxWidth().height(56.dp), contentAlignment = Alignment.Center) {
-                        Text("正在载入更多…", color = TextFaint, style = MaterialTheme.typography.labelSmall)
+                        TextButton(onClick = onLoadMore) { Text("加载更多") }
                     }
                 }
             }
@@ -1260,7 +1335,7 @@ private fun MoviePosterGrid(
 }
 
 @Composable
-private fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () -> Unit) {
+internal fun MoviePoster(movie: MovieItem, imageLoader: ImageLoader, onClick: () -> Unit) {
     val watchedPercent = (movie.resumeFraction * 100).toInt()
     Surface(
         onClick = onClick,
@@ -1404,6 +1479,10 @@ private fun MovieDetail(
     onToggleFavorite: () -> Unit,
     onOpenMetadata: (MovieMetadataEntity) -> Unit,
     onSelectRecommendation: (MovieItem) -> Unit,
+    standalone: Boolean = false,
+    detailExtras: @Composable (() -> Unit)? = null,
+    playEnabled: Boolean = true,
+    sourceLabel: String? = null,
 ) {
     var recommendationsOpen by remember(movie.id) { mutableStateOf(false) }
     BackHandler(enabled = recommendationsOpen) { recommendationsOpen = false }
@@ -1485,6 +1564,14 @@ private fun MovieDetail(
                             Spacer(Modifier.height(5.dp))
                             Text(meta, color = TextSecondary, style = MaterialTheme.typography.bodyMedium)
                         }
+                        sourceLabel?.let {
+                            Text(
+                                it,
+                                modifier = Modifier.padding(top = 5.dp),
+                                color = TextFaint,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
                     }
                     if (detailLoading) {
                         CircularProgressIndicator(Modifier.size(19.dp), color = TextFaint, strokeWidth = 2.dp)
@@ -1499,6 +1586,7 @@ private fun MovieDetail(
                     ) {
                         Button(
                             onClick = onPlay,
+                            enabled = playEnabled && (!standalone || !detailLoading),
                             modifier = Modifier.weight(1f).height(48.dp),
                             shape = ControlShape,
                             colors = ButtonDefaults.buttonColors(
@@ -1535,11 +1623,15 @@ private fun MovieDetail(
                     Spacer(Modifier.height(12.dp))
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
+                detailExtras?.let { extras ->
+                    Spacer(Modifier.height(24.dp))
+                    extras()
+                }
                 Spacer(Modifier.height(24.dp))
                 Text("简介", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    movie.overview.ifBlank { "暂无简介，可以直接从影片开始观看。" },
+                    movie.overview.ifBlank { "暂无简介" },
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodyLarge,
                 )
@@ -1558,26 +1650,37 @@ private fun MovieDetail(
                     Text("资料", color = TextPrimary, fontWeight = FontWeight.SemiBold)
                     movie.releaseDate?.let { MovieMetadataLine("发行", it) }
                     movie.yearEntity?.let { entity ->
-                        MovieMetadataLine("年份", entity.name) { onOpenMetadata(entity) }
+                        MovieMetadataLine("年份", entity.name, if (standalone) null else ({ onOpenMetadata(entity) }))
                     }
                     movie.studioEntity?.let { entity ->
-                        MovieMetadataLine("制作", entity.name) { onOpenMetadata(entity) }
+                        MovieMetadataLine("制作", entity.name, if (standalone) null else ({ onOpenMetadata(entity) }))
                     }
-                    MovieMetadataChipRow("类型", movie.genreEntities, onOpenMetadata)
-                    MovieMetadataChipRow("演员", movie.performerEntities, onOpenMetadata)
+                    if (standalone) {
+                        if (movie.genreEntities.isNotEmpty()) {
+                            MovieMetadataLine("类型", movie.genreEntities.joinToString(" / ") { it.name })
+                        }
+                        if (movie.performerEntities.isNotEmpty()) {
+                            MovieMetadataLine("演员", movie.performerEntities.joinToString(" / ") { it.name })
+                        }
+                    } else {
+                        MovieMetadataChipRow("类型", movie.genreEntities, onOpenMetadata)
+                        MovieMetadataChipRow("演员", movie.performerEntities, onOpenMetadata)
+                    }
                     movie.metadataProvider?.let { provider ->
                         MovieMetadataLine("资料来源", metadataProviderLabel(provider))
                     }
                 }
-                Spacer(Modifier.height(24.dp))
-                androidx.compose.material3.OutlinedButton(
-                    onClick = { recommendationsOpen = true },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                    shape = ControlShape,
-                ) {
-                    Icon(Icons.Outlined.AutoAwesome, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("相似推荐")
+                if (!standalone) {
+                    Spacer(Modifier.height(24.dp))
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = { recommendationsOpen = true },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                        shape = ControlShape,
+                    ) {
+                        Icon(Icons.Outlined.AutoAwesome, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("相似推荐")
+                    }
                 }
             }
         }
@@ -1771,6 +1874,7 @@ internal fun MoviePlayer(
     onBack: (() -> Unit)? = null,
     title: String? = null,
     modifier: Modifier = Modifier,
+    onEpisodes: (() -> Unit)? = null,
 ) {
     var chromeVisible by remember(fullscreen) { mutableStateOf(true) }
     var dragPixels by remember { mutableFloatStateOf(0f) }
@@ -1865,6 +1969,16 @@ internal fun MoviePlayer(
                     tint = Color.White,
                 ) {
                     Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null)
+                }
+            }
+            onEpisodes?.let { openEpisodes ->
+                GlassIconButton(
+                    label = "选集",
+                    onClick = openEpisodes,
+                    modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(6.dp),
+                    tint = Color.White,
+                ) {
+                    Icon(Icons.Outlined.Menu, contentDescription = null)
                 }
             }
             if (!player.isBuffering) {

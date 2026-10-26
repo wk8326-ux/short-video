@@ -182,6 +182,8 @@ data class MovieItem(
     val recommendationKeywordMatches: Int = 0,
     val recommendationPerformerMatches: Int = 0,
     val recommendationStudioMatches: Int = 0,
+    /** TVBox identity and metadata survive catalog eviction while this movie is displayed. */
+    val tvBoxRef: TvBoxMovieRef? = null,
 ) {
     val resumeFraction: Float
         get() {
@@ -233,6 +235,7 @@ data class MovieItem(
         .put("performerEntities", metadataEntitiesToJson(performerEntities))
         .put("resumePositionMs", resumePositionMs)
         .put("favorite", favorite)
+        .put("tvBoxRef", tvBoxRef?.toJson())
 
 
     companion object {
@@ -274,6 +277,7 @@ data class MovieItem(
             recommendationKeywordMatches = value.optJSONObject("recommendationMatches")?.optInt("keywords") ?: 0,
             recommendationPerformerMatches = value.optJSONObject("recommendationMatches")?.optInt("performers") ?: 0,
             recommendationStudioMatches = value.optJSONObject("recommendationMatches")?.optInt("studios") ?: 0,
+            tvBoxRef = value.optJSONObject("tvBoxRef")?.let(TvBoxMovieRef::fromJson),
         )
     }
 }

@@ -1369,9 +1369,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.value = state.copy(
             selectedMovieSourceId = sourceId,
             movieGroups = emptyList(),
-            movieTotal = 0,
-            movieGroupsLoading = false,
-            movieLoading = false,
+            movieTotal = state.movieSources.firstOrNull { it.id == sourceId }?.total ?: state.movieTotal,
+            movieGroupsLoading = true,
+            movieLoading = true,
             movieError = null,
         )
         scheduleCatalogSyncForSection(
@@ -3488,23 +3488,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             movieError = null,
         )
         movieJob = viewModelScope.launch {
-            preferences.apiCacheAccount?.let { account ->
-                val local = withContext(Dispatchers.IO) {
-                    localMovieGroupPage(account, state.selectedMovieSourceId)
-                }
-                if (local != null && requestGeneration == movieRequestGeneration) {
-                    val current = mutableState.value
-                    mutableState.value = current.copy(
-                        movieSources = local.sources,
-                        selectedMovieSourceId = local.selectedSourceId,
-                        movieGroups = local.groups,
-                        movieTotal = local.total,
-                        movieGroupsLoading = true,
-                        movieLoading = true,
-                        movieError = null,
-                    )
-                }
-            }
             runApi {
                 api.movieGroups(
                     sort = requestedSort,
@@ -3598,60 +3581,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
         }
-    }
-
-    private fun localMovieGroupPage(account: String, selectedSourceId: String?): MovieGroupPage? {
-        val groups = localStore.cachedPagesBySource(
-            account,
-            "movie",
-            MediaApi.MOVIE_GROUP_SIZE,
-        )
-        if (groups.isEmpty()) return null
-        val sourceGroups = cachedSourceGroups(account, "movie", groups)
-        val knownLibraryIds = sourceGroups.flatMap { it.libraryIds }.toSet()
-        val parsedGroups = groups.filterKeys { it in knownLibraryIds }.mapNotNull { (sourceId, page) ->
-            val items = page.items.mapNotNull { wrapper ->
-                wrapper.optJSONObject("movie")?.let { movie ->
-                    runCatching { MovieItem.fromJson(movie).withResumePosition() }.getOrNull()
-                }
-            }
-            if (items.isEmpty()) null else MovieGroup(
-                sourceId = sourceId,
-                name = localStore.cachedSources(account, "movie")
-                    .firstOrNull { it.optString("id") == sourceId }
-                    ?.optString("name")
-                    .orEmpty()
-                    .ifBlank { sourceId },
-                total = page.total,
-                items = items,
-                nextOffset = page.nextOffset,
-            )
-        }
-        if (parsedGroups.isEmpty()) return null
-        val sources = sourceGroups.map { source ->
-            MovieSource(
-                id = source.id,
-                name = source.name,
-                provider = source.provider,
-                libraryIds = source.libraryIds,
-                libraryCount = source.libraryIds.size,
-                total = source.total,
-            )
-        }
-        val selected = sources.firstOrNull { it.id == selectedSourceId }
-            ?: sources.firstOrNull { it.total > 0 }
-            ?: sources.firstOrNull()
-        val visibleIds = selected?.libraryIds?.toSet()
-        val visibleGroups = if (visibleIds == null) parsedGroups else {
-            parsedGroups.filter { it.sourceId in visibleIds }
-        }
-        return MovieGroupPage(
-            groups = visibleGroups,
-            total = selected?.total ?: parsedGroups.sumOf { it.total },
-            scanRunning = false,
-            sources = sources,
-            selectedSourceId = selected?.id,
-        )
     }
 
     private fun cachedSourceGroups(

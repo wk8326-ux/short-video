@@ -11,18 +11,21 @@ import androidx.media3.common.C
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.DataSpec
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheWriter
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,9 +37,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
 import you.deepfuck.shortvideo.data.MediaApi
 import you.deepfuck.shortvideo.data.MediaEntry
 import you.deepfuck.shortvideo.data.MediaSurface
+import you.deepfuck.shortvideo.data.PlaybackPreferences
 import you.deepfuck.shortvideo.logging.AppLogStore
 
 data class PlayerSnapshot(
@@ -87,6 +94,57 @@ internal class PlaybackIdentity {
     }
 }
 
+internal class PlaybackErrorState {
+    var error: String? = null
+        private set
+
+    fun record(error: String?) {
+        if (error != null) this.error = error
+    }
+
+    fun clear() {
+        error = null
+    }
+}
+
+internal fun playbackUrl(entry: MediaEntry): String {
+    val url = entry.playUrl
+    return if (url.startsWith("https://", ignoreCase = true) || url.startsWith("http://", ignoreCase = true)) {
+        url
+    } else {
+        requireNotNull(MediaApi.BASE_URL.toHttpUrl().resolve(url)).toString()
+    }
+}
+
+internal fun playbackDataSpec(entry: MediaEntry): DataSpec = DataSpec.Builder()
+    .setUri(playbackUrl(entry))
+    .build()
+
+internal fun playbackQueueMatches(existing: List<MediaEntry>, requested: List<MediaEntry>): Boolean =
+    existing.size == requested.size && existing.zip(requested).all { (previous, next) ->
+        previous.id == next.id && previous.playUrl == next.playUrl && mediaMimeType(previous) == mediaMimeType(next)
+    }
+
+internal fun playbackHttpClient(
+    sessionCookie: () -> String?,
+    backendUrl: HttpUrl = MediaApi.BASE_URL.toHttpUrl(),
+): OkHttpClient = OkHttpClient.Builder()
+    .connectTimeout(12, TimeUnit.SECONDS)
+    .readTimeout(30, TimeUnit.SECONDS)
+    .followRedirects(true)
+    .followSslRedirects(true)
+    .addNetworkInterceptor { chain ->
+        // Network interceptors run again for every redirect and HLS resource request.
+        val request = chain.request()
+        val sameOrigin = request.url.scheme == backendUrl.scheme &&
+            request.url.host == backendUrl.host && request.url.port == backendUrl.port
+        chain.proceed(request.newBuilder().apply {
+            removeHeader("Cookie")
+            if (sameOrigin) sessionCookie()?.takeUnless(String::isBlank)?.let { header("Cookie", it) }
+        }.build())
+    }
+    .build()
+
 class PlaybackEngine(context: Context, private val api: MediaApi) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -103,14 +161,14 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     private var activeCacheWriter: CacheWriter? = null
     private var redirectRetryMediaId: Long? = null
     private val playbackIdentity = PlaybackIdentity()
+    private val playbackError = PlaybackErrorState()
     private var onPlaybackEnded: ((PlaybackEndedEvent) -> Unit)? = null
     private var onMediaTransition: ((MediaEntry) -> Unit)? = null
 
+    private val playbackPreferences = PlaybackPreferences(context.applicationContext)
+    private val httpClient = playbackHttpClient({ playbackPreferences.sessionCookie })
     private val upstreamFactory = ResolvingDataSource.Factory(
-        DefaultHttpDataSource.Factory()
-            .setConnectTimeoutMs(12_000)
-            .setReadTimeoutMs(30_000)
-            .setAllowCrossProtocolRedirects(false),
+        OkHttpDataSource.Factory(httpClient),
     ) { dataSpec -> resolveDataSpec(dataSpec) }
 
     val cacheDataSourceFactory: CacheDataSource.Factory = CacheDataSource.Factory()
@@ -119,7 +177,9 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         .setUpstreamDataSourceFactory(upstreamFactory)
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
-    val player: ExoPlayer = ExoPlayer.Builder(context)
+    val player: ExoPlayer = ExoPlayer.Builder(
+        context, DefaultRenderersFactory(context).setEnableDecoderFallback(true),
+    )
         .setMediaSourceFactory(DefaultMediaSourceFactory(cacheDataSourceFactory))
         .setWakeMode(C.WAKE_MODE_NETWORK)
         .setMaxSeekToPreviousPositionMs(Long.MAX_VALUE)
@@ -136,6 +196,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         player.addListener(
             object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) playbackError.clear()
                     publish()
                     if (playbackState == Player.STATE_ENDED && player.playbackState == Player.STATE_ENDED) {
                         playbackIdentity.endedEvent()?.let { onPlaybackEnded?.invoke(it) }
@@ -151,7 +212,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
                         ?.toLongOrNull()
                         ?.let(queueEntries::get)
                         ?: return
-                    if (currentEntry?.id == entry.id) {
+                    if (currentEntry == entry) {
                         publish()
                         return
                     }
@@ -182,20 +243,22 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         autoPlay: Boolean = true,
         queue: List<MediaEntry> = listOf(entry),
     ): Boolean {
+        playbackError.clear()
         val normalizedQueue = normalizeQueue(entry, queue)
         val queueIds = normalizedQueue.map(MediaEntry::id)
-        val existingQueueIds = queueEntries.keys.toList()
-        if (queueIds == existingQueueIds && player.mediaItemCount == queueIds.size) {
+        if (playbackQueueMatches(queueEntries.values.toList(), normalizedQueue) && player.mediaItemCount == queueIds.size) {
             return runCatching {
+                normalizedQueue.forEach { queueEntries[it.id] = it }
                 val targetIndex = normalizedQueue.indexOfFirst { it.id == entry.id }
                 val changed = currentEntry?.id != entry.id || player.currentMediaItemIndex != targetIndex
+                currentEntry = entry
                 if (changed) {
                     playbackIdentity.activate(entry.id)
                     redirectRetryMediaId = null
-                    currentEntry = entry
                     player.seekTo(targetIndex, resumePositionMs.coerceAtLeast(0L))
                     onMediaTransition?.invoke(entry)
                 }
+                if (player.playerError != null) player.prepare()
                 if (autoPlay) player.play() else player.pause()
                 publish()
             }.onFailure {
@@ -232,12 +295,18 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun togglePlayback() {
         runCatching {
-            if (player.playWhenReady) player.pause() else player.play()
+            if (player.playerError != null) {
+                playbackError.clear()
+                player.prepare()
+                player.play()
+            } else if (player.playWhenReady) player.pause() else player.play()
         }.onFailure { logs.error("player_toggle_failed", "media=${currentEntry?.id}", it) }
     }
 
     fun restart() {
+        playbackError.clear()
         currentEntry?.id?.let(playbackIdentity::activate)
+        if (player.playerError != null) player.prepare()
         player.seekTo(0L)
         player.play()
         publish()
@@ -295,6 +364,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     }
 
     fun stop() {
+        playbackError.clear()
         currentEntry = null
         queueEntries.clear()
         playbackIdentity.invalidateThen {
@@ -321,7 +391,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
                 runCatching { resolvePlayEntry(entry) }
                     .onFailure { logs.info("player_redirect_prewarm_failed", "media=${entry.id}") }
             }
-            candidates.take(2).filterNot(MediaEntry::isHls).forEach { entry ->
+            candidates.take(2).filterNot { mediaMimeType(it) == MimeTypes.APPLICATION_M3U8 }.forEach { entry ->
                 ensureActive()
                 runCatching { cacheProgressive(surface, entry, generation) }
             }
@@ -338,7 +408,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     fun cachedBytes(entry: MediaEntry): Long {
         val length = entry.size.takeIf { it > 0L } ?: return 0L
-        return cache.getCachedBytes("media:${entry.id}", 0L, length)
+        return cache.getCachedBytes(cacheKeyFactory.buildCacheKey(playbackDataSpec(entry)), 0L, length)
     }
 
     fun currentMedia(): MediaEntry? = currentEntry
@@ -366,9 +436,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             surface == MediaSurface.MOVIE -> MOVIE_PREFIX_BYTES
             else -> LONG_PREFIX_BYTES
         }
-        val dataSpec = DataSpec.Builder()
-            .setUri(api.absoluteUrl(entry.playUrl))
-            .setKey("media:${entry.id}")
+        val dataSpec = playbackDataSpec(entry).buildUpon()
             .setPosition(0L)
             .setLength(target)
             .build()
@@ -389,10 +457,13 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     @Throws(IOException::class)
     private fun resolveDataSpec(dataSpec: DataSpec): DataSpec {
         val uri = dataSpec.uri
-        if (!uri.host.equals("short.deepfuck.you", ignoreCase = true)) return dataSpec
+        if (!uri.scheme.equals("https", ignoreCase = true) ||
+            !uri.host.equals("short.deepfuck.you", ignoreCase = true) ||
+            uri.port !in setOf(-1, 443) || uri.userInfo != null
+        ) return dataSpec
         val match = PLAY_PATH.matchEntire(uri.path.orEmpty()) ?: return dataSpec
-        val mediaId = match.groupValues[1].toLong()
-        val cacheKey = "media:$mediaId"
+        val mediaId = match.groupValues[1].toLongOrNull() ?: return dataSpec
+        val cacheKey = cacheKeyFactory.buildCacheKey(dataSpec)
         val forceRefresh = forceRefreshMediaIds.remove(mediaId)
         if (forceRefresh) resolvedPlayUrls.invalidate(cacheKey)
         val target = if (forceRefresh) {
@@ -405,17 +476,26 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
     }
 
     private fun resolvePlayEntry(entry: MediaEntry) {
-        resolveDataSpec(DataSpec(Uri.parse(api.absoluteUrl(entry.playUrl))))
+        resolveDataSpec(playbackDataSpec(entry))
     }
 
     private fun retryWithFreshRedirect(error: PlaybackException): Boolean {
-        val mediaId = currentEntry?.id ?: return false
+        val entry = currentEntry ?: return false
+        val dataSpec = playbackDataSpec(entry)
+        val uri = dataSpec.uri
+        if (!uri.scheme.equals("https", ignoreCase = true) ||
+            !uri.host.equals("short.deepfuck.you", ignoreCase = true) ||
+            uri.port !in setOf(-1, 443) || uri.userInfo != null
+        ) return false
+        val mediaId = PLAY_PATH.matchEntire(uri.path.orEmpty())?.groupValues?.get(1)?.toLongOrNull()
+            ?: return false
         if (redirectRetryMediaId == mediaId || !error.isRetryableRedirectFailure()) return false
         redirectRetryMediaId = mediaId
-        resolvedPlayUrls.invalidate("media:$mediaId")
+        resolvedPlayUrls.invalidate(cacheKeyFactory.buildCacheKey(dataSpec))
         forceRefreshMediaIds.add(mediaId)
         logs.info("player_redirect_retry", "media=$mediaId code=${error.errorCodeName}")
         val resumePlayback = player.playWhenReady
+        playbackError.clear()
         player.prepare()
         player.playWhenReady = resumePlayback
         return true
@@ -423,12 +503,13 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
 
     private fun normalizeQueue(entry: MediaEntry, queue: List<MediaEntry>): List<MediaEntry> {
         val distinct = queue.distinctBy(MediaEntry::id)
-        return if (distinct.any { it.id == entry.id }) distinct else listOf(entry) + distinct
+        return if (distinct.any { it.id == entry.id }) distinct.map { if (it.id == entry.id) entry else it }
+        else listOf(entry) + distinct
     }
 
     private fun mediaItem(entry: MediaEntry): MediaItem = MediaItem.Builder()
         .setMediaId(entry.id.toString())
-        .setUri(api.absoluteUrl(entry.playUrl))
+        .setUri(playbackUrl(entry))
         .setMediaMetadata(
             MediaMetadata.Builder()
                 .setTitle(entry.title)
@@ -439,6 +520,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
         .build()
 
     private fun publish(error: String? = null) {
+        playbackError.record(error)
         val entry = currentEntry
         val duration = player.duration.takeIf { it != C.TIME_UNSET && it > 0L } ?: 0L
         mutableSnapshot.value = PlayerSnapshot(
@@ -455,7 +537,7 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             positionMs = player.currentPosition.coerceAtLeast(0L),
             durationMs = duration,
             bufferedMs = player.bufferedPosition.coerceAtLeast(0L),
-            error = error,
+            error = playbackError.error,
         )
     }
 
