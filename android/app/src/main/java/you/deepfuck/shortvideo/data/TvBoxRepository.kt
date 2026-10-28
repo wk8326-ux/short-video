@@ -23,6 +23,7 @@ class TvBoxRepository(
         .connectTimeout(12, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(30, TimeUnit.SECONDS).build(),
     private val nowMs: () -> Long = System::currentTimeMillis,
+    private val spiders: TvBoxSpiderTransport = TvBoxSpiderRuntime(context),
 ) {
     private val store = TvBoxStore(context)
     private val appContext = context.applicationContext
@@ -39,7 +40,7 @@ class TvBoxRepository(
 
     fun config(): TvBoxConfig? = store.config()
 
-    /** URL or plain/Base64/hex content. Validation succeeds before replacing the saved config. */
+    /** Validate first, then atomically add/update compatible sites without removing existing ones. */
     fun importConfig(input: String): TvBoxConfig {
         val text = input.trim()
         val url = text.toHttpUrlOrNull()
@@ -48,8 +49,7 @@ class TvBoxRepository(
         ensureRequestCurrent(requestEpoch)
         val parsed = TvBoxConfigCodec.decode(payload, url?.toString())
         ensureRequestCurrent(requestEpoch)
-        store.saveConfig(parsed)
-        return parsed
+        return store.updateConfig { previous -> TvBoxConfigCodec.merge(previous, parsed) }
     }
 
     fun sites(): List<TvBoxSite> = config()?.sites.orEmpty()
@@ -61,32 +61,30 @@ class TvBoxRepository(
 
     fun refreshConfig(): TvBoxConfig {
         val previous = config() ?: throw TvBoxConfigException("文本配置没有订阅地址，请重新导入或恢复默认配置")
-        val origin = previous.origin
-            ?: throw TvBoxConfigException("文本配置没有订阅地址，请重新导入或恢复默认配置")
+        val origins = previous.origins.ifEmpty { listOfNotNull(previous.origin) }
+        if (origins.isEmpty()) throw TvBoxConfigException("文本配置没有订阅地址，请重新导入或恢复默认配置")
         val requestEpoch = requestGeneration.get()
-        val text = if (origin == "asset:tvbox.json") {
-            bundledText() ?: throw TvBoxConfigException("应用未包含默认 tvbox.json 配置")
-        } else {
-            download(origin, TvBoxConfigCodec.MAX_CONFIG_CHARS, requestEpoch)
+        val refreshed = origins.map { origin ->
+            val text = if (origin == "asset:tvbox.json") {
+                bundledText() ?: throw TvBoxConfigException("应用未包含默认 tvbox.json 配置")
+            } else {
+                download(origin, TvBoxConfigCodec.MAX_CONFIG_CHARS, requestEpoch)
+            }
+            ensureRequestCurrent(requestEpoch)
+            TvBoxConfigCodec.decode(text, origin)
         }
         ensureRequestCurrent(requestEpoch)
-        val refreshed = TvBoxConfigCodec.decode(text, origin)
-        val previousById = previous.sites.associateBy { it.id }
-        val refreshedById = refreshed.sites.associateBy { it.id }
-        val orderedSites = buildList {
-            previous.sites.forEach { old ->
-                refreshedById[old.id]?.let { updated -> add(updated.copy(enabled = old.enabled)) }
-            }
-            refreshed.sites.forEach { updated ->
-                if (updated.id !in previousById) add(updated)
-            }
-        }
-        ensureRequestCurrent(requestEpoch)
-        return refreshed.copy(sites = orderedSites).also(store::saveConfig)
+        return store.updateConfig { current -> refreshed.fold(current) { merged, next ->
+            TvBoxConfigCodec.merge(merged, next, restoreRemoved = false)
+        } }
     }
 
     fun removeSource(id: String) {
-        store.updateConfig { it.copy(sites = it.sites.filterNot { source -> source.id == id }) }
+        store.updateConfig { config -> config.copy(
+            sites = config.sites.filterNot { source -> source.id == id },
+            removedSites = (config.removedSites + config.sites.filter { it.id == id }
+                .map(TvBoxConfigCodec::fingerprint)).distinct(),
+        ) }
     }
 
     fun setSourceEnabled(id: String, enabled: Boolean) {
@@ -109,6 +107,7 @@ class TvBoxRepository(
 
     /** In-flight requests cannot repopulate caches belonging to an earlier generation. */
     fun clearCache() {
+        spiders.clearCache()
         store.clearCache()
         movieSources.clear()
     }
@@ -117,7 +116,10 @@ class TvBoxRepository(
     fun cancelPendingRequests() {
         requestGeneration.incrementAndGet()
         pendingCalls.toList().forEach(Call::cancel)
+        spiders.cancel()
     }
+
+    fun close() { cancelPendingRequests(); spiders.close() }
 
     /** No requests: counts are -1 until an unfiltered CMS catalog response supplies a total. */
     fun sourceSummaries(): List<MovieSource> = sites().filter { it.enabled }.map { summary(it, store.state(it.id)) }
@@ -205,12 +207,16 @@ class TvBoxRepository(
 
     /** Pass the selected line and episode explicitly; parser/spider URLs are never sent to a backend. */
     fun resolvePlayback(detail: TvBoxDetail, lineId: String, episodeId: Long): MediaEntry {
-        site(detail.sourceId)
+        val site = site(detail.sourceId)
         val line = detail.playLines.firstOrNull { it.id == lineId }
             ?: throw TvBoxPlaybackException("所选播放线路不存在")
         val episode = line.episodes.firstOrNull { it.id == episodeId }
             ?: throw TvBoxPlaybackException("线路「${line.name}」中没有所选剧集")
-        val url = episode.url.toHttpUrlOrNull()
+        val resolved = if (site.type == 3) spiders.player(site, line.name, episode.url) else null
+        val rawUrl = resolved?.optString("url")?.takeIf { it.isNotBlank() } ?: episode.url
+        val parse = resolved?.optInt("parse", 0) ?: 0
+        if (parse != 0) throw TvBoxPlaybackException("此线路需要网页嗅探，暂无法直接播放，请切换线路")
+        val url = rawUrl.toHttpUrlOrNull()
             ?: throw TvBoxPlaybackException("剧集「${episode.name}」需要不支持的解析器，仅支持原始 HTTP(S) 播放地址")
         return MediaEntry(
             id = episode.id,
@@ -220,7 +226,8 @@ class TvBoxRepository(
             durationSeconds = null,
             playUrl = url.toString(),
             posterUrl = detail.movie.posterUrl,
-            format = format(url.encodedPath),
+            format = resolved?.optString("format")?.takeIf { it.isNotBlank() } ?: format(url.encodedPath),
+            requestHeaders = tvBoxHeaders(resolved?.opt("header")),
         )
     }
 
@@ -517,7 +524,9 @@ class TvBoxRepository(
     ): Payload {
         val requestEpoch = requestGeneration.get()
         val generation = store.generation()
-        val url = site.api.toHttpUrl().newBuilder().apply {
+        val url = if (site.type == 3) "spider://${tvBoxDigest(site.id)}/" +
+            params.entries.sortedBy { it.key }.joinToString("&") { "${it.key}=${java.net.URLEncoder.encode(it.value, "UTF-8")}" }
+        else site.api.toHttpUrl().newBuilder().apply {
             listOf("ac", "pg", "t", "wd", "ids").forEach(::removeAllQueryParameters)
             params.forEach { (key, value) -> addQueryParameter(key, value) }
         }.build().toString()
@@ -533,7 +542,7 @@ class TvBoxRepository(
         val ticket = store.beginResponse(site.id, url, generation, cached?.optLong("ticket") ?: 0L)
             ?: throw CancellationException("TVBox request invalidated before it started")
         val text = try {
-            download(url, MAX_RESPONSE_CHARS, requestEpoch)
+            if (site.type == 3) spiders.request(site, params) else download(url, MAX_RESPONSE_CHARS, requestEpoch)
         } catch (error: IOException) {
             val canFallback = error !is TvBoxHttpException || error.statusCode >= 500 || error.statusCode in setOf(408, 429)
             if (!isDetailLookup && canFallback && cachedValue != null && age in 0..CACHE_STALE_MS) {
@@ -606,7 +615,7 @@ class TvBoxRepository(
     }
 
     private fun requireArray(value: JSONObject, key: String): JSONArray = value.optJSONArray(key)
-        ?: throw TvBoxProtocolException("CMS response is missing '$key' array; only standard JSON CMS type 1 is supported")
+        ?: throw TvBoxProtocolException("片源响应缺少 '$key' 数组")
 
     private fun count(value: JSONObject, key: String): Int = value.text(key).toIntOrNull()?.takeIf { it >= 0 } ?: -1
 

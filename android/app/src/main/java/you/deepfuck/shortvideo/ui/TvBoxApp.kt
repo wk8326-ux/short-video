@@ -648,7 +648,7 @@ private fun TvBoxSources(
                 ) {
                     Icon(Icons.Outlined.Add, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("导入配置")
+                    Text("添加片源")
                 }
                 GlassIconButton(
                     label = "从文件导入",
@@ -659,6 +659,9 @@ private fun TvBoxSources(
                     Icon(Icons.Outlined.Refresh, contentDescription = null)
                 }
             }
+            Text("导入后增量添加，已有片源保留，重复片源自动合并。",
+                modifier = Modifier.padding(top = 8.dp), color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall)
             if (state.configLocation.isNotBlank()) {
                 Text(
                     state.configLocation,

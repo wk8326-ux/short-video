@@ -18,7 +18,13 @@ internal class TvBoxStore(context: Context) {
         read(File(root, "config.json"))?.let { value ->
             val origin = value.optString("origin").takeUnless { it == "null" || it.isBlank() }
             if (value.optJSONArray("sites")?.length() == 0) {
-                TvBoxConfig(emptyList(), origin, TvBoxConfigCodec.savedUnsupportedSites(value))
+                val origins = value.optJSONArray("origins")?.let { entries ->
+                    (0 until entries.length()).map { entries.getString(it) }
+                } ?: listOfNotNull(origin)
+                val removed = value.optJSONArray("removedSites")?.let { entries ->
+                    (0 until entries.length()).map { entries.getString(it) }
+                }.orEmpty()
+                TvBoxConfig(emptyList(), origin, TvBoxConfigCodec.savedUnsupportedSites(value), origins, removed)
             }
             else TvBoxConfigCodec.decode(value.toString(), origin)
         }

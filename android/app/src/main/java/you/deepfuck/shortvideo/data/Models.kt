@@ -76,6 +76,7 @@ data class MediaEntry(
     val author: String? = null,
     val format: String? = null,
     val kind: String = "video",
+    val requestHeaders: Map<String, String> = emptyMap(),
 ) {
     val isHls: Boolean get() = format.equals("m3u8", ignoreCase = true)
     val isAudio: Boolean get() = kind == "audio" && !isHls
@@ -91,6 +92,7 @@ data class MediaEntry(
         .put("author", author)
         .put("format", format)
         .put("kind", kind)
+        .put("requestHeaders", JSONObject(requestHeaders))
 
     companion object {
         fun fromJson(value: JSONObject): MediaEntry = MediaEntry(
@@ -104,6 +106,9 @@ data class MediaEntry(
             author = value.optNullableString("author"),
             format = value.optNullableString("format"),
             kind = value.optString("kind", "video"),
+            requestHeaders = value.optJSONObject("requestHeaders")?.let { headers ->
+                headers.keys().asSequence().associateWith { headers.getString(it) }
+            }.orEmpty(),
         )
     }
 }

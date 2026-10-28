@@ -67,25 +67,45 @@ class TvBoxDeviceTest {
         assertTrue(failures.joinToString("\n"), failures.isEmpty())
     }
 
-    @Test
-    fun importBrowseDecodeSeekFavoriteAndClearCacheWithoutBackend() {
+    @Test fun javaScriptSpiderBrowsesSearchesAndPlays() = exerciseFixture("js")
+    @Test fun dexJarSpiderBrowsesSearchesAndPlays() = exerciseFixture("jar")
+    @Test fun javaScriptProxyPlaylistPlays() = exerciseFixture("js-proxy")
+    @Test fun javaScriptWebSnifferFindsAndPlaysMedia() = exerciseFixture("js-sniff")
+    @Test fun dexJarLocalProxyPlaylistPlays() = exerciseFixture("jar-proxy")
+    @Test fun globalJavaScriptSpiderPlays() = exerciseFixture("global-js")
+    @Test fun drpyRuntimeLoadsRelativeRuleAndPlays() {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("drpy") == "true")
+        exerciseFixture("drpy")
+    }
+    @Test fun importBrowseDecodeSeekFavoriteAndClearCacheWithoutBackend() = exerciseFixture("cms")
+
+    private fun exerciseFixture(kind: String) {
         val url = InstrumentationRegistry.getArguments().getString("cmsConfig")
             ?: "http://127.0.0.1:18765/config.json"
         val repository = TvBoxRepository(app)
         val original = repository.config()
-        repository.importConfig(url)
+        val fixtureUrl = if (kind == "cms") url else url.substringBeforeLast('/') + "/$kind-config.json"
+        repository.sites().forEach { repository.removeSource(it.id) }
+        val selected = repository.importConfig(fixtureUrl).sites.single()
+        repository.saveSettings(repository.settings().copy(selectedSourceId = selected.id))
         try {
+            val search = repository.search(selected.id, "test")
+            assertEquals(1, search.items.size)
+            assertEquals(selected.id, search.sourceId)
             ActivityScenario.launch(TvBoxActivity::class.java).use { scenario ->
                 lateinit var model: TvBoxMovieViewModel
                 scenario.onActivity { model = ViewModelProvider(it)[TvBoxMovieViewModel::class.java] }
                 await("category preview") {
                     model.state.value.catalog.movieGroups.any { it.items.isNotEmpty() }
                 }
-                assertEquals(1, model.state.value.catalog.movieTotal)
+                if (kind != "drpy") assertEquals(1, model.state.value.catalog.movieTotal)
                 assertEquals(1, model.state.value.catalog.movieSources.single().libraryCount)
                 val movie = model.state.value.catalog.movieGroups.first().items.first()
                 onMain { model.selectMovie(movie) }
-                await("fresh detail") { model.state.value.detail != null }
+                await("fresh detail") {
+                    model.state.value.catalog.movieError?.let { throw AssertionError("Detail failed: $it") }
+                    model.state.value.detail != null
+                }
                 assertTrue(model.state.value.detail!!.playLines.single().episodes.isNotEmpty())
                 onMain { model.play() }
                 await("rendered HLS frames", 35_000) {
@@ -98,6 +118,8 @@ class TvBoxDeviceTest {
                     }
                 }
                 onMain { model.playback.pause() }
+                await("paused player") { onMain { !model.playback.player.isPlaying && !model.playback.player.playWhenReady } }
+                Thread.sleep(150)
                 val pausedAt = onMain { model.playback.player.currentPosition }
                 Thread.sleep(350)
                 assertTrue(kotlin.math.abs(onMain { model.playback.player.currentPosition } - pausedAt) < 200)
@@ -121,13 +143,15 @@ class TvBoxDeviceTest {
                 await("cleared and reloaded cache") { !model.state.value.importing && !model.state.value.refreshing }
                 assertTrue(repository.favorites().any { it.id == movie.id })
                 assertTrue((repository.progress(movie.id)?.positionMs ?: 0) > 6_000)
-                assertEquals(1, model.state.value.catalog.movieTotal)
+                if (kind != "drpy") assertEquals(1, model.state.value.catalog.movieTotal)
                 val before = repository.config()
                 onMain { model.importConfig("{broken") }
                 await("invalid import feedback") { model.state.value.importError != null }
                 assertEquals(before, repository.config())
+                println("TVBOX_TYPE3 $kind PASS browse=true search=true detail=true rendered=true seek=true progress=true")
             }
         } finally {
+            repository.close()
             if (original?.origin == "asset:tvbox.json") repository.useBundledConfig()
         }
     }

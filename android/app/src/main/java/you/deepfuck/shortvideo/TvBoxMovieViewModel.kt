@@ -148,7 +148,7 @@ class TvBoxMovieViewModel internal constructor(
             sites = config?.sites.orEmpty(),
             unsupportedSites = config?.unsupportedSites.orEmpty(),
             disabledSourceIds = config?.sites.orEmpty().filterNot { it.enabled }.map { it.id }.toSet(),
-            configLocation = config?.origin.orEmpty(),
+            configLocation = config?.origins.orEmpty().joinToString("\n"),
             catalog = state.catalog.copy(movieSources = summaries, selectedMovieSourceId = selected,
                 movieTotal = summaries.firstOrNull { it.id == selected }?.total ?: -1,
                 movieFavorites = favorites, movieFavoritesTotal = favorites.size, recentMovies = recent),
@@ -490,7 +490,7 @@ class TvBoxMovieViewModel internal constructor(
         }
     }
 
-    fun importConfig(input: String) = configure { repository.importConfig(input); Unit }
+    fun importConfig(input: String) = configure { importNotice(input) }
     fun refreshConfig() = configure { repository.refreshConfig(); Unit }
     fun useBundledConfig() = configure { repository.useBundledConfig(); Unit }
     fun removeSource(id: String) = configure { repository.removeSource(id) }
@@ -511,11 +511,17 @@ class TvBoxMovieViewModel internal constructor(
             }
             result.toString()
         }
-        repository.importConfig(text)
-        Unit
+        importNotice(text)
     }
 
-    private fun configure(action: () -> Unit) {
+    private fun importNotice(input: String): String {
+        val before = repository.sites().size
+        val merged = repository.importConfig(input)
+        val added = merged.sites.size - before
+        return if (added > 0) "新增 $added 个片源，共 ${merged.sites.size} 个" else "配置已合并，无重复片源，共 ${merged.sites.size} 个"
+    }
+
+    private fun configure(action: () -> Any?) {
         if (mutableState.value.importing) return
         stopPlayback()
         cancelLoads()
@@ -525,10 +531,10 @@ class TvBoxMovieViewModel internal constructor(
                 movieDetailLoading = false, openMovieGroupLoading = false)) }
         viewModelScope.launch {
             try {
-                localMutation.withLock { io(action) }
+                val result = localMutation.withLock { io(action) }
                 syncSources()
                 mutableState.update { it.copy(importing = false, detail = null, searchItems = emptyList(),
-                    searchNextPage = null, searchLoading = false, notice = "片源已更新",
+                    searchNextPage = null, searchLoading = false, notice = result as? String ?: "片源已更新",
                     catalog = it.catalog.copy(movieGroups = emptyList(), selectedMovie = null, movieError = null,
                         openMovieGroupId = null, openMovieGroupItems = emptyList(), openMovieGroupLoading = false)) }
                 refresh()
@@ -555,13 +561,14 @@ class TvBoxMovieViewModel internal constructor(
         is java.io.InterruptedIOException -> "片源请求超时，请重试或切换片源"
         is java.net.UnknownHostException, is java.net.ConnectException -> "无法连接片源，请检查网络或切换片源"
         is java.net.SocketException -> "片源连接中断，请重试或切换片源"
+        is javax.net.ssl.SSLHandshakeException -> "片源 HTTPS 证书验证失败，可能已过期，请联系配置提供方或从文件导入"
         is TvBoxConfigException -> "配置无效：${error.message}"
         is TvBoxPlaybackException -> "播放失败：${error.message}"
         else -> error.message ?: "加载失败，请重试"
     }
 
     override fun onCleared() {
-        repository.cancelPendingRequests()
+        repository.close()
         imageLoader.shutdown()
         super.onCleared()
     }

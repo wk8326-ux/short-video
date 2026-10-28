@@ -26,6 +26,8 @@ The user resumes media at the saved position, sees no recent repeats in shuffle 
 
 # Learned constraints
 
+- **2026-10-27** - 导入 TVBox JSON 必须幂等增量合并，保留已有片源、顺序、启停和所选片源；不同配置中的片源统一在左上角切换，由用户单独删除。支持 type 3 的爬虫和脚本站点。
+
 - **2026-10-26** - APK 默认进入独立 TVBox 电影流程，配置、分类、搜索、详情与播放均直接访问 CMS/CDN，不依赖业务服务器。保留其他板块入口，AList 后续处理。此约束优先于旧的默认短视频入口和强制服务器更新要求。
 
 - **2026-08-21** - Keep movie source scanning and TMDB metadata scraping as two separate, manual, source-scoped actions. *Why:* Large OpenList libraries change infrequently; scanning or scraping one source must never refresh another library or start playback.

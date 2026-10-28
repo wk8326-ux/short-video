@@ -10,12 +10,18 @@ data class TvBoxSite(
     val api: String,
     val searchable: Boolean = true,
     val enabled: Boolean = true,
+    val type: Int = 1,
+    val spider: String? = null,
+    val ext: String = "",
+    val origin: String? = null,
 )
 
 data class TvBoxConfig(
     val sites: List<TvBoxSite>,
     val origin: String? = null,
     val unsupportedSites: List<String> = emptyList(),
+    val origins: List<String> = listOfNotNull(origin),
+    val removedSites: List<String> = emptyList(),
 )
 
 /** Identity and metadata retained by a displayed movie independently of the evictable catalog cache. */

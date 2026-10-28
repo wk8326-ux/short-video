@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node build.mjs" },
+  "dependencies": { "cheerio": "1.0.0", "crypto-js": "4.2.0", "jsonpath-plus": "10.3.0" },
+  "devDependencies": { "esbuild": "0.25.11" }
+}

@@ -118,11 +118,12 @@ internal fun playbackUrl(entry: MediaEntry): String {
 
 internal fun playbackDataSpec(entry: MediaEntry): DataSpec = DataSpec.Builder()
     .setUri(playbackUrl(entry))
+    .setHttpRequestHeaders(entry.requestHeaders)
     .build()
 
 internal fun playbackQueueMatches(existing: List<MediaEntry>, requested: List<MediaEntry>): Boolean =
     existing.size == requested.size && existing.zip(requested).all { (previous, next) ->
-        previous.id == next.id && previous.playUrl == next.playUrl && mediaMimeType(previous) == mediaMimeType(next)
+        previous.id == next.id && previous.playUrl == next.playUrl && previous.requestHeaders == next.requestHeaders && mediaMimeType(previous) == mediaMimeType(next)
     }
 
 internal fun playbackHttpClient(
@@ -141,6 +142,13 @@ internal fun playbackHttpClient(
         chain.proceed(request.newBuilder().apply {
             removeHeader("Cookie")
             if (sameOrigin) sessionCookie()?.takeUnless(String::isBlank)?.let { header("Cookie", it) }
+            else {
+                val original = chain.call().request().url
+                val fromBackend = original.scheme == backendUrl.scheme && original.host == backendUrl.host && original.port == backendUrl.port
+                if (!fromBackend) request.header("Cookie")?.split(';')?.map(String::trim)
+                    ?.filterNot { it.substringBefore('=').equals("short_session", true) }
+                    ?.filter(String::isNotBlank)?.joinToString("; ")?.takeIf(String::isNotBlank)?.let { header("Cookie", it) }
+            }
         }.build())
     }
     .build()
@@ -272,8 +280,16 @@ class PlaybackEngine(context: Context, private val api: MediaApi) {
             queueEntries.clear()
             normalizedQueue.forEach { queueEntries[it.id] = it }
             val startIndex = normalizedQueue.indexOfFirst { it.id == entry.id }
-            player.setMediaItems(
-                normalizedQueue.map(::mediaItem),
+            player.setMediaSources(
+                normalizedQueue.map { queued ->
+                    val factory = if (queued.requestHeaders.isEmpty()) cacheDataSourceFactory else CacheDataSource.Factory()
+                        .setCache(cache).setCacheKeyFactory(cacheKeyFactory)
+                        .setUpstreamDataSourceFactory(ResolvingDataSource.Factory(
+                            OkHttpDataSource.Factory(httpClient).setDefaultRequestProperties(queued.requestHeaders),
+                        ) { spec -> resolveDataSpec(spec) })
+                        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+                    DefaultMediaSourceFactory(factory).createMediaSource(mediaItem(queued))
+                },
                 startIndex,
                 resumePositionMs.coerceAtLeast(0L),
             )

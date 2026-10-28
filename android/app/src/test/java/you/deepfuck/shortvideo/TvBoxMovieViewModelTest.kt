@@ -117,6 +117,26 @@ class TvBoxMovieViewModelTest {
     private val firstCatalogMayContinue = CountDownLatch(1)
 
     @Test
+    fun addingConfigurationKeepsCurrentSourceAndExistingWallContent() {
+        installConfig("first", "second")
+        server.dispatcher = cmsDispatcher(mapOf("first" to "First movie", "second" to "Second movie", "third" to "Third movie"))
+        val model = createViewModel()
+        awaitState("initial catalog") { !it.refreshing && it.catalog.movieGroups.any { group -> group.items.isNotEmpty() } }
+        val selected = repository.sites().single { it.key == "second" }
+        model.selectSource(selected.id)
+        awaitState("selected source") { !it.refreshing && it.catalog.movieGroups.firstOrNull()?.items?.firstOrNull()?.title == "Second movie" }
+        val input = JSONObject().put("sites", JSONArray().put(JSONObject().put("key", "third").put("type", 1)
+            .put("api", server.url("/third/api").toString()))).toString()
+        repeat(2) {
+            model.importConfig(input)
+            awaitState("additive import") { !it.importing && !it.refreshing && it.sites.size == 3 &&
+                it.catalog.movieGroups.firstOrNull()?.items?.firstOrNull()?.title == "Second movie" }
+            assertEquals(selected.id, model.state.value.catalog.selectedMovieSourceId)
+            assertEquals(selected.id, repository.settings().selectedSourceId)
+        }
+    }
+
+    @Test
     fun playbackRetryReloadsTheSameEpisodeWithFreshUrl() {
         installConfig("first")
         val detailRequests = AtomicInteger()
@@ -153,6 +173,7 @@ class TvBoxMovieViewModelTest {
             }
         }
         repository = TvBoxRepository(context, okhttp3.OkHttpClient())
+        repository.sites().forEach { repository.removeSource(it.id) }
         repository.importConfig(JSONObject().put("sites", sites).toString())
         assertEquals(sources.toList(), repository.sites().map { it.name })
     }

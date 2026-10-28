@@ -142,6 +142,20 @@ class PlaybackTransportTest {
     }
 
     @Test
+    fun spiderCookiesAndHeadersAreSentWithoutTheBackendSession() {
+        server.enqueue(MockResponse().setBody("video"))
+        val entry = media(server.url("/movie.m3u8").toString()).copy(requestHeaders = mapOf(
+            "Referer" to "https://source.test/", "User-Agent" to "Spider", "Cookie" to "source_session=ok; short_session=private",
+        ))
+        assertEquals("video", read(playbackDataSpec(entry)).decodeToString())
+        val request = server.takeRequest()
+        assertEquals("source_session=ok", request.getHeader("Cookie"))
+        assertEquals("https://source.test/", request.getHeader("Referer"))
+        assertEquals("Spider", request.getHeader("User-Agent"))
+        assertFalse(playbackQueueMatches(listOf(entry), listOf(entry.copy(requestHeaders = emptyMap()))))
+    }
+
+    @Test
     fun rangedReadsSkipThePrefixWhenTheOriginReturns200() {
         server.enqueue(MockResponse().setBody("0123456789"))
         val spec = DataSpec.Builder().setUri(server.url("/movie.mp4").toString())

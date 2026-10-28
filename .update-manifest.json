@@ -1,8 +1,8 @@
 {
-  "versionCode": 217,
-  "versionName": "1.10.0",
-  "apkFile": "deepfuck-android-v1.10.0.apk",
-  "sha256": "f4dc61b010f1a3a513336c4112375871e48e62983ec35e087f8993e4b787469c",
-  "size": 4742516,
-  "notes": "电影板块支持独立 TVBox：内置五个片源，直接导入 JSON 和播放，无需业务服务器登录。增加分类进度、详情及播放重试、清缓存保留收藏与进度，修复片源切换和缓存淘汰问题。AList 后续处理。"
+  "versionCode": 218,
+  "versionName": "1.11.0",
+  "apkFile": "deepfuck-android-v1.11.0.apk",
+  "sha256": "79faccb3bdf2b05071191885740f9fe90d31d2b88837afa6d360763507acde4b",
+  "size": 5212456,
+  "notes": "新增 APK 本地 TVBox type 3 JAR、JavaScript 和 drpy2 支持，本地代理及网页嗅探。JSON 改为幂等增量导入，保留已有片源、顺序、启停和当前选择，可单独删除。播放不依赖本项目后端。插件兼容性受设备 ABI、接口与上游可用性限制，ARM 加密 JAR 尚待真机验证。AList 后续处理。"
 }

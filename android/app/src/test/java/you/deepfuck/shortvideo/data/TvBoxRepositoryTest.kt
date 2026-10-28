@@ -44,6 +44,7 @@ class TvBoxRepositoryTest {
         server = MockWebServer()
         server.start()
         repository = newRepository()
+        repository.sites().forEach { repository.removeSource(it.id) }
         repository.importConfig(configuration())
     }
 
@@ -252,7 +253,7 @@ class TvBoxRepositoryTest {
     @Test
     fun invalidConfigOrFailedSubscriptionNeverReplacesStoredConfig() {
         val previous = repository.config()
-        expectFailure<TvBoxConfigException> { repository.importConfig(configuration().replace("\"type\":1", "\"type\":3")) }
+        expectFailure<TvBoxConfigException> { repository.importConfig(configuration().replace("\"type\":1", "\"type\":4")) }
         assertEquals(previous, repository.config())
         enqueue(JSONObject().put("sites", JSONArray()))
         expectFailure<TvBoxConfigException> { repository.importConfig(server.url("/bad-config").toString()) }
@@ -277,7 +278,10 @@ class TvBoxRepositoryTest {
         restored.removeSource(sources[1].id)
         assertTrue(newRepository().sites().isEmpty())
         server.enqueue(MockResponse().setBody(configuration().replace("First", "Updated")))
-        assertEquals("Updated", restored.refreshConfig().sites.first().name)
+        assertTrue(restored.refreshConfig().sites.isEmpty())
+        server.enqueue(MockResponse().setBody(configuration().replace("First", "Updated")))
+        assertEquals("Updated", restored.importConfig(server.url("/subscription").toString()).sites.first().name)
+        assertEquals("/subscription", server.takeRequest().path)
         assertEquals("/subscription", server.takeRequest().path)
         assertEquals("/subscription", server.takeRequest().path)
     }
@@ -522,7 +526,7 @@ class TvBoxRepositoryTest {
         return displayed
     }
 
-    private fun newRepository() = TvBoxRepository(context, client) { clock }
+    private fun newRepository() = TvBoxRepository(context, client, nowMs = { clock })
 
     private fun configuration(): String = JSONObject().put("sites", JSONArray()
         .put(JSONObject().put("key", "first").put("name", "First").put("type", 1).put("api", server.url("/first/api")))
